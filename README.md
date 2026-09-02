@@ -1,49 +1,138 @@
+<div align="center">
+
+<br>
+
 # Penguin
 
-VPN-клиент на Rust. Первый протокол — Hysteria 2, дальше добавляются другие,
-не трогая уже написанное.
+**VPN-клиент с раздельным тоннелированием: по приложениям, по адресам и по тому и другому сразу.**
 
-## Из чего собран
+[![Rust](https://img.shields.io/badge/Rust-1.88-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](#лицензия)
+[![Windows](https://img.shields.io/badge/Windows-x64-0078D6?logo=windows&logoColor=white)](crates/platform)
+
+<br>
+
+</div>
+
+---
+
+<br>
+
+## Стек
+
+<br>
+
+| Слой | Чем сделано |
+|---|---|
+| **Язык** | ![Rust](https://img.shields.io/badge/Rust-1.88-000000?logo=rust&logoColor=white) ![Edition](https://img.shields.io/badge/edition-2024-000000?logo=rust&logoColor=white) |
+| **Протокол** | ![Hysteria 2](https://img.shields.io/badge/Hysteria%202-6f42c1) — QUIC с маскировкой под HTTP/3 |
+| **Транспорт** | ![quinn](https://img.shields.io/badge/quinn-1f6feb) ![rustls](https://img.shields.io/badge/rustls-1f6feb) ![h3](https://img.shields.io/badge/h3-1f6feb) |
+| **Сеть** | ![smoltcp](https://img.shields.io/badge/smoltcp-0a7c5a) ![wintun](https://img.shields.io/badge/wintun-0a7c5a) — свой стек TCP/UDP поверх TUN |
+| **DNS** | ![hickory-proto](https://img.shields.io/badge/hickory--proto-0a7c5a) — fake-IP, UDP / DoT / DoH |
+| **Асинхронность** | ![tokio](https://img.shields.io/badge/tokio-c04b2f) |
+| **Интерфейс** | ![iced](https://img.shields.io/badge/iced%200.12-4b8bbe) ![clap](https://img.shields.io/badge/clap-4b8bbe) — окно и терминал |
+| **Платформа** | ![Windows](https://img.shields.io/badge/Windows%20x64-0078D6?logo=windows&logoColor=white) — служба, WFP, таблица маршрутизации |
+
+<br>
+
+---
+
+<br>
+
+## Что он делает
+
+<br>
+
+Забирает трафик машины через TUN-адаптер, узнаёт для каждого соединения
+приложение-владельца и адрес назначения, а дальше по правилам решает:
+**в тоннель**, **напрямую** или **оборвать**.
+
+<br>
+
+- **Правила по владельцу соединения** — путь, имя или шаблон пути к `.exe`.
+  Владелец определяется по локальному порту средствами ОС: без своего драйвера,
+  без WinDivert и без подписанных callout'ов WFP.
+
+- **Правила по назначению** — домен, суффикс, подстрока, regex, CIDR, порт,
+  диапазон портов, GeoIP, GeoSite, вид трафика. Условия складываются в
+  `all` / `any` / `not`.
+
+- **Ответ на вопрос «почему это приложение пошло не туда»** — `rules explain`
+  показывает сработавшее правило и те, что сработали бы без него.
+
+- **Свой DNS** — fake-IP, кеш, hosts, апстримы UDP / DoT / DoH.
+
+- **Kill switch и доступ к локальной сети** — переключателями.
+
+- **Локальный SOCKS5 и HTTP-прокси** — без прав администратора и без драйвера.
+
+- **Окно, терминал и служба** — в одном исполняемом файле.
+
+<br>
+
+---
+
+<br>
+
+## Устройство
+
+<br>
+
+```
+приложение → penguin-tun → penguin-netstack → penguin-router → Tunnel / Direct / Block
+                              │                    ▲
+                              ├── penguin-process ─┤  кто владелец: порт → pid → путь
+                              ├── penguin-dns ─────┤  fake-IP → домен
+                              └── engine::sniff ───┘  SNI из первых байт
+```
+
+<br>
 
 | Каталог | Что там |
 |---|---|
-| `crates/` | инфраструктура клиента: транспорт, маршрутизация, демон, интерфейс |
+| `crates/` | инфраструктура клиента: транспорт, маршрутизация, DNS, демон, GUI, CLI |
 | `protocols/` | реализации протоколов, по крейту на протокол |
-| `vendor/rust-ui-kit` | UI-кит поверх `iced 0.12`, подключён submodule'ом |
+| `vendor/rust-ui-kit` | UI-кит поверх `iced`, подключён submodule'ом |
+
+<br>
+
+Протокол не знает ни про TUN, ни про правила, ни про GUI — он умеет только
+открыть соединение к адресу. Всё остальное описано контрактом в `penguin-proto`.
+
+<br>
+
+---
+
+<br>
 
 ## Сборка
 
-Репозиторий клонируется вместе с submodule'ом:
+<br>
 
 ```bash
 git clone --recurse-submodules git@github.com:Saviartache/penguin.git
 ```
 
-Уже склонированный без него чинится так:
-
-```bash
-git submodule update --init --recursive
-```
-
-Дальше:
-
 ```bash
 cargo build --workspace
 ```
 
-Кит в workspace **не входит** (`exclude` в корневом `Cargo.toml`) — он
-отдельный репозиторий со своими `rustfmt.toml`, `clippy.toml` и
-`scripts/check.sh`. Затянутый в наш workspace, он форматировался бы нашими
-правилами и падал бы на наших порогах: правки в чужом репозитории ради того,
-чтобы собрался наш. Проверяется он своим скриптом:
+<br>
 
-```bash
-cd vendor/rust-ui-kit && ./scripts/check.sh
-```
+Уже склонированный без submodule'а чинится через
+`git submodule update --init --recursive`. Кит в workspace не входит — он
+отдельный репозиторий со своими правилами и проверяется своим
+`vendor/rust-ui-kit/scripts/check.sh`.
 
-## Что уже работает
+<br>
 
-Без прав администратора и без драйвера:
+---
+
+<br>
+
+## Запуск
+
+<br>
 
 ```bash
 cargo run -p penguin-app -- doctor
@@ -53,31 +142,37 @@ cargo run -p penguin-app -- doctor
 cargo run -p penguin-app -- rules explain steamcontent.com:443 --process steam.exe
 ```
 
-`doctor` проверяет настройки, профили, правила и права; `rules explain`
-отвечает на вопрос, ради которого раздельное тоннелирование и затевалось, —
-**почему это приложение пошло не туда**, — и показывает не только сработавшее
-правило, но и те, что сработали бы без него.
+<br>
 
-Окно (`cargo run -p penguin-app`) поднимает и опускает тоннель, правит правила
-мышью, показывает скорость и журнал; тоннель за ним держит служба.
+`doctor` проверяет настройки, профили, правила и права. Окно поднимается через
+`cargo run -p penguin-app`, тоннель за ним держит служба. Все поля настроек с
+пояснениями — в [`assets/config.example.toml`](assets/config.example.toml).
 
-## Один файл, три роли
+<br>
 
-Пользователь получает `penguin.exe` и запускает его. Кем быть в этот раз,
-программа решает по аргументам (`crates/app`): без них — окно, с командой —
-терминал, с `--service` — служба.
+---
 
-Внутри это три процесса, и разделение не ради красоты. Тоннелю нужны права
-системы: TUN-адаптер, таблица маршрутизации и брандмауэр без них недоступны.
-Окну права не нужны и **вредны** — иначе весь `iced`, `wgpu` и драйвер
-видеокарты работали бы под системной учётной записью. Между процессами —
-канал управления (`crates/ipc`).
+<br>
 
-Права запрашиваются тогда, когда нужны, и не раньше. Окно при запуске
-спрашивает службу, отвечает ли она; если нет — запускает **себя же** с командой
-`service ensure` через UAC. Служба ставится с автозапуском, поэтому UAC
-появляется один раз, а не при каждом старте.
+## Документация
 
-## Дальше
+<br>
 
-- [`AGENTS.md`](AGENTS.md) — правила работы с репозиторием
+| Файл | О чём |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | путь одного соединения и граф зависимостей |
+| [`docs/split-tunneling.md`](docs/split-tunneling.md) | как определяется владелец соединения |
+| [`docs/protocols.md`](docs/protocols.md) | как добавить протокол |
+| [`AGENTS.md`](AGENTS.md) | правила работы с репозиторием |
+
+<br>
+
+---
+
+<br>
+
+## Лицензия
+
+MIT
+
+<br>
