@@ -1,0 +1,34 @@
+[package]
+name = "penguin-tun"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Виртуальный сетевой интерфейс"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+# Параметры адаптера читаются из общего файла настроек.
+penguin-config.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
+
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# `#[tokio::test]` требует макросов, которым в самом крейте места нет.
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[target.'cfg(windows)'.dependencies]
+wintun.workspace = true
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["ioctl", "net"] }

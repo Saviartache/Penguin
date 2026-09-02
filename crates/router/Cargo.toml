@@ -1,0 +1,33 @@
+[package]
+name = "penguin-router"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Решение о судьбе соединения: тоннель, напрямую или блокировка"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+penguin-match.workspace = true
+penguin-config.workspace = true
+# Правило по приложению сравнивает `ProcessIdentity`; сам поиск владельца
+# делает `penguin-process`, маршрутизатор только читает результат.
+penguin-process.workspace = true
+arc-swap.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+# Правила приходят из конфигурации; тесты собирают их из JSON-литералов.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+# Правила по странам. Пробрасывается в `penguin-match`, где и лежит база.
+geo = ["penguin-match/geo"]

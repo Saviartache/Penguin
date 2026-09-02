@@ -1,0 +1,31 @@
+[package]
+name = "penguin-match"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Чистые сопоставители правил маршрутизации"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+# Только ради нормализации пути (`identity::normalize_path`): запись правила и
+# путь, выданный системой, обязаны приводиться к одному виду одним и тем же
+# кодом, иначе они не совпадут.
+penguin-process.workspace = true
+ipnet.workspace = true
+aho-corasick.workspace = true
+regex.workspace = true
+globset.workspace = true
+serde.workspace = true
+maxminddb = { workspace = true, optional = true }
+
+[features]
+default = []
+# База GeoIP весит десятки мегабайт и не нужна тем, кто правил по странам
+# не заводит.
+geo = ["dep:maxminddb"]

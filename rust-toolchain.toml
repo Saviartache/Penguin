@@ -1,0 +1,5 @@
+# Версия общая с `vendor/rust-ui-kit` (edition 2024, rust-version 1.88).
+[toolchain]
+channel = "1.88"
+components = ["rustfmt", "clippy", "rust-src"]
+targets = ["x86_64-pc-windows-msvc"]

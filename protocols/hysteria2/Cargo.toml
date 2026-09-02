@@ -1,0 +1,50 @@
+[package]
+name = "penguin-hysteria2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Протокол Hysteria 2 поверх QUIC"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта и общих типов. Ни TUN, ни правил,
+# ни GUI он не видит — это и делает его заменяемым.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+
+quinn = { workspace = true, features = ["rustls", "runtime-tokio"] }
+quinn-proto.workspace = true
+rustls = { workspace = true, features = ["ring", "std"] }
+rustls-pki-types.workspace = true
+rustls-platform-verifier.workspace = true
+rustls-pemfile.workspace = true
+http.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
+
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+blake2.workspace = true
+sha2.workspace = true
+rand.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
+# разбирает их только этот крейт.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["obfs-salamander"]
+obfs-salamander = []
+# Gecko поверх Salamander: дробление длинных пакетов рукопожатия.
+obfs-gecko = ["obfs-salamander"]

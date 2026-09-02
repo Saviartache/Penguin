@@ -1,0 +1,38 @@
+[package]
+name = "penguin-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Главный файл Penguin"
+
+[lints]
+workspace = true
+
+# Имя файла, который получает пользователь. Один на все три роли: кем быть,
+# программа решает по своим аргументам.
+[[bin]]
+name = "penguin"
+path = "src/main.rs"
+
+[dependencies]
+penguin-config.workspace = true
+penguin-platform.workspace = true
+# Три роли одной программы. Крейт стоит выше всех и никем не подключается —
+# стрелки вверх отсюда невозможны по построению.
+penguin-cli.workspace = true
+penguin-daemon.workspace = true
+penguin-gui.workspace = true
+
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Только ради подключения к консоли родителя: повышение прав живёт в
+# `platform`, у которого это и есть работа.
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console"] }

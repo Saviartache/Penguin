@@ -1,0 +1,33 @@
+[package]
+name = "penguin-dns"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Разрешение имён и защита от утечек DNS"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+penguin-proto.workspace = true
+# Схема настроек DNS живёт в общем файле конфигурации.
+penguin-config.workspace = true
+async-trait.workspace = true
+hickory-proto.workspace = true
+rustls = { workspace = true, features = ["ring", "std"] }
+rustls-platform-verifier.workspace = true
+tokio-rustls = { workspace = true, features = ["ring"] }
+rand.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "sync", "time"] }
+parking_lot.workspace = true
+ipnet.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

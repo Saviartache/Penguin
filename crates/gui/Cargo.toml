@@ -1,0 +1,45 @@
+[package]
+name = "penguin-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Окно Penguin на rust-ui-kit"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+penguin-config.workspace = true
+penguin-ipc.workspace = true
+# Автозапуск интерфейса — запись в ветку текущего пользователя: делает её
+# сам интерфейс, демону она не нужна и прав на неё у него нет.
+penguin-platform.workspace = true
+# Кит подключён submodule'ом в vendor/rust-ui-kit; пакет `rust-ui-kit`,
+# библиотека `uikit` — оба имени заданы китом и не меняются.
+uikit.workspace = true
+# `iced` берётся напрямую только для типов, которые кит не переэкспортирует
+# (Application, Command, Subscription). Версия — общая с китом.
+# `wgpu` — обязателен, а не «по возможности». В workspace `iced` подключён с
+# `default-features = false` (так его просит кит), а `wgpu` входит как раз в
+# набор по умолчанию: без него остаётся только программный `tiny-skia`. Он
+# рисует окно частями по «повреждённым» областям и оставляет на экране прошлый
+# кадр прямоугольниками вокруг того, что изменилось, — те самые тени и
+# затемнения, которые видно при движении курсора.
+#
+# `fira-sans` намеренно не включён: он подменяет шрифт по умолчанию своим, а
+# системный (Segoe UI на Windows) для окна программы уместнее.
+iced = { workspace = true, features = ["tokio", "image", "advanced", "wgpu"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+# Разбор подсетей в правилах: `10.0.0.0/8` проверяется до сохранения.
+ipnet.workspace = true

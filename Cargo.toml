@@ -1,0 +1,175 @@
+# Penguin — VPN-клиент. Корень workspace.
+#
+# Правило раскладки, из которого следует всё остальное:
+#   crates/     — инфраструктура клиента (транспорт, маршрутизация, UI, демон);
+#   protocols/  — реализации VPN/прокси-протоколов, по крейту на протокол.
+#
+# Протокол ничего не знает про TUN, правила и GUI: он умеет только открыть
+# соединение к адресу. Всё, что делает его «подключаемым», описано контрактом
+# в `penguin-proto`, и добавление второго протокола не трогает ни строчки
+# существующего кода — см. `docs/protocols.md`.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/config",
+    "crates/proto",
+    "crates/match",
+    "crates/router",
+    "crates/process",
+    "crates/tun",
+    "crates/netstack",
+    "crates/inbound",
+    "crates/dns",
+    "crates/platform",
+    "crates/engine",
+    "crates/ipc",
+    "crates/daemon",
+    "crates/gui",
+    "crates/cli",
+    "crates/app",
+    "protocols/hysteria2",
+]
+
+# Кит — отдельный репозиторий, подключённый submodule'ом. Членом workspace он
+# быть не должен: у него свои `rustfmt.toml`, свой набор clippy-порогов и свой
+# `scripts/check.sh`. Затянутый в наш workspace, он форматировался бы нашими
+# правилами и падал бы на наших порогах — то есть мы бы правили чужой
+# репозиторий, чтобы собрался наш.
+exclude = ["vendor/rust-ui-kit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/Saviartache/penguin"
+authors = ["Saviartache"]
+
+# Версии живут здесь, а не в крейтах: два крейта не должны тянуть разные
+# минорные `quinn` или `rustls` — это молча даёт две несовместимые копии типов
+# в одном процессе. Точные патч-версии подбирает `cargo update` на Фазе 0.
+[workspace.dependencies]
+# --- внутренние ---
+penguin-core     = { path = "crates/core" }
+penguin-config   = { path = "crates/config" }
+penguin-proto    = { path = "crates/proto" }
+penguin-match    = { path = "crates/match" }
+penguin-router   = { path = "crates/router" }
+penguin-process  = { path = "crates/process" }
+penguin-tun      = { path = "crates/tun" }
+penguin-netstack = { path = "crates/netstack" }
+penguin-inbound  = { path = "crates/inbound" }
+penguin-dns      = { path = "crates/dns" }
+penguin-platform = { path = "crates/platform" }
+penguin-engine   = { path = "crates/engine" }
+penguin-ipc      = { path = "crates/ipc" }
+# Три роли одной программы. Подключает их только `crates/app` — исполняемый
+# файл, который и решает, кем ему быть в этот раз.
+penguin-daemon   = { path = "crates/daemon" }
+penguin-cli      = { path = "crates/cli" }
+penguin-gui      = { path = "crates/gui" }
+penguin-hysteria2 = { path = "protocols/hysteria2" }
+
+# --- UI ---
+# Пакет `rust-ui-kit`, библиотека `uikit` — имена заданы китом и не меняются.
+uikit = { package = "rust-ui-kit", path = "vendor/rust-ui-kit" }
+# Версия `iced` общая с китом (AGENTS.md кита, правило 6.4): апгрейд —
+# отдельное согласованное изменение сразу во всех потребителях.
+iced = { version = "0.12", default-features = false }
+
+# --- асинхронность ---
+tokio = { version = "1", default-features = false }
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+
+# --- транспорт ---
+quinn = { version = "0.11", default-features = false }
+# Прямая зависимость нужна ради `RttEstimator`: он входит в сигнатуру трейта
+# `congestion::Controller`, который реализует Brutal, но через `quinn` не
+# переэкспортирован. Версия обязана совпадать с той, что тянет `quinn`, —
+# иначе в процессе окажутся два несовместимых трейта с одним именем.
+quinn-proto = { version = "0.11", default-features = false }
+rustls = { version = "0.23", default-features = false }
+rustls-pki-types = "1"
+rustls-platform-verifier = "0.5"
+rustls-pemfile = "2"
+# DNS-over-TLS поверх того же rustls, что и протокол.
+tokio-rustls = { version = "0.26", default-features = false }
+# `http` — типы запроса и ответа для аутентификации Hysteria 2 поверх HTTP/3.
+http = "1"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+smoltcp = { version = "0.12", default-features = false }
+
+# --- данные ---
+# `rc` — производные `Serialize`/`Deserialize` для `Arc<str>`. Личность
+# процесса раздаётся сотням соединений и потому хранится в `Arc`; без фичи
+# её пришлось бы сериализовать вручную в каждом поле.
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+toml = "0.8"
+bytes = "1"
+
+# --- сопоставление ---
+ipnet = "2"
+aho-corasick = "1"
+regex = "1"
+globset = "0.4"
+maxminddb = "0.24"
+
+# --- криптография ---
+blake2 = "0.10"
+# SHA-256 нужен для закрепления отпечатка сертификата (`tls.pin_sha256`).
+sha2 = "0.10"
+rand = "0.8"
+
+# --- DNS ---
+# Только разбор и сборка сообщений DNS. `hickory-resolver` намеренно не
+# используется: он тянет собственный `rustls 0.21`, то есть второй TLS-стек
+# рядом с нашим 0.23 — и обновлять при каждой уязвимости пришлось бы оба.
+hickory-proto = { version = "0.24", default-features = false }
+
+# --- служебное ---
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Журнал службы: у неё нет терминала, и писать некуда, кроме файла.
+tracing-appender = "0.2"
+parking_lot = "0.12"
+dashmap = "6"
+arc-swap = "1"
+clap = { version = "4", features = ["derive"] }
+directories = "5"
+interprocess = { version = "2", features = ["tokio"] }
+widestring = "1"
+
+# --- платформа ---
+windows = "0.58"
+windows-service = "0.7"
+wintun = "0.5"
+nix = { version = "0.29", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "warn"          # разрешено только в `platform`/`process`/`tun`
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Горячий путь маршрутизации — там, где `unwrap` стоил бы разрыва соединения.
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# Дебажная сборка тоннеля без оптимизаций непригодна: smoltcp и QUIC
+# в debug дают падение пропускной способности на порядок.
+[profile.dev.package."*"]
+opt-level = 2

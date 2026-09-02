@@ -1,0 +1,24 @@
+[package]
+name = "penguin-inbound"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Входящие точки: SOCKS5 и HTTP-прокси"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+# Точка входа отдаёт соединение тому, кто умеет его открыть, и получает
+# обратно `ProxyStream`/`ProxyDatagram` — типы контракта протоколов.
+penguin-proto.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+tokio-util.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

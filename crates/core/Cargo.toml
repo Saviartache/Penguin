@@ -1,0 +1,20 @@
+[package]
+name = "penguin-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Общие доменные типы Penguin"
+
+[lints]
+workspace = true
+
+[dependencies]
+# `serde` здесь не за фичей: доменные типы сериализуют и `config`, и `ipc`,
+# то есть выключить её всё равно некому. Фича, которую никто не выключает, —
+# лишние `cfg_attr` на каждом типе и лишний путь сборки, который никто не
+# проверяет.
+serde.workspace = true
+thiserror.workspace = true

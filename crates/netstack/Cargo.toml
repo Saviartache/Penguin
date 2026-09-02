@@ -1,0 +1,26 @@
+[package]
+name = "penguin-netstack"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Пользовательский стек TCP/IP поверх TUN"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+penguin-config.workspace = true
+penguin-tun.workspace = true
+smoltcp = { workspace = true, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "io-util", "macros"] }
+bytes.workspace = true
+futures.workspace = true
+tokio-util = { workspace = true, features = ["codec"] }
+# Случайное зерно для номеров последовательностей TCP.
+rand.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,45 @@
+[package]
+name = "penguin-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Служба Penguin: держит тоннель и обслуживает канал управления"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+penguin-config.workspace = true
+penguin-engine.workspace = true
+penguin-ipc.workspace = true
+penguin-platform.workspace = true
+# Обработчики отвечают на запросы о правилах, процессах и задержке — это
+# три разных крейта, и тонкий слой перевода в формат провода живёт здесь.
+penguin-router.workspace = true
+penguin-process.workspace = true
+penguin-proto.workspace = true
+
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time", "macros"] }
+tokio-util.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# У службы нет терминала: журнал пишется в файл с ежедневной ротацией.
+tracing-appender.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true
+
+[features]
+# Набор протоколов задаётся движком; перечисление здесь нужно только затем,
+# чтобы `--no-default-features` собирал демона без единого протокола.
+default = ["hysteria2"]
+hysteria2 = ["penguin-engine/hysteria2"]
