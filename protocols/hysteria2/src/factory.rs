@@ -87,17 +87,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ip_server_without_sni() {
-        // По адресу имени для TLS взять неоткуда, и об этом надо сказать
-        // до подключения, а не после.
-        let params = json!({ "server": "203.0.113.5:443", "auth": "x" });
-        let err = Hysteria2Factory::new()
+    fn accepts_an_ip_server_without_sni() {
+        // Такие ссылки раздают как есть: `hy2://пароль@203.0.113.5:1984/?insecure=1`.
+        // Имя для TLS тогда не нужно — SNI в рукопожатие просто не попадает.
+        let params = json!({
+            "server": "203.0.113.5:1984",
+            "auth": "x",
+            "tls": { "insecure": true }
+        });
+        Hysteria2Factory::new()
             .validate(&params)
-            .expect_err("нет имени");
-        assert!(
-            err.to_string().contains("sni"),
-            "сообщение не подсказывает выход: {err}"
-        );
+            .expect("настройки верны");
     }
 
     #[test]

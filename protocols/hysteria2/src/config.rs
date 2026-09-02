@@ -87,18 +87,24 @@ impl Hysteria2Config {
     ///
     /// Явно заданное `sni` сильнее: сервер за подменённым адресом всё равно
     /// ждёт своё имя, и без этого сертификат не сойдётся.
+    ///
+    /// Сервер, заданный адресом, — не ошибка. Ссылки вида
+    /// `hy2://пароль@203.0.113.5:1984/?insecure=1` раздают как есть, и
+    /// официальный клиент с ними работает: SNI в рукопожатие просто не
+    /// попадает, а сертификат сверяется с адресом (или не сверяется вовсе,
+    /// если стоит `insecure`). Отказ здесь означал бы, что рабочая ссылка не
+    /// проверяется и не подключается, хотя ей ничего не мешает.
     pub fn server_name(&self) -> Hysteria2Result<String> {
         if let Some(sni) = &self.tls.sni
             && !sni.is_empty()
         {
             return Ok(sni.clone());
         }
-        match self.endpoint()?.host {
-            Address::Domain(domain) => Ok(domain),
-            Address::Ip(ip) => Err(Hysteria2Error::config(format!(
-                "сервер задан адресом `{ip}` — для TLS нужно имя, укажите `tls.sni`"
-            ))),
-        }
+        Ok(match self.endpoint()?.host {
+            Address::Domain(domain) => domain,
+            // Без скобок и здесь, и для IPv6: rustls ждёт сам адрес.
+            Address::Ip(ip) => ip.to_string(),
+        })
     }
 
     /// Промежуток между сменами порта.
@@ -329,10 +335,26 @@ mod tests {
     #[test]
     fn sni_overrides_host() {
         let mut config = config("1.2.3.4:443");
-        // По адресу имени для TLS взять неоткуда.
-        assert!(config.server_name().is_err());
+        // Без `sni` в TLS идёт сам адрес: rustls тогда не шлёт SNI вовсе.
+        assert_eq!(config.server_name().expect("имя"), "1.2.3.4");
         config.tls.sni = Some("example.com".to_owned());
         assert_eq!(config.server_name().expect("имя"), "example.com");
+    }
+
+    #[test]
+    fn an_ip_server_needs_no_sni() {
+        // Ссылку `hy2://пароль@203.0.113.5:1984/?insecure=1` раздают как есть,
+        // и отказ до подключения означал бы, что рабочий сервер не проверить.
+        assert_eq!(
+            config("203.0.113.5:1984").server_name().expect("имя"),
+            "203.0.113.5"
+        );
+        config("203.0.113.5:1984").validate().expect("настройки");
+        // IPv6 — без скобок: rustls ждёт сам адрес.
+        assert_eq!(
+            config("[2001:db8::1]:443").server_name().expect("имя"),
+            "2001:db8::1"
+        );
     }
 
     #[test]

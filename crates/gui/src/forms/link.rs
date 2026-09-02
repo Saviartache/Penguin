@@ -388,6 +388,22 @@ mod tests {
     }
 
     #[test]
+    fn a_link_to_a_bare_address_becomes_a_working_profile() {
+        // Сервер по адресу, без `sni` и без имени: такие ссылки раздают как
+        // есть, и профиль из них обязан собираться.
+        let profile = parse("hy2://root:s3cret@203.0.113.5:1984/?insecure=1")
+            .expect("ссылка разбирается")
+            .to_profile()
+            .expect("профиль собирается");
+
+        assert_eq!(profile.name, "203.0.113.5");
+        assert_eq!(
+            profile.outbound.field("server").and_then(|v| v.as_str()),
+            Some("203.0.113.5:1984")
+        );
+    }
+
+    #[test]
     fn a_hash_inside_the_query_does_not_eat_the_name() {
         // Имя отделяется первым `#`, и только потом разбирается запрос.
         let draft = parse("hy2://p@h.io?sni=a.io#Мой сервер").expect("разбирается");
