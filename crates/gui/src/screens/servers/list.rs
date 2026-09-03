@@ -224,7 +224,7 @@ fn mono<'a>(state: &State, value: String, level: f32) -> Element<'a, Message> {
     text(value)
         .font(Font::MONOSPACE)
         .size(type_scale::BODY)
-        .style(iced::theme::Text::Color(ink::level(&state.palette, level)))
+        .color(ink::level(&state.palette, level))
         .into()
 }
 

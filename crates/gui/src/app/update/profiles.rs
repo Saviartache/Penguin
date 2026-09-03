@@ -1,6 +1,6 @@
 //! Профили и подписки на серверы.
 
-use iced::Command;
+use iced::Task;
 use penguin_core::id::ProfileId;
 use penguin_ipc::schema::Request;
 
@@ -10,7 +10,7 @@ use crate::app::update::request;
 use crate::forms::server as editor;
 
 /// Разбирает экран серверов.
-pub fn handle(app: &mut App, message: ServersMessage) -> Command<Message> {
+pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
     match message {
         ServersMessage::Select(id) => {
             let profile = ProfileId::new(&id);
@@ -20,7 +20,7 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Command<Message> {
             app.state_mut().config.active_profile = Some(profile.clone());
             let config = app.state().config.clone();
 
-            Command::batch([
+            Task::batch([
                 request(Request::SetConfig {
                     config: Box::new(config),
                 }),
@@ -32,7 +32,7 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Command<Message> {
                         profile: Some(profile),
                     })
                 } else {
-                    Command::none()
+                    Task::none()
                 },
             ])
         }
@@ -52,13 +52,13 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Command<Message> {
 
             app.state_mut().servers.editor = Some(draft);
             app.state_mut().servers.link.clear();
-            Command::none()
+            Task::none()
         }
 
         ServersMessage::EditorClosed => {
             app.state_mut().servers.editor = None;
             app.state_mut().servers.link.clear();
-            Command::none()
+            Task::none()
         }
 
         ServersMessage::LinkChanged(raw) => {
@@ -81,31 +81,31 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Command<Message> {
                     .and_then(|open| open.id.clone());
                 state.servers.editor = Some(editor::Draft { id, ..draft });
             }
-            Command::none()
+            Task::none()
         }
 
         ServersMessage::EditorChanged(field, value) => {
             if let Some(draft) = app.state_mut().servers.editor.as_mut() {
                 draft.set(field, value);
             }
-            Command::none()
+            Task::none()
         }
 
         ServersMessage::EditorInsecureToggled(enabled) => {
             if let Some(draft) = app.state_mut().servers.editor.as_mut() {
                 draft.insecure = enabled;
             }
-            Command::none()
+            Task::none()
         }
 
         ServersMessage::EditorSubmitted => {
             let Some(draft) = app.state().servers.editor.as_ref() else {
-                return Command::none();
+                return Task::none();
             };
             // Неверный черновик не сохраняется молча: причина уже видна в
             // самом редакторе, и закрывать его значило бы её спрятать.
             let Ok(profile) = draft.to_profile() else {
-                return Command::none();
+                return Task::none();
             };
 
             let state = app.state_mut();
@@ -156,7 +156,7 @@ mod tests {
     use super::*;
 
     fn app_with_profiles(ids: &[&str]) -> App {
-        let (mut app, _command) = <App as iced::Application>::new(uikit::ThemeType::Dark);
+        let (mut app, _task) = App::new(uikit::ThemeType::Dark);
         for id in ids {
             app.state_mut().config.profiles.push(Profile::new(
                 *id,

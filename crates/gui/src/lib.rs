@@ -21,7 +21,6 @@ mod screens;
 mod theme;
 mod ui;
 
-use iced::{Application, Settings};
 use penguin_config::schema::app::Language;
 
 /// Открывает окно и работает, пока его не закроют.
@@ -39,21 +38,30 @@ pub fn run() -> iced::Result {
     // ни настройки недоступны (см. [`theme`]).
     let theme = theme::load();
 
-    app::App::run(Settings {
-        window: iced::window::Settings {
-            size: app::COMPACT,
-            // Размером владеет `Morph`, и владеет им один. Системное
-            // растягивание завело бы второй источник размера, и они начали бы
-            // спорить: окно раздувалось бы и съёживалось на глазах.
-            resizable: false,
-            // Рамку рисует кит: своя шапка и системная одновременно — это две
-            // шапки одна над другой.
-            decorations: false,
-            ..iced::window::Settings::default()
-        },
-        // Флаги — тема: больше `Application::new` ничего не ждёт, всё
-        // остальное приезжает от службы.
-        flags: theme,
-        ..Settings::default()
+    // `iced 0.14`: не трейт `Application`, а билдер. Тема больше не «флаг» —
+    // её захватывает замыкание загрузки состояния; всё остальное приезжает от
+    // службы.
+    iced::application(
+        move || app::App::new(theme),
+        app::App::update,
+        app::App::view,
+    )
+    .title(app::App::title)
+    .subscription(app::App::subscription)
+    .theme(app::App::theme)
+    // Встроенный шрифт кита: без него консоль, символьные рамки и цифры
+    // листа рисуются не тем моноширинным, что задумано (см. `font` кита).
+    .font(uikit::font::NERD_FONT_BYTES)
+    .window(iced::window::Settings {
+        size: app::COMPACT,
+        // Размером владеет `Morph`, и владеет им один. Системное
+        // растягивание завело бы второй источник размера, и они начали бы
+        // спорить: окно раздувалось бы и съёживалось на глазах.
+        resizable: false,
+        // Рамку рисует кит: своя шапка и системная одновременно — это две
+        // шапки одна над другой.
+        decorations: false,
+        ..iced::window::Settings::default()
     })
+    .run()
 }

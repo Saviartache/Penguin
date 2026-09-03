@@ -24,12 +24,11 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 /// Подписка на события демона.
 pub fn events() -> Subscription<Message> {
-    // Идентификатор подписки постоянный: iced по нему понимает, что это та же
-    // подписка, и не создаёт вторую при каждой перерисовке.
-    struct DaemonEvents;
-
-    iced::subscription::run_with_id(
-        std::any::TypeId::of::<DaemonEvents>(),
+    // `Subscription::run` берёт идентификатор подписки из типа потока и самого
+    // указателя на функцию: iced по ним понимает, что это та же подписка, и не
+    // создаёт вторую при каждой перерисовке. Замыкание ничего не захватывает,
+    // поэтому годится как `fn`-указатель, которого требует `run`.
+    Subscription::run(|| {
         stream::unfold(Stage::Disconnected, |stage| async move {
             match stage {
                 Stage::Disconnected => Some(connect().await),
@@ -44,8 +43,8 @@ pub fn events() -> Subscription<Message> {
                     )),
                 },
             }
-        }),
-    )
+        })
+    })
 }
 
 /// В каком состоянии подписка.

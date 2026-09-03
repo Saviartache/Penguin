@@ -5,7 +5,7 @@
 //! бы файл настроек и пересобирало весь набор — а пользователь в это время
 //! ещё думает.
 
-use iced::Command;
+use iced::Task;
 use penguin_ipc::schema::Request;
 
 use crate::app::App;
@@ -14,14 +14,14 @@ use crate::app::update::request;
 use crate::forms::rule;
 
 /// Разбирает экран правил.
-pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Command<Message> {
+pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
     match message {
         SplitTunnelMessage::ModeSelected(mode) => {
             if let Some(mode) = parse_mode(&mode) {
                 app.state_mut().config.routing.mode = mode;
                 app.state_mut().dirty = true;
             }
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::RuleToggled(index, enabled) => {
@@ -29,7 +29,7 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Command<Message> {
                 rule.enabled = enabled;
                 app.state_mut().dirty = true;
             }
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::RuleRemoved(index) => {
@@ -38,23 +38,23 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Command<Message> {
                 rules.remove(index);
                 app.state_mut().dirty = true;
             }
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::ProbeDestinationChanged(value) => {
             app.state_mut().split_tunnel.probe_destination = value;
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::ProbeProcessChanged(value) => {
             app.state_mut().split_tunnel.probe_process = value;
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::ProbeRequested => {
             let state = &app.state().split_tunnel;
             if state.probe_destination.trim().is_empty() {
-                return Command::none();
+                return Task::none();
             }
 
             let process =
@@ -69,7 +69,7 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Command<Message> {
 
         SplitTunnelMessage::AppSearchChanged(value) => {
             app.state_mut().split_tunnel.app_search = value;
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::AppToggled(path, checked) => {
@@ -77,29 +77,29 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Command<Message> {
                 .split_tunnel
                 .draft
                 .toggle_process(&path, checked);
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::DraftNameChanged(value) => {
             app.state_mut().split_tunnel.draft.name = value;
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::DraftAddressesChanged(value) => {
             app.state_mut().split_tunnel.draft.addresses = value;
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::DraftActionSelected(action) => {
             app.state_mut().split_tunnel.draft.action = action;
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::RuleAdded => {
             let id = rule::unique_id(&app.state().config.routing.rules);
             let Some(new_rule) = app.state().split_tunnel.draft.build(id) else {
                 // Черновик без условий: правило совпадало бы со всем подряд.
-                return Command::none();
+                return Task::none();
             };
 
             app.state_mut().config.routing.rules.push(new_rule);
@@ -107,7 +107,7 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Command<Message> {
             // ещё не добавленный, и следующее нажатие даёт второе такое же.
             app.state_mut().split_tunnel.draft = rule::Draft::default();
             app.state_mut().dirty = true;
-            Command::none()
+            Task::none()
         }
 
         SplitTunnelMessage::Save => {
@@ -121,7 +121,7 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Command<Message> {
 }
 
 /// Спрашивает список запущенных приложений.
-pub fn request_processes() -> Command<Message> {
+pub fn request_processes() -> Task<Message> {
     request(Request::ListProcesses)
 }
 
@@ -150,7 +150,7 @@ mod tests {
     use super::*;
 
     fn app_with_rules(rules: serde_json::Value) -> App {
-        let (mut app, _command) = <App as iced::Application>::new(uikit::ThemeType::Dark);
+        let (mut app, _task) = App::new(uikit::ThemeType::Dark);
         app.state_mut().config.routing.rules =
             serde_json::from_value::<Vec<RuleConfig>>(rules).expect("правила разбираются");
         app

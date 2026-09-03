@@ -59,7 +59,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let mut add = Button::new(
         text(crate::i18n::s().add_rule)
             .size(type_scale::BODY)
-            .horizontal_alignment(iced::alignment::Horizontal::Center)
+            .align_x(iced::alignment::Horizontal::Center)
             .width(iced::Length::Fill),
     )
     .variant(ButtonVariant::Primary)

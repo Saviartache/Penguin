@@ -138,7 +138,7 @@ fn headline(state: &State) -> Element<'_, Message> {
         .push_auto(
             text(label)
                 .size(type_scale::LEAD)
-                .style(iced::theme::Text::Color(tone.color(&state.palette))),
+                .color(tone.color(&state.palette)),
         )
         .push(crate::ui::spring())
         .push_auto(uptime(state))

@@ -1,6 +1,6 @@
 //! Подключение, отключение, смена профиля.
 
-use iced::Command;
+use iced::Task;
 use penguin_ipc::schema::{Event, Request, Response};
 
 use crate::app::App;
@@ -8,7 +8,7 @@ use crate::app::message::{HomeMessage, IpcMessage, Message};
 use crate::app::update::request;
 
 /// Разбирает всё, что пришло от демона.
-pub fn handle(app: &mut App, message: IpcMessage) -> Command<Message> {
+pub fn handle(app: &mut App, message: IpcMessage) -> Task<Message> {
     match message {
         IpcMessage::Response(response) => handle_response(app, *response),
         IpcMessage::Event(event) => handle_event(app, *event),
@@ -22,38 +22,38 @@ pub fn handle(app: &mut App, message: IpcMessage) -> Command<Message> {
                 return crate::app::update::request_initial_state();
             }
             app.state_mut().connection.mark_offline(reason);
-            Command::none()
+            Task::none()
         }
     }
 }
 
 /// Разбирает ответ на запрос.
-fn handle_response(app: &mut App, response: Response) -> Command<Message> {
+fn handle_response(app: &mut App, response: Response) -> Task<Message> {
     let state = app.state_mut();
 
     match response {
-        Response::Ok | Response::Pong { .. } => Command::none(),
+        Response::Ok | Response::Pong { .. } => Task::none(),
 
         Response::Status(status) => {
             state.connection.apply_status(&status);
-            Command::none()
+            Task::none()
         }
 
         Response::Config(config) => {
             state.config = *config;
             // Правки сброшены: пришло то, что лежит у демона.
             state.dirty = false;
-            Command::none()
+            Task::none()
         }
 
         Response::Explanation(explanation) => {
             state.split_tunnel.probe_result = Some(*explanation);
-            Command::none()
+            Task::none()
         }
 
         Response::Processes { apps } => {
             state.split_tunnel.running_apps = apps;
-            Command::none()
+            Task::none()
         }
 
         Response::Probes { results } => {
@@ -62,7 +62,7 @@ fn handle_response(app: &mut App, response: Response) -> Command<Message> {
                 .into_iter()
                 .map(|row| (row.profile, row.rtt_millis))
                 .collect();
-            Command::none()
+            Task::none()
         }
 
         Response::Error { message, .. } => {
@@ -72,20 +72,20 @@ fn handle_response(app: &mut App, response: Response) -> Command<Message> {
             state
                 .connection
                 .push_log(penguin_ipc::schema::LogLevel::Error, message);
-            Command::none()
+            Task::none()
         }
     }
 }
 
 /// Разбирает событие.
-fn handle_event(app: &mut App, event: Event) -> Command<Message> {
+fn handle_event(app: &mut App, event: Event) -> Task<Message> {
     let state = app.state_mut();
 
     match event {
         Event::State { state: tunnel } => {
             state.connection.set_tunnel(tunnel);
             state.connection.online = true;
-            Command::none()
+            Task::none()
         }
 
         Event::Throughput {
@@ -94,12 +94,12 @@ fn handle_event(app: &mut App, event: Event) -> Command<Message> {
             connections,
         } => {
             state.connection.apply_throughput(rate, total, connections);
-            Command::none()
+            Task::none()
         }
 
         Event::Log { level, message } => {
             state.connection.push_log(level, message);
-            Command::none()
+            Task::none()
         }
 
         Event::Decision {
@@ -119,7 +119,7 @@ fn handle_event(app: &mut App, event: Event) -> Command<Message> {
             state
                 .connection
                 .push_log(penguin_ipc::schema::LogLevel::Info, line);
-            Command::none()
+            Task::none()
         }
 
         // Правила пересобраны демоном — перечитываем настройки, чтобы окно
@@ -129,7 +129,7 @@ fn handle_event(app: &mut App, event: Event) -> Command<Message> {
 }
 
 /// Разбирает главный экран.
-pub fn handle_home(app: &mut App, message: HomeMessage) -> Command<Message> {
+pub fn handle_home(app: &mut App, message: HomeMessage) -> Task<Message> {
     match message {
         HomeMessage::ToggleConnection => {
             // Службы нет — значит, её надо поставить, а не сообщать об этом
@@ -141,7 +141,7 @@ pub fn handle_home(app: &mut App, message: HomeMessage) -> Command<Message> {
                     penguin_ipc::schema::LogLevel::Info,
                     crate::i18n::s().service_starting.to_owned(),
                 );
-                return Command::perform(ensure_service(), |ready| {
+                return Task::perform(ensure_service(), |ready| {
                     Message::Home(HomeMessage::ServiceReady(ready))
                 });
             }
@@ -169,7 +169,7 @@ pub fn handle_home(app: &mut App, message: HomeMessage) -> Command<Message> {
                 penguin_ipc::schema::LogLevel::Error,
                 crate::i18n::s().service_needs_rights.to_owned(),
             );
-            Command::none()
+            Task::none()
         }
 
         HomeMessage::ServiceChecked(ready) => {
@@ -269,7 +269,7 @@ mod tests {
 
     fn app() -> App {
         // Приложение создаётся без окна: `update` от него не зависит.
-        let (app, _command) = <App as iced::Application>::new(uikit::ThemeType::Dark);
+        let (app, _task) = App::new(uikit::ThemeType::Dark);
         app
     }
 

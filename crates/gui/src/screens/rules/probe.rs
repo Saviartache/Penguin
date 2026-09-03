@@ -82,14 +82,14 @@ fn result<'a>(state: &'a State, explanation: &'a Explanation) -> Element<'a, Mes
                 (false, true) => ("·", ink::TERTIARY),
                 (false, false) => (" ", ink::TERTIARY),
             };
-            let color = iced::theme::Text::Color(ink::level(palette, level));
+            let color = ink::level(palette, level);
 
             Flex::row()
-                .push_auto(text(mark).size(type_scale::BODY).style(color))
+                .push_auto(text(mark).size(type_scale::BODY).color(color))
                 .push(
                     text(format!("{}  ({})", rule.name, rule.condition))
                         .size(type_scale::BODY)
-                        .style(color),
+                        .color(color),
                 )
                 .gap(gap::SM)
                 .align(Alignment::Start)

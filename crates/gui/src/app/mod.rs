@@ -38,7 +38,7 @@ pub mod update;
 use std::time::{Duration, Instant};
 
 use iced::widget::{column, container, row};
-use iced::{Application, Command, Element, Length, Size, Subscription, Theme, window};
+use iced::{Element, Length, Point, Size, Subscription, Task, Theme, window};
 use uikit::ThemeType;
 use uikit::layout::gap;
 use uikit::widgets::Tabs;
@@ -72,15 +72,20 @@ pub struct App {
     chrome: WindowChrome,
     morph: Morph,
     theme: ThemeType,
+    /// Идентификатор главного окна.
+    ///
+    /// В `iced 0.14` его больше не заменяет константа `window::Id::MAIN`: окно
+    /// создаёт исполнитель, и настоящий идентификатор приходит событием
+    /// [`window::Event::Opened`]. До него команды окну (`resize`, `drag`,
+    /// `close`) уходят в никуда, поэтому на его месте до открытия стоит
+    /// временный `Id::unique()` — заведомо не тот, но нужный, чтобы `view`
+    /// собрал шапку уже на первом кадре.
+    window: window::Id,
 }
 
-impl Application for App {
-    type Executor = iced::executor::Default;
-    type Message = Message;
-    type Theme = Theme;
-    type Flags = ThemeType;
-
-    fn new(theme: Self::Flags) -> (Self, Command<Message>) {
+impl App {
+    /// Создаёт окно и первую команду.
+    pub fn new(theme: ThemeType) -> (Self, Task<Message>) {
         let mut state = State {
             palette: theme.to_iced_theme().palette(),
             ..State::default()
@@ -98,29 +103,29 @@ impl Application for App {
                 .with_anchor(Anchor::Center)
                 .with_bounds(COMPACT, EXPANDED),
             theme,
+            // Размер окна задаёт `window::Settings` при создании (см. [`crate`]
+            // `run`), поэтому отдельная команда `resize` до первого кадра
+            // больше не нужна: настоящий идентификатор для неё всё равно ещё
+            // неизвестен.
+            window: window::Id::unique(),
         };
 
-        (
-            app,
-            Command::batch([
-                // До первого кадра: система создаёт окно каким ей удобно, и
-                // без этой команды человек увидит его чужого размера.
-                window::resize(window::Id::MAIN, COMPACT),
-                update::bootstrap(),
-            ]),
-        )
+        (app, update::bootstrap())
     }
 
-    fn title(&self) -> String {
+    /// Заголовок окна.
+    pub fn title(&self) -> String {
         "Ostriacki Pingwin".to_owned()
     }
 
-    fn update(&mut self, message: Message) -> Command<Message> {
+    /// Разбирает сообщение.
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         update::handle(self, message)
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let header = uikit::window::header(window::Id::MAIN, "Ostriacki Pingwin")
+    /// Собирает окно.
+    pub fn view(&self) -> Element<'_, Message> {
+        let header = uikit::window::header(self.window, "Ostriacki Pingwin")
             .on_close(Message::Window(message::WindowMessage::Close))
             .on_minimize(Message::Window(message::WindowMessage::Minimize))
             .extra(
@@ -156,15 +161,19 @@ impl Application for App {
             .into()
     }
 
-    fn theme(&self) -> Theme {
+    /// Тема окна.
+    pub fn theme(&self) -> Theme {
         self.theme.to_iced_theme()
     }
 
-    fn subscription(&self) -> Subscription<Message> {
+    /// Подписки окна.
+    pub fn subscription(&self) -> Subscription<Message> {
         let mut streams = vec![
             crate::ipc::subscription::events(),
             // События окна нужны рамке: без них не работает перетаскивание.
-            iced::event::listen_with(|event, status| match event {
+            // Третий аргумент — идентификатор окна: в `iced 0.14` он приезжает
+            // сюда, а не в самом `Event::Window`.
+            iced::event::listen_with(|event, status, window_id| match event {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(
                     Message::Window(message::WindowMessage::CursorMoved(position)),
                 ),
@@ -179,9 +188,15 @@ impl Application for App {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::Window(message::WindowMessage::DragStopped)),
-                iced::Event::Window(_, iced::window::Event::Moved { x, y }) => {
-                    Some(Message::Window(message::WindowMessage::Moved(x, y)))
-                }
+                // Окно открылось — здесь узнаётся его настоящий идентификатор и
+                // исходное положение (`Morph` держит на месте центр и обязан
+                // знать, откуда окно растёт).
+                iced::Event::Window(iced::window::Event::Opened { position, size }) => Some(
+                    Message::Window(message::WindowMessage::Opened(window_id, position, size)),
+                ),
+                iced::Event::Window(iced::window::Event::Moved(point)) => Some(Message::Window(
+                    message::WindowMessage::Moved(point.x as i32, point.y as i32),
+                )),
                 _ => None,
             }),
         ];
@@ -194,9 +209,18 @@ impl Application for App {
 
         Subscription::batch(streams)
     }
-}
 
-impl App {
+    /// Идентификатор главного окна.
+    pub fn window(&self) -> window::Id {
+        self.window
+    }
+
+    /// Запоминает открытое окно: его идентификатор и, для `Morph`, положение.
+    pub fn window_opened(&mut self, id: window::Id, position: Option<Point>, size: Size) {
+        self.window = id;
+        self.morph.on_opened(position, size);
+    }
+
     /// Состояние окна.
     pub fn state(&self) -> &State {
         &self.state
@@ -218,8 +242,8 @@ impl App {
     }
 
     /// Кадр движения окна.
-    pub fn tick(&mut self, now: Instant) -> Command<Message> {
-        self.morph.tick(window::Id::MAIN, now)
+    pub fn tick(&mut self, now: Instant) -> Task<Message> {
+        self.morph.tick(self.window, now)
     }
 
     /// Раскрывает или сворачивает панель.

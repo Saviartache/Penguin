@@ -1,6 +1,6 @@
 //! Настройки приложения.
 
-use iced::Command;
+use iced::Task;
 use penguin_ipc::schema::Request;
 
 use crate::app::App;
@@ -8,7 +8,7 @@ use crate::app::message::{Message, SettingsMessage};
 use crate::app::update::request;
 
 /// Разбирает экран настроек.
-pub fn handle(app: &mut App, message: SettingsMessage) -> Command<Message> {
+pub fn handle(app: &mut App, message: SettingsMessage) -> Task<Message> {
     match message {
         SettingsMessage::AutostartToggled(enabled) => {
             app.state_mut().config.app.autostart = enabled;
@@ -18,25 +18,25 @@ pub fn handle(app: &mut App, message: SettingsMessage) -> Command<Message> {
             // делает её сам интерфейс: демону она не нужна и прав на неё у
             // него нет.
             apply_autostart(enabled);
-            Command::none()
+            Task::none()
         }
 
         SettingsMessage::AutoconnectToggled(enabled) => {
             app.state_mut().config.app.autoconnect = enabled;
             app.state_mut().dirty = true;
-            Command::none()
+            Task::none()
         }
 
         SettingsMessage::KillSwitchToggled(enabled) => {
             app.state_mut().config.network.kill_switch = enabled;
             app.state_mut().dirty = true;
-            Command::none()
+            Task::none()
         }
 
         SettingsMessage::AllowLanToggled(enabled) => {
             app.state_mut().config.network.allow_lan = enabled;
             app.state_mut().dirty = true;
-            Command::none()
+            Task::none()
         }
 
         SettingsMessage::Save => {
@@ -72,7 +72,7 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        let (app, _command) = <App as iced::Application>::new(uikit::ThemeType::Dark);
+        let (app, _task) = App::new(uikit::ThemeType::Dark);
         app
     }
 

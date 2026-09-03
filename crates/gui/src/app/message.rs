@@ -78,6 +78,12 @@ impl Screen {
 /// Управление окном.
 #[derive(Debug, Clone, Copy)]
 pub enum WindowMessage {
+    /// Окно открыто.
+    ///
+    /// Несёт настоящий идентификатор окна (в `iced 0.14` он приходит только
+    /// событием, константы `window::Id::MAIN` больше нет) и его исходное
+    /// положение и размер для `Morph`.
+    Opened(iced::window::Id, Option<iced::Point>, iced::Size),
     /// Начато перетаскивание за шапку.
     DragStarted,
     /// Курсор сдвинулся.

@@ -77,7 +77,7 @@ penguin-hysteria2 = { path = "protocols/hysteria2" }
 uikit = { package = "rust-ui-kit", path = "vendor/rust-ui-kit" }
 # Версия `iced` общая с китом (AGENTS.md кита, правило 6.4): апгрейд —
 # отдельное согласованное изменение сразу во всех потребителях.
-iced = { version = "0.12", default-features = false }
+iced = { version = "0.14", default-features = false }
 
 # --- асинхронность ---
 tokio = { version = "1", default-features = false }

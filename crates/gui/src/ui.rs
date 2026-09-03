@@ -50,7 +50,7 @@ fn build_page<'a, Message: 'a>(sections: Vec<Element<'a, Message>>) -> Element<'
     let body = Flex::col()
         .extend(sections)
         // Воздух снизу: последний раздел не должен упираться в край окна.
-        .push_auto(Space::with_height(Length::Fixed(PAGE_PADDING)))
+        .push_auto(Space::new().height(Length::Fixed(PAGE_PADDING)))
         .gap(gap::LG)
         .build();
 
@@ -136,14 +136,11 @@ pub fn empty<'a, Message: 'a>(palette: &Palette, reason: &'a str) -> Element<'a,
 pub fn muted<'a, Message: 'a>(
     palette: &Palette,
     value: impl ToString,
-    size: u16,
+    size: f32,
 ) -> Element<'a, Message> {
     text(value.to_string())
         .size(size)
-        .style(iced::theme::Text::Color(ink::level(
-            palette,
-            ink::SECONDARY,
-        )))
+        .color(ink::level(palette, ink::SECONDARY))
         .into()
 }
 
@@ -151,11 +148,11 @@ pub fn muted<'a, Message: 'a>(
 pub fn faint<'a, Message: 'a>(
     palette: &Palette,
     value: impl ToString,
-    size: u16,
+    size: f32,
 ) -> Element<'a, Message> {
     text(value.to_string())
         .size(size)
-        .style(iced::theme::Text::Color(ink::level(palette, ink::TERTIARY)))
+        .color(ink::level(palette, ink::TERTIARY))
         .into()
 }
 
@@ -184,7 +181,7 @@ pub fn button<'a, Message: Clone + 'a>(
 
 /// Распорка, отжимающая соседей к краям ряда.
 pub fn spring<'a, Message: 'a>() -> Element<'a, Message> {
-    Space::with_width(Length::Fill).into()
+    Space::new().width(Length::Fill).into()
 }
 
 /// Прокручиваемый список внутри раздела.
