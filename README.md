@@ -16,6 +16,20 @@
 
 ---
 
+<div align="center">
+
+<br>
+
+<img src="assets/screens/light.png" alt="Главное окно, светлая тема" width="330">
+&nbsp;&nbsp;&nbsp;
+<img src="assets/screens/dark.png" alt="Главное окно, тёмная тема" width="330">
+
+<br>
+
+</div>
+
+---
+
 <br>
 
 ## Стек
@@ -25,13 +39,13 @@
 | Слой | Чем сделано |
 |---|---|
 | **Язык** | ![Rust](https://img.shields.io/badge/Rust-1.88-000000?logo=rust&logoColor=white) ![Edition](https://img.shields.io/badge/edition-2024-000000?logo=rust&logoColor=white) |
-| **Протокол** | ![Hysteria 2](https://img.shields.io/badge/Hysteria%202-6f42c1) — QUIC с маскировкой под HTTP/3 |
+| **Протокол** | ![Hysteria 2](https://img.shields.io/badge/Hysteria%202-6f42c1) |
 | **Транспорт** | ![quinn](https://img.shields.io/badge/quinn-1f6feb) ![rustls](https://img.shields.io/badge/rustls-1f6feb) ![h3](https://img.shields.io/badge/h3-1f6feb) |
-| **Сеть** | ![smoltcp](https://img.shields.io/badge/smoltcp-0a7c5a) ![wintun](https://img.shields.io/badge/wintun-0a7c5a) — свой стек TCP/UDP поверх TUN |
-| **DNS** | ![hickory-proto](https://img.shields.io/badge/hickory--proto-0a7c5a) — fake-IP, UDP / DoT / DoH |
+| **Сеть** | ![smoltcp](https://img.shields.io/badge/smoltcp-0a7c5a) ![wintun](https://img.shields.io/badge/wintun-0a7c5a) |
+| **DNS** | ![hickory-proto](https://img.shields.io/badge/hickory--proto-0a7c5a) |
 | **Асинхронность** | ![tokio](https://img.shields.io/badge/tokio-c04b2f) |
-| **Интерфейс** | ![iced](https://img.shields.io/badge/iced%200.12-4b8bbe) ![clap](https://img.shields.io/badge/clap-4b8bbe) — окно и терминал |
-| **Платформа** | ![Windows](https://img.shields.io/badge/Windows%20x64-0078D6?logo=windows&logoColor=white) — служба, WFP, таблица маршрутизации |
+| **Интерфейс** | ![iced](https://img.shields.io/badge/iced%200.12-4b8bbe) ![clap](https://img.shields.io/badge/clap-4b8bbe) |
+| **Платформа** | ![Windows](https://img.shields.io/badge/Windows%20x64-0078D6?logo=windows&logoColor=white) |
 
 <br>
 
