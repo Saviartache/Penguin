@@ -41,7 +41,7 @@ pub static STRINGS: Strings = Strings {
     save: "Save",
     probe: "Test",
     remove: "Remove",
-    select: "Use",
+    select_hint: "SELECT: CLICK A ROW",
     edit: "Edit",
 
     uploaded: "Sent",

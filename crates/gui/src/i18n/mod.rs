@@ -87,8 +87,12 @@ pub struct Strings {
     pub probe: &'static str,
     /// Удалить.
     pub remove: &'static str,
-    /// Выбрать.
-    pub select: &'static str,
+    /// Как выбрать профиль — подсказкой у нижнего края списка.
+    ///
+    /// Кнопки «Выбрать» в строке больше нет: выбирает щелчок по самой строке.
+    /// Действие, у которого не осталось своего элемента управления, обязано
+    /// быть где-то написано словами.
+    pub select_hint: &'static str,
     /// Править.
     pub edit: &'static str,
 
@@ -324,7 +328,7 @@ mod tests {
                 table.save,
                 table.probe,
                 table.remove,
-                table.select,
+                table.select_hint,
                 table.edit,
                 table.uploaded,
                 table.downloaded,

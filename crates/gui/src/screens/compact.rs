@@ -136,7 +136,11 @@ fn config(state: &State) -> Vec<Line> {
     vec![
         head,
         pair(strings.profile, profile.name.clone()),
-        pair(strings.server, crate::screens::servers::server_of(profile)),
+        pair(
+            strings.server,
+            crate::screens::servers::server_of(profile)
+                .map_or_else(|| NONE.to_owned(), str::to_owned),
+        ),
         pair(strings.protocol, profile.outbound.protocol.clone()),
         pair(strings.latency, latency),
         pair(

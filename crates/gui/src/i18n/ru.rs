@@ -41,7 +41,7 @@ pub static STRINGS: Strings = Strings {
     save: "Сохранить",
     probe: "Проверить",
     remove: "Удалить",
-    select: "Выбрать",
+    select_hint: "ВЫБОР: ЩЕЛЧОК ПО СТРОКЕ",
     edit: "Править",
 
     uploaded: "Отдано",
