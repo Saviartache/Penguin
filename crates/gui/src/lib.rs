@@ -58,6 +58,7 @@ pub fn run() -> iced::Result {
     .default_font(ui::FONT)
     .window(iced::window::Settings {
         size: app::COMPACT,
+        icon: window_icon(),
         // Размером владеет `Morph`, и владеет им один. Системное
         // растягивание завело бы второй источник размера, и они начали бы
         // спорить: окно раздувалось бы и съёживалось на глазах.
@@ -68,4 +69,15 @@ pub fn run() -> iced::Result {
         ..iced::window::Settings::default()
     })
     .run()
+}
+
+/// Иконка окна.
+///
+/// Та же картинка лежит ресурсом в `penguin.exe` (`crates/app/build.rs`), но
+/// оттуда её читает проводник, а не окно: панели задач и Alt+Tab иконку
+/// называет сама программа, и без этого они показывают безымянный прямоугольник.
+///
+/// `None` — картинка не разобралась. Окно из-за иконки не открывать нельзя.
+fn window_icon() -> Option<iced::window::Icon> {
+    iced::window::icon::from_file_data(include_bytes!("../../../assets/icon.ico"), None).ok()
 }
