@@ -1,13 +1,4 @@
-# Penguin — VPN-клиент. Корень workspace.
-#
-# Правило раскладки, из которого следует всё остальное:
-#   crates/     — инфраструктура клиента (транспорт, маршрутизация, UI, демон);
-#   protocols/  — реализации VPN/прокси-протоколов, по крейту на протокол.
-#
-# Протокол ничего не знает про TUN, правила и GUI: он умеет только открыть
-# соединение к адресу. Всё, что делает его «подключаемым», описано контрактом
-# в `penguin-proto`, и добавление второго протокола не трогает ни строчки
-# существующего кода — см. `docs/protocols.md`.
+# Penguin — VPN-клиент. Корень workspace. Раскладка — `docs/protocols.md`.
 
 [workspace]
 resolver = "3"
@@ -32,11 +23,8 @@ members = [
     "protocols/hysteria2",
 ]
 
-# Кит — отдельный репозиторий, подключённый submodule'ом. Членом workspace он
-# быть не должен: у него свои `rustfmt.toml`, свой набор clippy-порогов и свой
-# `scripts/check.sh`. Затянутый в наш workspace, он форматировался бы нашими
-# правилами и падал бы на наших порогах — то есть мы бы правили чужой
-# репозиторий, чтобы собрался наш.
+# У кита свои `rustfmt.toml` и свои пороги clippy: в нашем workspace он
+# проверялся бы нашими.
 exclude = ["vendor/rust-ui-kit"]
 
 [workspace.package]
@@ -47,9 +35,6 @@ license = "MIT"
 repository = "https://github.com/Saviartache/penguin"
 authors = ["Saviartache"]
 
-# Версии живут здесь, а не в крейтах: два крейта не должны тянуть разные
-# минорные `quinn` или `rustls` — это молча даёт две несовместимые копии типов
-# в одном процессе. Точные патч-версии подбирает `cargo update` на Фазе 0.
 [workspace.dependencies]
 # --- внутренние ---
 penguin-core     = { path = "crates/core" }
@@ -65,18 +50,14 @@ penguin-dns      = { path = "crates/dns" }
 penguin-platform = { path = "crates/platform" }
 penguin-engine   = { path = "crates/engine" }
 penguin-ipc      = { path = "crates/ipc" }
-# Три роли одной программы. Подключает их только `crates/app` — исполняемый
-# файл, который и решает, кем ему быть в этот раз.
 penguin-daemon   = { path = "crates/daemon" }
 penguin-cli      = { path = "crates/cli" }
 penguin-gui      = { path = "crates/gui" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 
 # --- UI ---
-# Пакет `rust-ui-kit`, библиотека `uikit` — имена заданы китом и не меняются.
 uikit = { package = "rust-ui-kit", path = "vendor/rust-ui-kit" }
-# Версия `iced` общая с китом (AGENTS.md кита, правило 6.4): апгрейд —
-# отдельное согласованное изменение сразу во всех потребителях.
+# Версия общая с китом: апгрейд — отдельное изменение сразу во всех потребителях.
 iced = { version = "0.14", default-features = false }
 
 # --- асинхронность ---
@@ -87,27 +68,21 @@ async-trait = "0.1"
 
 # --- транспорт ---
 quinn = { version = "0.11", default-features = false }
-# Прямая зависимость нужна ради `RttEstimator`: он входит в сигнатуру трейта
-# `congestion::Controller`, который реализует Brutal, но через `quinn` не
-# переэкспортирован. Версия обязана совпадать с той, что тянет `quinn`, —
-# иначе в процессе окажутся два несовместимых трейта с одним именем.
+# Ради `RttEstimator`: он в сигнатуре `congestion::Controller`, но через
+# `quinn` не переэкспортирован. Версия обязана совпадать с той, что тянет `quinn`.
 quinn-proto = { version = "0.11", default-features = false }
 rustls = { version = "0.23", default-features = false }
 rustls-pki-types = "1"
 rustls-platform-verifier = "0.5"
 rustls-pemfile = "2"
-# DNS-over-TLS поверх того же rustls, что и протокол.
 tokio-rustls = { version = "0.26", default-features = false }
-# `http` — типы запроса и ответа для аутентификации Hysteria 2 поверх HTTP/3.
 http = "1"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 smoltcp = { version = "0.12", default-features = false }
 
 # --- данные ---
-# `rc` — производные `Serialize`/`Deserialize` для `Arc<str>`. Личность
-# процесса раздаётся сотням соединений и потому хранится в `Arc`; без фичи
-# её пришлось бы сериализовать вручную в каждом поле.
+# `rc` — сериализация `Arc<str>`: личность процесса хранится в `Arc`.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 toml = "0.8"
@@ -122,14 +97,12 @@ maxminddb = "0.24"
 
 # --- криптография ---
 blake2 = "0.10"
-# SHA-256 нужен для закрепления отпечатка сертификата (`tls.pin_sha256`).
 sha2 = "0.10"
 rand = "0.8"
 
 # --- DNS ---
-# Только разбор и сборка сообщений DNS. `hickory-resolver` намеренно не
-# используется: он тянет собственный `rustls 0.21`, то есть второй TLS-стек
-# рядом с нашим 0.23 — и обновлять при каждой уязвимости пришлось бы оба.
+# Только разбор сообщений. `hickory-resolver` тянет свой `rustls 0.21` —
+# второй TLS-стек рядом с нашим 0.23.
 hickory-proto = { version = "0.24", default-features = false }
 
 # --- служебное ---
@@ -137,7 +110,6 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Журнал службы: у неё нет терминала, и писать некуда, кроме файла.
 tracing-appender = "0.2"
 parking_lot = "0.12"
 dashmap = "6"
@@ -160,16 +132,15 @@ unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-# Горячий путь маршрутизации — там, где `unwrap` стоил бы разрыва соединения.
 unwrap_used = "warn"
 expect_used = "warn"
 
 [profile.release]
-lto = "thin"
+opt-level = "z"
+lto = true
 codegen-units = 1
-strip = "symbols"
+panic = "abort"
+strip = true
 
-# Дебажная сборка тоннеля без оптимизаций непригодна: smoltcp и QUIC
-# в debug дают падение пропускной способности на порядок.
 [profile.dev.package."*"]
 opt-level = 2

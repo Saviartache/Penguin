@@ -1,5 +1,10 @@
-# Версия общая с `vendor/rust-ui-kit` (edition 2024, rust-version 1.88).
+# Чем собирать. Не то же самое, что `rust-version` в `Cargo.toml`: там —
+# нижняя граница языка (1.88, общая с `vendor/rust-ui-kit`), здесь — версия,
+# которой пользуемся сами.
+#
+# Держим свежую: rust-analyzer работает только с 1.94 и новее, и на пине 1.88
+# редактор оставался без подсказок и без проверки типов.
 [toolchain]
-channel = "1.88"
-components = ["rustfmt", "clippy", "rust-src"]
+channel = "1.98"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
 targets = ["x86_64-pc-windows-msvc"]
