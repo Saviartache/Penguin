@@ -46,6 +46,8 @@ pub struct Strings {
     pub protocol: &'static str,
     /// Задержка до сервера.
     pub latency: &'static str,
+    /// Состояние тоннеля — строкой консоли.
+    pub status: &'static str,
 
     /// Раздел трафика.
     pub traffic: &'static str,
@@ -71,6 +73,8 @@ pub struct Strings {
     pub service_starting: &'static str,
     /// Прав не дали.
     pub service_needs_rights: &'static str,
+    /// Служба останавливается вместе с окном.
+    pub service_stopping: &'static str,
 
     // --- действия ---
     /// Включить тоннель.
@@ -95,10 +99,6 @@ pub struct Strings {
     pub downloaded: &'static str,
     /// Соединений открыто.
     pub connections: &'static str,
-    /// Объём принятого за сеанс.
-    pub total_downloaded: &'static str,
-    /// Объём отданного за сеанс.
-    pub total_uploaded: &'static str,
 
     // --- серверы ---
     /// Профилей нет.

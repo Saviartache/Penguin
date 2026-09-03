@@ -10,6 +10,7 @@ pub static STRINGS: Strings = Strings {
     server: "SERVER",
     protocol: "PROTOCOL",
     latency: "LATENCY",
+    status: "STATUS",
 
     traffic: "Traffic",
     rules: "Rules",
@@ -33,6 +34,7 @@ pub static STRINGS: Strings = Strings {
     daemon_offline: "Service is not responding",
     service_starting: "Starting the service",
     service_needs_rights: "The tunnel needs administrator rights: the service is not installed",
+    service_stopping: "Closing: lowering the tunnel and stopping the service",
 
     connect: "Connect",
     disconnect: "Disconnect",
@@ -45,8 +47,6 @@ pub static STRINGS: Strings = Strings {
     uploaded: "Sent",
     downloaded: "Received",
     connections: "Connections",
-    total_downloaded: "Received in total",
-    total_uploaded: "Sent in total",
 
     no_profiles: "No profiles yet. Add a server.",
     no_answer: "no answer",

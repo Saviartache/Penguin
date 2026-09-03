@@ -9,6 +9,7 @@
 //! состояние интерфейса, а его отражение, и правит его только поток событий.
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use penguin_config::RootConfig;
 use penguin_core::state::TunnelState;
@@ -32,6 +33,19 @@ pub const LOG_CAPACITY: usize = 500;
 
 /// Сколько отсчётов скорости показывать на графике.
 pub const GRAPH_POINTS: usize = 60;
+
+/// Сколько печатается панель при первом открытии.
+///
+/// Меньше секунды: это заставка, а не ожидание. Дольше — и человек, пришедший
+/// нажать одну кнопку, смотрит на анимацию вместо дела.
+const BOOT: Duration = Duration::from_millis(750);
+
+/// Полупериод мигания курсора.
+///
+/// Два пробуждения в секунду. Правило «никакого таймера на замершем окне»
+/// писалось про кадры пружины — шестьдесят в секунду; здесь на четыре порядка
+/// меньше работы, а курсор, который не мигает, читается как замёрзшее окно.
+pub const BLINK: Duration = Duration::from_millis(500);
 
 /// Всё состояние окна.
 #[derive(Debug)]
@@ -62,6 +76,8 @@ pub struct State {
     pub split_tunnel: SplitTunnelState,
     /// Состояние экрана серверов.
     pub servers: ServersState,
+    /// Печатающая заставка при первом открытии.
+    pub boot: Boot,
 }
 
 impl Default for State {
@@ -75,7 +91,69 @@ impl Default for State {
             dirty: false,
             split_tunnel: SplitTunnelState::default(),
             servers: ServersState::default(),
+            // По умолчанию заставки нет: тесты и раскрытая панель показывают
+            // содержимое целиком. Печатать её просит только `App::new`.
+            boot: Boot::idle(),
         }
+    }
+}
+
+/// Печатающая заставка главного экрана.
+///
+/// Панель при первом открытии печатается знак за знаком, как загрузка DOS.
+/// Здесь только точка отсчёта: долю напечатанного считает время, а не счётчик в
+/// сообщениях, — так анимация не зависит от того, с какой частотой приходят
+/// кадры.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Boot {
+    /// Когда началась печать. `None` — заставки нет, панель показывается сразу
+    /// целиком.
+    started: Option<Instant>,
+}
+
+impl Boot {
+    /// Заставки нет.
+    pub fn idle() -> Self {
+        Self { started: None }
+    }
+
+    /// Запускает печать от текущего момента.
+    pub fn begin() -> Self {
+        Self {
+            started: Some(Instant::now()),
+        }
+    }
+
+    /// Доля напечатанного, `0.0..=1.0`. `None` — печатать нечего, панель
+    /// показывается целиком.
+    pub fn progress(&self) -> Option<f32> {
+        let started = self.started?;
+        let fraction = started.elapsed().as_secs_f32() / BOOT.as_secs_f32();
+        Some(fraction.clamp(0.0, 1.0))
+    }
+
+    /// Виден ли курсор в этот момент.
+    ///
+    /// Считается временем, а не переключается сообщением: у мигания нет
+    /// состояния, которое стоило бы хранить и с которым можно было бы
+    /// разойтись.
+    pub fn cursor(&self) -> bool {
+        let Some(started) = self.started else {
+            // Заставки не было — курсор просто стоит. Так его видят тесты и
+            // так он выглядит, если мигать нечем.
+            return true;
+        };
+        (started.elapsed().as_millis() / BLINK.as_millis()) % 2 == 0
+    }
+
+    /// Идёт ли печать сейчас.
+    ///
+    /// Пока идёт — окну нужен таймер кадров; как только допечатали, таймер
+    /// гаснет, и замершее окно больше не будит процессор. Запас в один кадр —
+    /// чтобы последний кадр гарантированно показал панель целиком.
+    pub fn typing(&self) -> bool {
+        self.started
+            .is_some_and(|started| started.elapsed() < BOOT + Duration::from_millis(32))
     }
 }
 

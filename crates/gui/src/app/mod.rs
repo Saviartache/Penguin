@@ -96,6 +96,11 @@ impl App {
         // вообще спросили.
         state.connection.starting = true;
 
+        // Заставку заводим здесь, а не в `State::default`: печатается она ровно
+        // один раз, при открытии окна, а `default` берут ещё и тесты, и
+        // раскрытая панель — им анимация ни к чему.
+        state.boot = state::Boot::begin();
+
         let app = Self {
             state,
             chrome: WindowChrome::new(),
@@ -128,6 +133,11 @@ impl App {
         let header = uikit::window::header(self.window, "Ostriacki Pingwin")
             .on_close(Message::Window(message::WindowMessage::Close))
             .on_minimize(Message::Window(message::WindowMessage::Minimize))
+            // Разворачивать окну нечего: размером владеет `Morph`, и во весь
+            // экран оно показало бы ровно то же самое и вдобавок экран
+            // пустого места. Кнопки нет совсем — мёртвая зелёная обещала бы
+            // действие, которого не будет.
+            .without_maximize()
             .extra(
                 // Два кружка одного вида: правая часть шапки — место для
                 // действий над самим окном, и разнокалиберные значки рядом со
@@ -201,10 +211,16 @@ impl App {
             }),
         ];
 
-        // Кадры нужны, только пока окно едет: постоянный таймер на замершем
-        // окне — это разбуженный процессор ни за чем.
-        if !self.morph.settled() {
+        // Кадры нужны, только пока что-то движется: окно едет пружиной или
+        // печатается заставка. На замершем окне таймер кадров — это разбуженный
+        // процессор ни за чем.
+        if !self.morph.settled() || self.state.boot.typing() {
             streams.push(iced::time::every(FRAME).map(Message::Frame));
+        } else if !self.state.expanded {
+            // Допечатали, и всё замерло — кроме курсора консоли. Ему хватает
+            // двух пробуждений в секунду вместо шестидесяти, и просит он их
+            // только пока консоль на экране: под раскрытой панелью её не видно.
+            streams.push(iced::time::every(state::BLINK).map(Message::Frame));
         }
 
         Subscription::batch(streams)

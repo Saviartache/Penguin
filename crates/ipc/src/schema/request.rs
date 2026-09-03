@@ -74,6 +74,18 @@ pub enum Request {
     /// После этого соединение перестаёт быть «запрос — ответ» и превращается
     /// в поток событий: состояние, скорость, журнал.
     Subscribe,
+
+    /// Опустить тоннель и остановиться совсем.
+    ///
+    /// Не то же самое, что [`Self::Disconnect`]: там демон остаётся ждать
+    /// следующего подключения, здесь — выходит. Нужно окну: красная кнопка в
+    /// шапке закрывает программу целиком, а тоннель держит служба, и без
+    /// этого запроса она пережила бы окно вместе с TUN-адаптером и
+    /// маршрутами.
+    ///
+    /// Права для этого не нужны: служба останавливает себя сама, а не через
+    /// диспетчер, которому обычный пользователь такого не скажет.
+    Shutdown,
 }
 
 impl Request {
@@ -84,7 +96,7 @@ impl Request {
     pub fn is_mutating(&self) -> bool {
         matches!(
             self,
-            Self::Connect { .. } | Self::Disconnect | Self::SetConfig { .. }
+            Self::Connect { .. } | Self::Disconnect | Self::SetConfig { .. } | Self::Shutdown
         )
     }
 
@@ -101,6 +113,7 @@ impl Request {
             Self::ListProcesses => "list_processes",
             Self::Probe { .. } => "probe",
             Self::Subscribe => "subscribe",
+            Self::Shutdown => "shutdown",
         }
     }
 }
@@ -125,6 +138,7 @@ mod tests {
                 udp: false,
             },
             Request::Subscribe,
+            Request::Shutdown,
         ];
 
         for request in requests {

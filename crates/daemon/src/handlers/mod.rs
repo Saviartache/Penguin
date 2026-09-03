@@ -23,6 +23,7 @@ use penguin_engine::Engine;
 use penguin_ipc::schema::{Event, Request, Response};
 use penguin_ipc::server::Handler;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 /// Версия демона.
 ///
@@ -41,6 +42,13 @@ pub struct DaemonHandler {
     store: Arc<ConfigStore>,
     /// События, переведённые в формат провода.
     events: broadcast::Sender<Event>,
+    /// Чем останавливают демона.
+    ///
+    /// Тот же признак, что дёргает диспетчер служб на команде «стоп»: окно
+    /// закрывается вместе со всем хозяйством ([`Request::Shutdown`]), и путь
+    /// остановки у него обязан быть один и тот же — иначе они однажды
+    /// разойдутся, и один из них оставит после себя TUN.
+    cancel: CancellationToken,
     /// Отпечаток файла, с которым запущена служба.
     ///
     /// Снимается один раз, при создании обработчика: файл на диске могли уже
@@ -59,13 +67,18 @@ impl std::fmt::Debug for DaemonHandler {
 
 impl DaemonHandler {
     /// Создаёт обработчик и запускает перевод событий.
-    pub fn new(engine: Arc<Engine>, store: Arc<ConfigStore>) -> Arc<Self> {
+    pub fn new(
+        engine: Arc<Engine>,
+        store: Arc<ConfigStore>,
+        cancel: CancellationToken,
+    ) -> Arc<Self> {
         let (events, _) = broadcast::channel(penguin_engine::events::CHANNEL_CAPACITY);
         spawn_event_bridge(&engine, events.clone());
         Arc::new(Self {
             engine,
             store,
             events,
+            cancel,
             build: penguin_platform::build_stamp(),
         })
     }
@@ -83,6 +96,7 @@ impl Handler for DaemonHandler {
             Request::Status => tunnel::status(&self.engine),
             Request::Connect { profile } => tunnel::connect(&self.engine, profile).await,
             Request::Disconnect => tunnel::disconnect(&self.engine).await,
+            Request::Shutdown => tunnel::shutdown(&self.engine, &self.cancel).await,
 
             Request::GetConfig => profiles::get_config(&self.engine),
             Request::SetConfig { config } => {
@@ -190,7 +204,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("penguin-ipc-{}", std::process::id()));
         let store = ConfigStore::new(penguin_config::Paths::rooted(dir));
 
-        DaemonHandler::new(engine, Arc::new(store))
+        DaemonHandler::new(engine, Arc::new(store), CancellationToken::new())
     }
 
     #[tokio::test]
@@ -236,6 +250,20 @@ mod tests {
 
         let response = handler.handle(Request::SetConfig { config }).await;
         assert!(!response.is_error(), "настройки не приняты: {response:?}");
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_the_daemon() {
+        // Окно закрывается вместе со службой: иначе после закрытия остаются
+        // и TUN-адаптер, и маршруты.
+        let cancel = CancellationToken::new();
+        let engine = Engine::new(RootConfig::default()).expect("движок собирается");
+        let dir = std::env::temp_dir().join(format!("penguin-ipc-stop-{}", std::process::id()));
+        let store = ConfigStore::new(penguin_config::Paths::rooted(dir));
+        let handler = DaemonHandler::new(engine, Arc::new(store), cancel.clone());
+
+        assert!(!handler.handle(Request::Shutdown).await.is_error());
+        assert!(cancel.is_cancelled());
     }
 
     #[test]

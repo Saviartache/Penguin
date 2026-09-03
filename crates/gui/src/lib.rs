@@ -13,7 +13,7 @@
 #![allow(unreachable_pub)]
 
 mod app;
-mod ascii;
+mod console;
 mod forms;
 mod i18n;
 mod ipc;
@@ -49,9 +49,13 @@ pub fn run() -> iced::Result {
     .title(app::App::title)
     .subscription(app::App::subscription)
     .theme(app::App::theme)
-    // Встроенный шрифт кита: без него консоль, символьные рамки и цифры
-    // листа рисуются не тем моноширинным, что задумано (см. `font` кита).
+    // Встроенный шрифт кита: сначала его байты — иначе `iced` не найдёт
+    // семейство по имени и молча возьмёт системный (см. `font` кита).
     .font(uikit::font::NERD_FONT_BYTES)
+    // ...а затем он же — умолчанием на всё окно. Это единственное место, где
+    // шрифт называется: дальше его наследует каждый виджет, и ни один экран не
+    // задаёт свой (см. [`ui::FONT`]).
+    .default_font(ui::FONT)
     .window(iced::window::Settings {
         size: app::COMPACT,
         // Размером владеет `Morph`, и владеет им один. Системное

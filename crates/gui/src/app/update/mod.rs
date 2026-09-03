@@ -70,8 +70,27 @@ fn handle_window(app: &mut App, message: WindowMessage) -> Task<Message> {
             Task::none()
         }
         WindowMessage::CursorMoved(position) => app.chrome_mut().on_cursor_moved(position),
+        // Свернуть, а не спрятать: окно уходит на панель задач, откуда его
+        // достают одним щелчком. Тоннель при этом остаётся как был.
         WindowMessage::Minimize => window::minimize(app.window(), true),
-        WindowMessage::Close => window::close(app.window()),
+        // Закрыть означает закрыть всё. Тоннель держит служба, отдельный
+        // процесс, и окно, закрывшееся само по себе, оставило бы после себя
+        // TUN-адаптер, маршруты и трафик через нас — программу, которой на
+        // экране больше нет, а в системе она есть.
+        WindowMessage::Close => {
+            // Службы и так нет — гасить нечего, и ждать ответа не от кого.
+            if !app.state().connection.online {
+                return window::close(app.window());
+            }
+            app.state_mut().connection.push_log(
+                penguin_ipc::schema::LogLevel::Info,
+                crate::i18n::s().service_stopping.to_owned(),
+            );
+            Task::perform(connection::shutdown_service(), |()| {
+                Message::Window(WindowMessage::Stopped)
+            })
+        }
+        WindowMessage::Stopped => window::close(app.window()),
         // Окно передвинули — `Morph` держит на месте центр и обязан знать, где
         // окно сейчас.
         WindowMessage::Moved(x, y) => {

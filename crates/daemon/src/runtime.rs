@@ -50,7 +50,7 @@ pub async fn run(config_dir: Option<PathBuf>, cancel: CancellationToken) -> Resu
 
     let autoconnect = config.app.autoconnect;
     let engine = Engine::new(config).context("не удалось собрать движок")?;
-    let handler = DaemonHandler::new(Arc::clone(&engine), Arc::new(store));
+    let handler = DaemonHandler::new(Arc::clone(&engine), Arc::new(store), cancel.clone());
 
     // Автоподключение — после того, как канал управления открыт: иначе
     // интерфейс, запущенный одновременно, не достучится до демона, пока тот

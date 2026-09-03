@@ -17,7 +17,7 @@
 //! следующем обновлении списка, и узнать об этом лучше до правки.
 
 use iced::widget::{container, text};
-use iced::{Alignment, Element, Font, Length};
+use iced::{Alignment, Element, Length};
 use penguin_config::schema::profile::Profile;
 use penguin_core::id::ProfileId;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
@@ -219,10 +219,12 @@ fn latency(state: &State, id: &ProfileId) -> String {
         )
 }
 
-/// Моноширинная ячейка заданной приглушённости.
+/// Ячейка листа заданной приглушённости.
+///
+/// Шрифт не задаётся: он один на всё окно и приходит умолчанием (см.
+/// [`crate::ui::FONT`]).
 fn mono<'a>(state: &State, value: String, level: f32) -> Element<'a, Message> {
     text(value)
-        .font(Font::MONOSPACE)
         .size(type_scale::BODY)
         .color(ink::level(&state.palette, level))
         .into()

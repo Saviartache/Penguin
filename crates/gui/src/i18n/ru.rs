@@ -10,6 +10,7 @@ pub static STRINGS: Strings = Strings {
     server: "СЕРВЕР",
     protocol: "ПРОТОКОЛ",
     latency: "ЗАДЕРЖКА",
+    status: "СОСТОЯНИЕ",
 
     traffic: "Трафик",
     rules: "Правила",
@@ -33,6 +34,7 @@ pub static STRINGS: Strings = Strings {
     daemon_offline: "Служба не отвечает",
     service_starting: "Запускаю службу",
     service_needs_rights: "Без прав администратора тоннель не поднять: служба не установлена",
+    service_stopping: "Закрываю: опускаю тоннель и останавливаю службу",
 
     connect: "Подключить",
     disconnect: "Отключить",
@@ -45,8 +47,6 @@ pub static STRINGS: Strings = Strings {
     uploaded: "Отдано",
     downloaded: "Принято",
     connections: "Соединений",
-    total_downloaded: "Всего принято",
-    total_uploaded: "Всего отдано",
 
     no_profiles: "Профилей нет. Добавьте сервер.",
     no_answer: "не ответил",
