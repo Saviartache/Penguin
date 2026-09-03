@@ -6,24 +6,26 @@ use penguin_ipc::schema::Request;
 
 use crate::app::App;
 use crate::app::message::{Message, ServersMessage};
-use crate::app::update::request;
+use crate::app::update::{request, save};
 use crate::forms::server as editor;
 
 /// Разбирает экран серверов.
 pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
     match message {
+        ServersMessage::SearchChanged(value) => {
+            app.state_mut().servers.search = value;
+            Task::none()
+        }
+
         ServersMessage::Select(id) => {
             let profile = ProfileId::new(&id);
 
             // Выбор профиля сохраняется сразу, без «Сохранить»: это не правка
             // настроек, а действие — пользователь выбрал, куда подключаться.
             app.state_mut().config.active_profile = Some(profile.clone());
-            let config = app.state().config.clone();
 
             Task::batch([
-                request(Request::SetConfig {
-                    config: Box::new(config),
-                }),
+                save(app),
                 // Если тоннель уже поднят, переключение профиля должно его
                 // переподключить: иначе выбор ничего не изменит до следующего
                 // запуска.
@@ -121,10 +123,7 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
             state.servers.editor = None;
             state.servers.link.clear();
 
-            let config = state.config.clone();
-            request(Request::SetConfig {
-                config: Box::new(config),
-            })
+            save(app)
         }
 
         ServersMessage::Removed(id) => {
@@ -139,10 +138,7 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
                 state.config.active_profile = None;
             }
 
-            let config = state.config.clone();
-            request(Request::SetConfig {
-                config: Box::new(config),
-            })
+            save(app)
         }
     }
 }

@@ -43,6 +43,7 @@ pub static STRINGS: Strings = Strings {
     remove: "Remove",
     select_hint: "SELECT: CLICK A ROW",
     edit: "Edit",
+    search: "Search",
 
     uploaded: "Sent",
     downloaded: "Received",
@@ -70,17 +71,17 @@ pub static STRINGS: Strings = Strings {
 
     mode: "Mode",
     modes: ["TUN", "TUN: rules only", "TUN: except rules", "Off"],
-    mode_hints: [
-        "All traffic goes through the tunnel, except what the rules describe.",
-        "Only what the rules describe goes through the tunnel.",
-        "Everything except what the rules describe goes through the tunnel.",
-        "The tunnel is off, but the rules are still evaluated.",
-    ],
     no_rules: "No rules: all traffic follows the mode default.",
+    rule: "RULE",
+    condition: "CONDITION",
+    action: "ACTION",
+    rule_off: "off",
+    toggle_hint: "CLICK A ROW: TURN IT ON OR OFF",
+    probe_rule: "Test a rule",
     rule_probe: "Check a rule",
+    probe_hint: "Enter an address and, if it matters, an application: I will show which rule wins.",
     destination: "Address",
     process: "Application",
-    unsaved: "There are unsaved changes",
     rule_name: "Rule name",
     addresses_hint: "Addresses, subnets, domains and ports: 10.0.0.0/8, local.dev, 445",
     add_rule: "Add rule",
@@ -97,15 +98,12 @@ pub static STRINGS: Strings = Strings {
     level_error: "error",
     level_warning: "warning",
 
-    startup: "Startup",
-    network: "Network",
+    on: "ON",
+    off: "OFF",
+    startup: "STARTUP",
+    network: "NETWORK",
     autostart: "Start when I sign in",
     autoconnect: "Connect on start",
     kill_switch: "Block traffic when the tunnel drops",
-    kill_switch_hint: "Nothing leaves the machine until the tunnel is back. \
-                       Without this, a drop sends traffic out directly, and \
-                       that can go unnoticed.",
     allow_lan: "Local network bypasses the tunnel",
-    allow_lan_hint: "Your printer, router and nearby machines stay reachable. \
-                     Turned off, even 192.168.x.x goes through the tunnel.",
 };

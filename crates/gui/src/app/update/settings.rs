@@ -1,50 +1,46 @@
 //! Настройки приложения.
+//!
+//! Каждый переключатель уезжает демону сразу, без «Сохранить». Настройка здесь
+//! — это один флаг, а не набор, который собирают и подтверждают целиком:
+//! щелчок, после которого ничего не произошло, пока не нажата вторая кнопка,
+//! читается как несработавший, и человек щёлкает ещё раз.
+//!
+//! Правила при этом не уезжают: их берёт [`save`] из того, что уже принял
+//! демон. Иначе переключатель на этой вкладке молча сохранял бы набор правил,
+//! который человек ещё правит на соседней.
 
 use iced::Task;
-use penguin_ipc::schema::Request;
 
 use crate::app::App;
 use crate::app::message::{Message, SettingsMessage};
-use crate::app::update::request;
+use crate::app::update::save;
 
 /// Разбирает экран настроек.
 pub fn handle(app: &mut App, message: SettingsMessage) -> Task<Message> {
     match message {
         SettingsMessage::AutostartToggled(enabled) => {
             app.state_mut().config.app.autostart = enabled;
-            app.state_mut().dirty = true;
 
             // Автозапуск интерфейса — запись в ветку текущего пользователя, и
             // делает её сам интерфейс: демону она не нужна и прав на неё у
             // него нет.
             apply_autostart(enabled);
-            Task::none()
+            save(app)
         }
 
         SettingsMessage::AutoconnectToggled(enabled) => {
             app.state_mut().config.app.autoconnect = enabled;
-            app.state_mut().dirty = true;
-            Task::none()
+            save(app)
         }
 
         SettingsMessage::KillSwitchToggled(enabled) => {
             app.state_mut().config.network.kill_switch = enabled;
-            app.state_mut().dirty = true;
-            Task::none()
+            save(app)
         }
 
         SettingsMessage::AllowLanToggled(enabled) => {
             app.state_mut().config.network.allow_lan = enabled;
-            app.state_mut().dirty = true;
-            Task::none()
-        }
-
-        SettingsMessage::Save => {
-            let config = app.state().config.clone();
-            app.state_mut().dirty = false;
-            request(Request::SetConfig {
-                config: Box::new(config),
-            })
+            save(app)
         }
     }
 }
@@ -77,31 +73,43 @@ mod tests {
     }
 
     #[test]
-    fn toggles_reach_the_config() {
+    fn toggles_reach_the_config_and_are_saved_at_once() {
+        // Щелчок, после которого ничего не произошло, читается как
+        // несработавший, и человек щёлкает ещё раз.
         let mut app = app();
 
         let _ = handle(&mut app, SettingsMessage::KillSwitchToggled(false));
         assert!(!app.state().config.network.kill_switch);
+        assert!(!app.state().saved.network.kill_switch, "не уехало демону");
 
         let _ = handle(&mut app, SettingsMessage::AllowLanToggled(false));
-        assert!(!app.state().config.network.allow_lan);
+        assert!(!app.state().saved.network.allow_lan);
 
         let _ = handle(&mut app, SettingsMessage::AutoconnectToggled(true));
-        assert!(app.state().config.app.autoconnect);
+        assert!(app.state().saved.app.autoconnect);
 
         assert!(
-            app.state().dirty,
-            "правки должны быть видны как несохранённые"
+            !app.state().dirty,
+            "сохранять больше нечего — и предлагать нечего"
         );
     }
 
     #[test]
-    fn saving_clears_the_dirty_flag() {
+    fn a_toggle_does_not_save_rules_the_user_is_still_editing() {
+        // Иначе щелчок по переключателю на этой вкладке молча сохраняет набор
+        // правил, который человек правит на соседней.
         let mut app = app();
-        let _ = handle(&mut app, SettingsMessage::AutoconnectToggled(true));
-        assert!(app.state().dirty);
+        app.state_mut().config.routing.mode =
+            penguin_config::schema::routing::TunnelMode::Allowlist;
+        app.state_mut().dirty = true;
 
-        let _ = handle(&mut app, SettingsMessage::Save);
-        assert!(!app.state().dirty);
+        let _ = handle(&mut app, SettingsMessage::AllowLanToggled(false));
+
+        assert_eq!(
+            app.state().saved.routing.mode,
+            penguin_config::schema::routing::TunnelMode::default(),
+            "неподтверждённое правило уехало демону"
+        );
+        assert!(app.state().dirty, "правило всё ещё ждёт «Сохранить»");
     }
 }

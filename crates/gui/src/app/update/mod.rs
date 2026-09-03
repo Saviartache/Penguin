@@ -21,11 +21,6 @@ pub fn handle(app: &mut App, message: Message) -> Task<Message> {
         Message::Window(window_message) => handle_window(app, window_message),
         Message::Screen(screen) => {
             app.state_mut().screen = screen;
-            // Список приложений спрашивается при открытии экрана правил, а не
-            // держится обновляемым: он нужен только там и меняется постоянно.
-            if screen == crate::app::Screen::SplitTunnel {
-                return rules::request_processes();
-            }
             Task::none()
         }
         Message::ThemeToggle => {
@@ -124,6 +119,34 @@ pub fn bootstrap() -> Task<Message> {
 /// Спрашивает у демона всё, без чего окно пусто.
 pub fn request_initial_state() -> Task<Message> {
     Task::batch([request(Request::GetConfig), request(Request::Status)])
+}
+
+/// Сохраняет то, что сохраняется сразу: профили, выбор сервера, настройки.
+///
+/// Правила при этом берутся не из окна, а из того, что уже принял демон.
+/// Настройки уезжают одним файлом со всем остальным, и без этой подмены
+/// щелчок по переключателю на вкладке настроек молча сохранял бы набор правил,
+/// который человек ещё правит на соседней вкладке.
+pub fn save(app: &mut App) -> Task<Message> {
+    let mut config = app.state().config.clone();
+    config.routing = app.state().saved.routing.clone();
+
+    app.state_mut().saved = config.clone();
+    request(Request::SetConfig {
+        config: Box::new(config),
+    })
+}
+
+/// Сохраняет всё, включая правила, — то, чего ждут от «Сохранить» на их
+/// вкладке.
+pub fn save_rules(app: &mut App) -> Task<Message> {
+    let config = app.state().config.clone();
+
+    app.state_mut().saved = config.clone();
+    app.state_mut().dirty = false;
+    request(Request::SetConfig {
+        config: Box::new(config),
+    })
 }
 
 /// Отправляет запрос демону.

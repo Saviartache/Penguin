@@ -1,4 +1,10 @@
-//! Форма нового правила: имя, действие, адреса и список приложений.
+//! Модальное окно нового правила: имя, действие, адреса и список приложений.
+//!
+//! Окно, а не раздел под таблицей. Форма из четырёх полей плюс список
+//! запущенного в полторы сотни строк отодвигали саму таблицу за нижний край, и
+//! человек писал правило, не видя тех, что уже есть, — тогда как новое правило
+//! почти всегда пишут, глядя на соседнее, и половина ошибок в наборе от того,
+//! что два правила спорят.
 //!
 //! Адреса, домены и порты вводятся **одной строкой** и разбираются по виду.
 //! Три отдельных поля заставляли бы пользователя знать, чем подсеть отличается
@@ -9,103 +15,95 @@
 //! процесса, а без пути правило не написать — по имени файла его писать можно,
 //! но небезопасно.
 
-use iced::widget::text;
-use iced::{Alignment, Element};
+use iced::Element;
 use penguin_ipc::schema::AppInfo;
-use uikit::layout::{Flex, Sizable, Size, gap, grow, px};
+use uikit::layout::{Flex, gap, grow};
 use uikit::style::tokens::type_scale;
-use uikit::widgets::{Button, ButtonVariant, Checkbox, Select, TextInput};
+use uikit::widgets::{Checkbox, Modal, Select, TextInput};
 
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
-use crate::forms::rule::Action;
+use crate::forms::rule::{Action, Draft};
 use crate::ui;
 
-/// Сколько строк списка приложений показывать без прокрутки.
+/// Ширина окна.
 ///
-/// Список запущенного — полторы сотни строк; без ограничения он выдавливает с
-/// экрана и форму правила, и всё остальное.
-const LIST_HEIGHT: f32 = 200.0;
+/// Та же, что у окна профиля: два модальных окна разной ширины в одной
+/// программе читаются как два разных диалога.
+const WIDTH: f32 = 620.0;
 
-/// Собирает раздел «новое правило».
-pub fn view(state: &State) -> Element<'_, Message> {
-    let palette = &state.palette;
-    let draft = &state.split_tunnel.draft;
+/// Высота списка приложений.
+///
+/// Фиксированная, а не «сколько поместится»: растянутое содержимое в панели
+/// «по содержимому» схлопывается в ноль, а ноль роняет отрисовку. Значение
+/// подобрано так, чтобы окно целиком помещалось в наименьшее окно программы.
+const LIST_HEIGHT: f32 = 180.0;
 
-    let top = Flex::row()
-        .push_sized(
-            TextInput::new(crate::i18n::s().rule_name, &draft.name)
-                .on_input(|value| Message::SplitTunnel(SplitTunnelMessage::DraftNameChanged(value)))
+/// Наибольшая длина пути в строке списка.
+///
+/// Полный путь внутри пакета Windows занимает две строки машинных
+/// идентификаторов и растягивает окно; выбирают же приложение по имени файла и
+/// по началу пути.
+const PATH_WIDTH: usize = 52;
+
+/// Собирает модальное окно нового правила.
+pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
+    let form = Flex::col()
+        .push_auto(
+            Flex::row()
+                .push_sized(
+                    TextInput::new(crate::i18n::s().rule_name, &draft.name)
+                        .on_input(|value| {
+                            Message::SplitTunnel(SplitTunnelMessage::DraftNameChanged(value))
+                        })
+                        .build(),
+                    grow(3),
+                )
+                .push_sized(
+                    Select::new(Action::ALL, Some(draft.action), |action| {
+                        Message::SplitTunnel(SplitTunnelMessage::DraftActionSelected(action))
+                    })
+                    .view(),
+                    grow(2),
+                )
+                .gap(gap::SM)
+                .align(iced::Alignment::Center)
                 .build(),
-            grow(3),
         )
-        .push_sized(
-            Select::new(Action::ALL, Some(draft.action), |action| {
-                Message::SplitTunnel(SplitTunnelMessage::DraftActionSelected(action))
-            })
-            .view(),
-            grow(2),
+        .push_auto(
+            TextInput::new(crate::i18n::s().addresses_hint, &draft.addresses)
+                .on_input(|value| {
+                    Message::SplitTunnel(SplitTunnelMessage::DraftAddressesChanged(value))
+                })
+                .build(),
         )
-        .gap(gap::SM)
-        .align(Alignment::Center)
-        .build();
-
-    let addresses = TextInput::new(crate::i18n::s().addresses_hint, &draft.addresses)
-        .on_input(|value| Message::SplitTunnel(SplitTunnelMessage::DraftAddressesChanged(value)))
-        .build();
-
-    // Во всю ширину и невысокая: это завершение формы, а не действие где-то
-    // сбоку от неё, и искать его глазами человек не должен.
-    let mut add = Button::new(
-        text(crate::i18n::s().add_rule)
-            .size(type_scale::BODY)
-            .align_x(iced::alignment::Horizontal::Center)
-            .width(iced::Length::Fill),
-    )
-    .variant(ButtonVariant::Primary)
-    .w(Size::FILL)
-    .h(px(ADD_HEIGHT));
-
-    // Кнопка без условий собрала бы правило, совпадающее со всем подряд.
-    if !draft.is_empty() {
-        add = add.on_press(Message::SplitTunnel(SplitTunnelMessage::RuleAdded));
-    }
-
-    let unknown = draft.unknown();
-    let footer = Flex::row()
-        .push(if unknown.is_empty() {
-            ui::spring()
-        } else {
-            // Молча выбросить непонятое нельзя: правило соберётся, но не тем,
-            // чего ждали, и разбираться человек будет уже по последствиям.
-            ui::muted(
-                palette,
-                format!(
-                    "{}: {}",
-                    crate::i18n::s().not_recognised,
-                    unknown.join(", ")
-                ),
-                type_scale::MICRO,
-            )
-        })
-        .gap(gap::SM)
-        .align(Alignment::Center)
-        .build();
-
-    let content = Flex::col()
-        .push_auto(top)
-        .push_auto(addresses)
-        .push_auto(apps(state))
-        .push_auto(footer)
-        .push_auto(add)
+        .push_auto(apps(state, draft))
+        .push_auto(problem(state, draft))
         .gap(gap::MD)
         .build();
 
-    ui::section(palette, crate::i18n::s().new_rule, None, content)
+    let mut modal = Modal::new(form)
+        .title(crate::i18n::s().new_rule)
+        .max_width(WIDTH)
+        // `Esc` и нажатие мимо панели означают «Отмена»: отдельной кнопки для
+        // этого не нужно, а место в ряду ответов дорого.
+        .on_close(Message::SplitTunnel(SplitTunnelMessage::EditorClosed))
+        .on_backdrop(Message::SplitTunnel(SplitTunnelMessage::EditorClosed));
+
+    // Ответа нет, пока правилу нечем сработать: правило без условий совпадает
+    // со всем подряд, и добавить такое молча нельзя.
+    if !draft.is_empty() {
+        modal = modal.action(
+            crate::i18n::s().add_rule,
+            Message::SplitTunnel(SplitTunnelMessage::RuleAdded),
+        );
+    }
+
+    modal.build().into()
 }
 
 /// Список запущенных приложений с отметками.
-fn apps(state: &State) -> Element<'_, Message> {
+fn apps<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     let palette = &state.palette;
     let split = &state.split_tunnel;
 
@@ -127,7 +125,7 @@ fn apps(state: &State) -> Element<'_, Message> {
     } else {
         let rows = shown
             .into_iter()
-            .map(|app| row(state, app, split.draft.has_process(&app.path)))
+            .map(|app| row(state, app, draft.has_process(&app.path)))
             .collect::<Vec<_>>();
 
         ui::scroll_box(Flex::col().extend(rows).gap(gap::XS).build(), LIST_HEIGHT)
@@ -158,19 +156,31 @@ fn row<'a>(state: &'a State, app: &'a AppInfo, checked: bool) -> Element<'a, Mes
             type_scale::MICRO,
         ))
         .gap(gap::SM)
-        .align(Alignment::Center)
+        .align(iced::Alignment::Center)
         .build()
 }
 
-/// Наибольшая длина пути в строке списка.
+/// Что из вписанного не удалось опознать.
 ///
-/// Полный путь внутри пакета Windows занимает две строки машинных
-/// идентификаторов и растягивает окно; выбирают же приложение по имени файла и
-/// по началу пути.
-const PATH_WIDTH: usize = 52;
+/// Показывается сразу, а не по нажатию: молча выбросить непонятое нельзя —
+/// правило соберётся, но не тем, чего ждали, и разбираться человек будет уже
+/// по последствиям.
+fn problem<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
+    let unknown = draft.unknown();
+    if unknown.is_empty() {
+        return ui::spring();
+    }
 
-/// Высота кнопки «Добавить правило».
-const ADD_HEIGHT: f32 = 30.0;
+    ui::muted(
+        &state.palette,
+        format!(
+            "{}: {}",
+            crate::i18n::s().not_recognised,
+            unknown.join(", ")
+        ),
+        type_scale::MICRO,
+    )
+}
 
 /// Выбрасывает середину пути, оставляя начало и конец.
 ///
@@ -250,7 +260,7 @@ mod tests {
     fn a_long_path_keeps_both_ends() {
         // Середину пути внутри пакета Windows занимают машинные
         // идентификаторы; узнают приложение по началу и по имени файла.
-        let path = r"D:\WpSystem\S-1-5-21-2960677031-2112851187-709588018-1001\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code.1.247\claude.exe";
+        let path = r"D:\WpSystem\S-1-5-21-2960677031-2112851187-709588018-1001\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code.1.247\claude.exe";
         let short = shorten(path, PATH_WIDTH);
 
         assert_eq!(short.chars().count(), PATH_WIDTH);
@@ -287,35 +297,49 @@ mod tests {
 
     #[test]
     fn renders_without_apps() {
-        // Самое частое состояние: экран открыт, ответ службы ещё не пришёл.
+        // Самое частое состояние: окно открыто, ответ службы ещё не пришёл.
         let state = State::default();
         assert!(state.split_tunnel.running_apps.is_empty());
-        let _ = view(&state);
+        let _ = view(&state, &Draft::default());
     }
 
     #[test]
     fn renders_with_apps_and_marks() {
         let mut state = State::default();
         state.split_tunnel.running_apps = apps_list();
-        state
-            .split_tunnel
-            .draft
-            .toggle_process("c:/games/steam/steam.exe", true);
-        let _ = view(&state);
+
+        let mut draft = Draft::default();
+        draft.toggle_process("c:/games/steam/steam.exe", true);
+        let _ = view(&state, &draft);
+    }
+
+    #[test]
+    fn an_empty_draft_offers_no_answer() {
+        // Правило без условий совпало бы со всем подряд, и добавить такое
+        // молча нельзя. Кнопка, которая ничего не делает, читается как
+        // сломанная, поэтому её нет вовсе.
+        let draft = Draft {
+            name: "Пусто".to_owned(),
+            ..Draft::default()
+        };
+        assert!(draft.is_empty());
+        let _ = view(&State::default(), &draft);
     }
 
     #[test]
     fn unrecognised_input_is_shown() {
-        let mut state = State::default();
-        state.split_tunnel.draft.addresses = "example.com ???".to_owned();
-        assert_eq!(state.split_tunnel.draft.unknown(), ["???"]);
-        let _ = view(&state);
+        let draft = Draft {
+            addresses: "example.com ???".to_owned(),
+            ..Draft::default()
+        };
+        assert_eq!(draft.unknown(), ["???"]);
+        let _ = view(&State::default(), &draft);
     }
 
     #[test]
-    fn the_list_does_not_take_over_the_screen() {
-        // Полторы сотни строк без ограничения высоты выдавливают с экрана саму
-        // форму правила.
-        const { assert!(LIST_HEIGHT <= 280.0) };
+    fn the_window_fits_the_smallest_window() {
+        // Растянутое содержимое в панели «по содержимому» схлопывается в ноль,
+        // поэтому высота списка фиксированная — и обязана помещаться.
+        const { assert!(LIST_HEIGHT < crate::app::EXPANDED.height) };
     }
 }

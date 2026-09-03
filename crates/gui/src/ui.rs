@@ -1,15 +1,18 @@
-//! Основа экранов: страница, раздел, строка, пустое состояние.
+//! Мелочи, общие всем экранам: строка формы, пустое состояние, кнопка ряда.
 //!
-//! Не набор помощников для красоты. Здесь собрано то, что в `iced 0.12`
-//! разъезжается само собой, если каждый экран решает это заново.
+//! Не набор помощников для красоты. Здесь собрано то, что в `iced` разъезжается
+//! само собой, если каждый экран решает это заново.
+//!
+//! Страницы с карточками-разделами здесь больше нет. Все четыре вкладки — это
+//! панель терминала во всю высоту ([`crate::screens::table`]), и то, что
+//! осталось в этом модуле, служит уже не им, а модальным окнам: у формы внутри
+//! окна те же строки и те же два уровня приглушённого текста.
 //!
 //! # Размер задаётся явно и до конца
 //!
 //! Растянутый ребёнок внутри группы «по содержимому» **схлопывается в ноль**;
 //! ноль означает квад нулевого размера, а его рендерер не принимает. Отсюда
-//! правило: растягивается ровно один элемент на каждом уровне — страница по
-//! обеим осям, всё внутри неё по содержимому. Экрану остаётся сказать, из
-//! каких разделов он состоит.
+//! правило: растягивается ровно один элемент на каждом уровне.
 //!
 //! # Прокрутка по правилам кита
 //!
@@ -17,13 +20,7 @@
 //! задаёт содержимое, а не контейнер вокруг (правило 4.6 кита). Соблюдать это
 //! в каждом экране отдельно — значит однажды не соблюсти.
 //!
-//! # Три уровня иерархии и ни одним больше
-//!
-//! Заголовок экрана, заголовок раздела, строка. Разделяются кеглем и
-//! непрозрачностью, а не рамками: рамка вокруг каждого блока превращает экран
-//! в таблицу, где всё одинаково важно.
-//!
-//! Палитра приходит параметром, потому что в `iced 0.12` цвет текста задаётся
+//! Палитра приходит параметром, потому что в `iced` цвет текста задаётся
 //! конкретным значением, а `view` темы не получает.
 
 use iced::theme::Palette;
@@ -32,9 +29,7 @@ use iced::{Alignment, Element, Length};
 use uikit::layout::{Flex, gap, grow};
 use uikit::style::scrollbar;
 use uikit::style::tokens::{ink, type_scale};
-use uikit::widgets::{Button, ButtonVariant, Card};
-
-use crate::app::PAGE_PADDING;
+use uikit::widgets::{Button, ButtonVariant};
 
 /// Шрифт всего окна.
 ///
@@ -44,64 +39,6 @@ use crate::app::PAGE_PADDING;
 /// остальным окном — а встроен в кит он ровно затем, чтобы на всех машинах окно
 /// выглядело одинаково, без оглядки на то, какие шрифты стоят в системе.
 pub const FONT: iced::Font = uikit::font::MONO;
-
-/// Страница без заголовка — там, где он ничего не добавляет.
-///
-/// Заголовок повторяет подпись вкладки, по которой сюда и пришли. Когда на
-/// экране одно действие и один список, это второе «Серверы» подряд, съедающее
-/// строку в самом видном месте.
-pub fn page_bare<'a, Message: 'a>(sections: Vec<Element<'a, Message>>) -> Element<'a, Message> {
-    build_page(sections)
-}
-
-/// Общая часть страницы: прокрутка, отступы, воздух снизу.
-fn build_page<'a, Message: 'a>(sections: Vec<Element<'a, Message>>) -> Element<'a, Message> {
-    let body = Flex::col()
-        .extend(sections)
-        // Воздух снизу: последний раздел не должен упираться в край окна.
-        .push_auto(Space::new().height(Length::Fixed(PAGE_PADDING)))
-        .gap(gap::LG)
-        .build();
-
-    // Отступ — на содержимом прокрутки, а не на обёртке: иначе полоса ляжет
-    // поверх текста у правого края (правило 4.6 кита).
-    scrollable(
-        container(body)
-            .padding(scrollbar::safe(PAGE_PADDING))
-            .width(Length::Fill),
-    )
-    .direction(scrollbar::vertical())
-    .style(scrollbar::style())
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
-}
-
-/// Раздел страницы: заголовок, необязательная подсказка, содержимое.
-pub fn section<'a, Message: 'a>(
-    palette: &Palette,
-    title: &'a str,
-    hint: Option<&'a str>,
-    content: impl Into<Element<'a, Message>>,
-) -> Element<'a, Message> {
-    let head = Flex::col()
-        .push_auto(text(title).size(type_scale::LEAD))
-        .push_maybe(hint.map(|hint| faint(palette, hint, type_scale::MICRO)))
-        .gap(gap::XS)
-        .build();
-
-    let body = Flex::col()
-        .push_auto(head)
-        .push_auto(content)
-        .gap(gap::MD)
-        .build();
-
-    Card::new(body)
-        .padding(gap::LG)
-        .width(Length::Fill)
-        .build()
-        .into()
-}
 
 /// сузить поле вдвое ради пустоты.
 pub fn form_row<'a, Message: 'a>(
@@ -113,19 +50,6 @@ pub fn form_row<'a, Message: 'a>(
         .push_sized(control, grow(3))
         .gap(gap::LG)
         .align(Alignment::Center)
-        .build()
-}
-
-/// Строка, у которой элемент управления сам несёт подпись, — флажок.
-pub fn switch<'a, Message: 'a>(
-    palette: &Palette,
-    control: impl Into<Element<'a, Message>>,
-    hint: Option<&'a str>,
-) -> Element<'a, Message> {
-    Flex::col()
-        .push_auto(control)
-        .push_maybe(hint.map(|hint| faint(palette, hint, type_scale::MICRO)))
-        .gap(gap::XS)
         .build()
 }
 
@@ -224,33 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn a_page_declares_itself_stretched() {
-        // Растянутый ребёнок в группе «по содержимому» схлопывается в ноль, а
-        // квад нулевого размера рендерер не принимает. Страница обязана
-        // объявить размер сама, иначе это придётся помнить каждому экрану.
-        let page: Element<'_, Message> = page_bare(Vec::new());
-        let size = page.as_widget().size();
-
-        assert_eq!(size.width, Length::Fill);
-        assert_eq!(size.height, Length::Fill);
-    }
-
-    #[test]
-    fn sections_fill_the_page_width() {
-        // Раздел уже колонки читается как обрезанный, а не как отдельный блок.
-        let section: Element<'_, Message> = section(&palette(), "Раздел", None, text("тело"));
-        assert_eq!(section.as_widget().size().width, Length::Fill);
-    }
-
-    #[test]
-    fn a_section_takes_only_the_height_it_needs() {
-        // Иначе два раздела на странице делили бы её высоту поровну, и
-        // короткий раздел растягивался бы на пол-экрана.
-        let section: Element<'_, Message> = section(&palette(), "Раздел", None, text("тело"));
-        assert_ne!(section.as_widget().size().height, Length::Fill);
-    }
-
-    #[test]
     fn a_scroll_box_keeps_the_height_it_was_given() {
         let list: Element<'_, Message> = scroll_box(text("строка"), 180.0);
         assert_eq!(list.as_widget().size().height, Length::Fixed(180.0));
@@ -268,21 +165,15 @@ mod tests {
 
     #[test]
     fn everything_composes() {
+        // То, из чего собрана форма модального окна: строка, пустое состояние
+        // и список с прокруткой в одном столбце.
         let palette = palette();
-        let _: Element<'_, Message> = page_bare(vec![
-            section(&palette, "Раздел", Some("подсказка"), text("тело")),
-            section(
-                &palette,
-                "Со строками",
-                None,
-                Flex::col()
-                    .push_auto(form_row("Поле", text("значение")))
-                    .push_auto(switch(&palette, text("флажок"), Some("что делает")))
-                    .push_auto(empty(&palette, "пусто"))
-                    .push_auto(scroll_box(text("список"), 120.0))
-                    .gap(gap::SM)
-                    .build(),
-            ),
-        ]);
+        let _: Element<'_, Message> = Flex::col()
+            .push_auto(form_row("Поле", text("значение")))
+            .push_auto(empty(&palette, "пусто"))
+            .push_auto(scroll_box(text("список"), 120.0))
+            .push_auto(spring())
+            .gap(gap::SM)
+            .build();
     }
 }

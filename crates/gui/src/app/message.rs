@@ -149,6 +149,8 @@ pub enum HomeMessage {
 /// Серверы.
 #[derive(Debug, Clone)]
 pub enum ServersMessage {
+    /// Изменён поиск по списку.
+    SearchChanged(String),
     /// Выбран профиль.
     Select(String),
     /// Проверить задержку.
@@ -175,10 +177,17 @@ pub enum ServersMessage {
 pub enum SplitTunnelMessage {
     /// Сменить режим.
     ModeSelected(String),
+    /// Изменён поиск по списку правил.
+    SearchChanged(String),
     /// Правило включено или выключено.
     RuleToggled(usize, bool),
     /// Правило удалено.
     RuleRemoved(usize),
+
+    /// Открыть окно проверки.
+    ProbeOpened,
+    /// Закрыть окно проверки.
+    ProbeClosed,
     /// Изменён адрес для проверки.
     ProbeDestinationChanged(String),
     /// Изменено приложение для проверки.
@@ -190,6 +199,10 @@ pub enum SplitTunnelMessage {
     /// двух местах.
     ProbeRequested,
 
+    /// Открыть окно нового правила.
+    EditorOpened,
+    /// Закрыть окно, ничего не добавив.
+    EditorClosed,
     /// Изменён поиск по списку приложений.
     AppSearchChanged(String),
     /// Приложение отмечено или снято — полным путём.
@@ -208,6 +221,11 @@ pub enum SplitTunnelMessage {
 }
 
 /// Настройки.
+///
+/// Сохранения здесь нет: каждый переключатель уезжает демону сразу. Это не
+/// правка набора, которую собирают и подтверждают целиком, а один флаг —
+/// «Сохранить» рядом с ним означала бы, что щелчок сам по себе ничего не
+/// сделал.
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
     /// Автозапуск.
@@ -218,8 +236,6 @@ pub enum SettingsMessage {
     KillSwitchToggled(bool),
     /// Локальная сеть мимо тоннеля.
     AllowLanToggled(bool),
-    /// Сохранить.
-    Save,
 }
 
 #[cfg(test)]

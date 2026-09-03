@@ -49,7 +49,7 @@ const NONE: &str = "-";
 ///
 /// Латиницей и с обратной косой — приглашение `COMMAND.COM`, а не приглашение
 /// оболочки Unix: окно и живёт на Windows.
-const PROMPT: &str = "C:\\OSTRIACKI>";
+const PROMPT: &str = "C:\\OSTRIACKI> ";
 
 /// Собирает компактный экран.
 pub fn view(state: &State) -> Element<'_, Message> {

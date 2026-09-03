@@ -9,6 +9,7 @@ pub mod logs;
 pub mod rules;
 pub mod servers;
 pub mod settings;
+pub mod table;
 pub mod tunnel;
 
 use iced::Element;

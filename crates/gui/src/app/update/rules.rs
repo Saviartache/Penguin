@@ -10,7 +10,7 @@ use penguin_ipc::schema::Request;
 
 use crate::app::App;
 use crate::app::message::{Message, SplitTunnelMessage};
-use crate::app::update::request;
+use crate::app::update::{request, save_rules};
 use crate::forms::rule;
 
 /// Разбирает экран правил.
@@ -21,6 +21,11 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
                 app.state_mut().config.routing.mode = mode;
                 app.state_mut().dirty = true;
             }
+            Task::none()
+        }
+
+        SplitTunnelMessage::SearchChanged(value) => {
+            app.state_mut().split_tunnel.search = value;
             Task::none()
         }
 
@@ -38,6 +43,16 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
                 rules.remove(index);
                 app.state_mut().dirty = true;
             }
+            Task::none()
+        }
+
+        SplitTunnelMessage::ProbeOpened => {
+            app.state_mut().split_tunnel.probe_open = true;
+            Task::none()
+        }
+
+        SplitTunnelMessage::ProbeClosed => {
+            app.state_mut().split_tunnel.probe_open = false;
             Task::none()
         }
 
@@ -67,56 +82,76 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             })
         }
 
+        SplitTunnelMessage::EditorOpened => {
+            app.state_mut().split_tunnel.editor = Some(rule::Draft::default());
+            // Поиск по приложениям остался бы от прошлого правила, и список в
+            // свежем окне оказался бы уже отобранным неизвестно по чему.
+            app.state_mut().split_tunnel.app_search.clear();
+            // Список запущенного мог устареть за то время, что окно открыто:
+            // спрашиваем заново ровно тогда, когда он понадобился.
+            request_processes()
+        }
+
+        SplitTunnelMessage::EditorClosed => {
+            app.state_mut().split_tunnel.editor = None;
+            Task::none()
+        }
+
         SplitTunnelMessage::AppSearchChanged(value) => {
             app.state_mut().split_tunnel.app_search = value;
             Task::none()
         }
 
         SplitTunnelMessage::AppToggled(path, checked) => {
-            app.state_mut()
-                .split_tunnel
-                .draft
-                .toggle_process(&path, checked);
+            if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
+                draft.toggle_process(&path, checked);
+            }
             Task::none()
         }
 
         SplitTunnelMessage::DraftNameChanged(value) => {
-            app.state_mut().split_tunnel.draft.name = value;
+            if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
+                draft.name = value;
+            }
             Task::none()
         }
 
         SplitTunnelMessage::DraftAddressesChanged(value) => {
-            app.state_mut().split_tunnel.draft.addresses = value;
+            if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
+                draft.addresses = value;
+            }
             Task::none()
         }
 
         SplitTunnelMessage::DraftActionSelected(action) => {
-            app.state_mut().split_tunnel.draft.action = action;
+            if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
+                draft.action = action;
+            }
             Task::none()
         }
 
         SplitTunnelMessage::RuleAdded => {
             let id = rule::unique_id(&app.state().config.routing.rules);
-            let Some(new_rule) = app.state().split_tunnel.draft.build(id) else {
+            let new_rule = app
+                .state()
+                .split_tunnel
+                .editor
+                .as_ref()
+                .and_then(|draft| draft.build(id));
+            let Some(new_rule) = new_rule else {
                 // Черновик без условий: правило совпадало бы со всем подряд.
                 return Task::none();
             };
 
             app.state_mut().config.routing.rules.push(new_rule);
-            // Черновик очищается сразу: оставленный в форме, он выглядит как
+            // Окно закрывается сразу: оставленный в нём черновик выглядит как
             // ещё не добавленный, и следующее нажатие даёт второе такое же.
-            app.state_mut().split_tunnel.draft = rule::Draft::default();
+            app.state_mut().split_tunnel.editor = None;
             app.state_mut().dirty = true;
             Task::none()
         }
 
-        SplitTunnelMessage::Save => {
-            let config = app.state().config.clone();
-            app.state_mut().dirty = false;
-            request(Request::SetConfig {
-                config: Box::new(config),
-            })
-        }
+        SplitTunnelMessage::Save => save_rules(app),
     }
 }
 
@@ -231,6 +266,7 @@ mod tests {
         // следующее нажатие даёт второе такое же правило.
         let mut app = app_with_rules(json!([]));
 
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
         let _ = handle(
             &mut app,
             SplitTunnelMessage::DraftNameChanged("Игры".to_owned()),
@@ -243,7 +279,10 @@ mod tests {
 
         assert_eq!(app.state().config.routing.rules.len(), 1);
         assert_eq!(app.state().config.routing.rules[0].name, "Игры");
-        assert!(app.state().split_tunnel.draft.is_empty());
+        assert!(
+            app.state().split_tunnel.editor.is_none(),
+            "окно осталось открытым с добавленным правилом"
+        );
         assert!(app.state().dirty);
     }
 
@@ -251,6 +290,7 @@ mod tests {
     fn an_empty_draft_adds_nothing() {
         // Правило без условий совпало бы со всем подряд.
         let mut app = app_with_rules(json!([]));
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
         let _ = handle(
             &mut app,
             SplitTunnelMessage::DraftNameChanged("Пусто".to_owned()),
@@ -269,6 +309,7 @@ mod tests {
             { "id": "rule-1", "when": { "dest_port": [443] }, "action": "direct" }
         ]));
 
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
         let _ = handle(
             &mut app,
             SplitTunnelMessage::DraftAddressesChanged("example.com".to_owned()),

@@ -488,7 +488,7 @@ mod tests {
             Line::Pair("ПРОФИЛЬ".to_owned(), "84.22.150.245".to_owned()),
             Line::Toned("СОСТОЯНИЕ".to_owned(), "ОТКЛЮЧЕНО".to_owned(), Color::WHITE),
             Line::Graph(vec![0.0, 0.5, 1.0]),
-            Line::Prompt("C:\\OSTRIACKI>".to_owned()),
+            Line::Prompt("C:\\OSTRIACKI> ".to_owned()),
         ]
     }
 

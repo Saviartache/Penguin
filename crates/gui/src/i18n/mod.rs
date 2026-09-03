@@ -95,6 +95,8 @@ pub struct Strings {
     pub select_hint: &'static str,
     /// Править.
     pub edit: &'static str,
+    /// Поиск по таблице — подсказкой внутри поля.
+    pub search: &'static str,
 
     // --- главный экран ---
     /// Отдано.
@@ -171,18 +173,31 @@ pub struct Strings {
     pub mode: &'static str,
     /// Подписи режимов в порядке [`MODE_VALUES`].
     pub modes: [&'static str; 4],
-    /// Что делает каждый режим, в том же порядке.
-    pub mode_hints: [&'static str; 4],
     /// Правил нет.
     pub no_rules: &'static str,
+    /// Заголовок столбца с именем правила.
+    pub rule: &'static str,
+    /// Заголовок столбца с условием.
+    pub condition: &'static str,
+    /// Заголовок столбца с действием.
+    pub action: &'static str,
+    /// Правило выключено — меткой в строке.
+    pub rule_off: &'static str,
+    /// Как включить или выключить правило — подсказкой у нижнего края таблицы.
+    ///
+    /// Флажка в строке нет: строка и есть переключатель. Действие, у которого
+    /// не осталось своего элемента управления, обязано быть написано словами.
+    pub toggle_hint: &'static str,
+    /// Проверить правило — кнопкой над таблицей.
+    pub probe_rule: &'static str,
     /// Проверка правил.
     pub rule_probe: &'static str,
+    /// Что покажет проверка — строкой на месте ещё не полученного ответа.
+    pub probe_hint: &'static str,
     /// Куда.
     pub destination: &'static str,
     /// Какое приложение.
     pub process: &'static str,
-    /// Есть несохранённые правки.
-    pub unsaved: &'static str,
     /// Имя правила.
     pub rule_name: &'static str,
     /// Что можно вписать в строку адресов.
@@ -215,6 +230,10 @@ pub struct Strings {
     pub level_warning: &'static str,
 
     // --- настройки ---
+    /// Переключатель включён — значением у правого края строки.
+    pub on: &'static str,
+    /// Переключатель выключен.
+    pub off: &'static str,
     /// Раздел запуска.
     pub startup: &'static str,
     /// Раздел сети.
@@ -225,12 +244,8 @@ pub struct Strings {
     pub autoconnect: &'static str,
     /// Kill switch.
     pub kill_switch: &'static str,
-    /// Что делает kill switch.
-    pub kill_switch_hint: &'static str,
     /// Локальная сеть мимо тоннеля.
     pub allow_lan: &'static str,
-    /// Что значит «локальная сеть мимо тоннеля».
-    pub allow_lan_hint: &'static str,
 }
 
 /// Значения режимов в том порядке, в каком они показываются.
@@ -265,16 +280,6 @@ pub fn mode_label(mode: &str) -> &'static str {
     mode_index(mode).map_or("", |index| s().modes[index])
 }
 
-/// Что делает режим — строкой под списком.
-///
-/// Это не подсказка для новичка. «Белый список» и «чёрный список» в разных
-/// клиентах означают противоположные вещи, и полагаться на то, что
-/// пользователь угадает нужное, нельзя: цена ошибки — весь трафик мимо
-/// тоннеля.
-pub fn mode_hint(mode: &str) -> &'static str {
-    mode_index(mode).map_or("", |index| s().mode_hints[index])
-}
-
 /// Место режима в [`MODE_VALUES`].
 fn mode_index(mode: &str) -> Option<usize> {
     MODE_VALUES.iter().position(|known| *known == mode)
@@ -290,12 +295,11 @@ mod tests {
     const TABLES: [(&str, &Strings); 2] = [("ru", &ru::STRINGS), ("en", &en::STRINGS)];
 
     #[test]
-    fn every_mode_has_a_label_and_an_explanation() {
+    fn every_mode_has_a_label() {
         // Режим без подписи выглядит в списке пустой строкой, и выбрать его
         // невозможно.
         for mode in MODE_VALUES {
             assert!(!mode_label(mode).is_empty(), "нет подписи для `{mode}`");
-            assert!(!mode_hint(mode).is_empty(), "нет объяснения для `{mode}`");
         }
         assert_eq!(mode_label("нет такого"), "");
     }
@@ -330,6 +334,7 @@ mod tests {
                 table.remove,
                 table.select_hint,
                 table.edit,
+                table.search,
                 table.uploaded,
                 table.downloaded,
                 table.connections,
@@ -354,10 +359,16 @@ mod tests {
                 table.bad_server,
                 table.mode,
                 table.no_rules,
+                table.rule,
+                table.condition,
+                table.action,
+                table.rule_off,
+                table.toggle_hint,
+                table.probe_rule,
                 table.rule_probe,
+                table.probe_hint,
                 table.destination,
                 table.process,
-                table.unsaved,
                 table.rule_name,
                 table.addresses_hint,
                 table.add_rule,
@@ -369,14 +380,14 @@ mod tests {
                 table.nothing_found,
                 table.level_error,
                 table.level_warning,
+                table.on,
+                table.off,
                 table.startup,
                 table.network,
                 table.autostart,
                 table.autoconnect,
                 table.kill_switch,
-                table.kill_switch_hint,
                 table.allow_lan,
-                table.allow_lan_hint,
             ];
 
             for label in all.into_iter().chain(table.screens).chain(table.modes) {

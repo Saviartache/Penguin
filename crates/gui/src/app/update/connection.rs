@@ -41,7 +41,8 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
 
         Response::Config(config) => {
             state.config = *config;
-            // Правки сброшены: пришло то, что лежит у демона.
+            // Обе копии — то, что лежит у демона: правок в окне больше нет.
+            state.saved = state.config.clone();
             state.dirty = false;
             Task::none()
         }

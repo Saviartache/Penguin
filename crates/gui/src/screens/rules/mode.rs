@@ -1,21 +1,25 @@
 //! Выбор режима: всё, белый список, чёрный список, только правила.
 //!
+//! Стоит первым на вкладке, на том же месте, где на вкладке серверов стоят
+//! кнопки, и растянут во всю ширину. Причина не в красоте ряда: режим решает,
+//! что происходит с трафиком, **о котором не сказано ничего**, — то есть с
+//! почти всем. Правила уточняют уже его решение, и читать их, не зная режима,
+//! бессмысленно.
+//!
 //! В списке показываются подписи, а в настройки уезжает значение
 //! ([`crate::i18n::MODE_VALUES`]). Разделены они не ради перевода: значения
 //! читает маршрутизатор и они не меняются никогда, а подписи меняются каждый
 //! раз, когда выясняется, что человек понял их не так.
 //!
-//! Подсказка под списком меняется вместе с выбором и объясняет не «что такое
-//! режим», а что сейчас происходит с трафиком. Это не подсказка для новичка:
-//! «белый список» и «чёрный список» в разных клиентах означают
-//! противоположные вещи, и цена ошибки — весь трафик мимо тоннеля.
+//! Строки-объяснения под списком нет: подписи режимов сами говорят, что делают
+//! («TUN: только правила», «TUN: кроме правил»), а строка под ними пересказывала
+//! бы выбранную подпись другими словами и отодвигала бы вниз таблицу.
 
 use iced::Element;
 use uikit::widgets::Select;
 
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
-use crate::ui;
 
 /// Режим в выпадающем списке.
 ///
@@ -38,21 +42,14 @@ impl std::fmt::Display for Choice {
     }
 }
 
-/// Собирает раздел выбора режима.
+/// Собирает верх вкладки: список режима во всю ширину.
 pub fn view(state: &State) -> Element<'_, Message> {
     let current = state.config.routing.mode.as_str();
 
-    let select = Select::new(Choice::all(), Some(Choice(current)), |choice: Choice| {
+    Select::new(Choice::all(), Some(Choice(current)), |choice: Choice| {
         Message::SplitTunnel(SplitTunnelMessage::ModeSelected(choice.0.to_owned()))
     })
-    .view();
-
-    ui::section(
-        &state.palette,
-        crate::i18n::s().mode,
-        Some(crate::i18n::mode_hint(current)),
-        select,
-    )
+    .view()
 }
 
 #[cfg(test)]
@@ -89,17 +86,15 @@ mod tests {
     }
 
     #[test]
-    fn the_hint_matches_what_the_router_does() {
-        // Объяснение и поведение маршрутизатора обязаны совпадать, а расходятся
-        // они молча.
-        assert!(TunnelMode::Full.defaults_to_tunnel());
-        assert!(crate::i18n::mode_hint("full").contains("Весь трафик"));
-
-        assert!(!TunnelMode::Allowlist.defaults_to_tunnel());
-        assert!(crate::i18n::mode_hint("allowlist").contains("только"));
-
-        assert!(!TunnelMode::Off.defaults_to_tunnel());
-        assert!(crate::i18n::mode_hint("off").contains("выключен"));
+    fn the_select_fills_the_width() {
+        // Режим — самое важное решение на экране, и полем в треть ширины он
+        // читался бы как одна из настроек.
+        let state = State::default();
+        assert_eq!(
+            view(&state).as_widget().size().width,
+            iced::Length::Fill,
+            "список режима не во всю ширину"
+        );
     }
 
     #[test]

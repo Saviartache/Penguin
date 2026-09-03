@@ -1,4 +1,4 @@
-//! Проверка правил: адрес и приложение на входе, решение на выходе.
+//! Модальное окно проверки: адрес и приложение на входе, решение на выходе.
 //!
 //! Отвечает на вопрос, ради которого экран и существует: **почему это
 //! приложение пошло не туда**. Без проверки набор из тридцати правил — чёрный
@@ -7,21 +7,35 @@
 //! Показывается не только сработавшее правило, но и те, что сработали бы без
 //! него: неожиданный исход чаще всего объясняется правилом, стоящим выше по
 //! порядку.
+//!
+//! Поля переживают закрытие окна намеренно: одно и то же соединение проверяют
+//! по нескольку раз, правя правила между заходами, и вписывать адрес заново
+//! каждый раз значит проверять реже, чем нужно.
 
 use iced::widget::text;
 use iced::{Alignment, Element};
-use penguin_ipc::schema::Explanation;
 use uikit::layout::{Flex, gap, grow};
 use uikit::style::tokens::{ink, type_scale};
-use uikit::widgets::{ButtonVariant, TextInput};
+use uikit::widgets::{Modal, TextInput};
 
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
 use crate::ui;
 
-/// Собирает раздел проверки.
+/// Ширина окна.
+///
+/// Та же, что у окна нового правила: два модальных окна разной ширины в одной
+/// программе читаются как два разных диалога.
+const WIDTH: f32 = 620.0;
+
+/// Высота разбора правил.
+///
+/// Фиксированная, а не «сколько поместится»: растянутое содержимое в панели
+/// «по содержимому» схлопывается в ноль, а ноль роняет отрисовку.
+const TRACE_HEIGHT: f32 = 180.0;
+
+/// Собирает модальное окно проверки.
 pub fn view(state: &State) -> Element<'_, Message> {
-    let palette = &state.palette;
     let probe = &state.split_tunnel;
 
     let form = Flex::row()
@@ -30,6 +44,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
                 .on_input(|value| {
                     Message::SplitTunnel(SplitTunnelMessage::ProbeDestinationChanged(value))
                 })
+                .on_submit(Message::SplitTunnel(SplitTunnelMessage::ProbeRequested))
                 .build(),
             grow(3),
         )
@@ -38,12 +53,9 @@ pub fn view(state: &State) -> Element<'_, Message> {
                 .on_input(|value| {
                     Message::SplitTunnel(SplitTunnelMessage::ProbeProcessChanged(value))
                 })
+                .on_submit(Message::SplitTunnel(SplitTunnelMessage::ProbeRequested))
                 .build(),
             grow(2),
-        )
-        .push_auto(
-            ui::button(ButtonVariant::Secondary, crate::i18n::s().probe)
-                .on_press(Message::SplitTunnel(SplitTunnelMessage::ProbeRequested)),
         )
         .gap(gap::SM)
         .align(Alignment::Center)
@@ -51,21 +63,37 @@ pub fn view(state: &State) -> Element<'_, Message> {
 
     let content = Flex::col()
         .push_auto(form)
-        .push_maybe(
-            probe
-                .probe_result
-                .as_ref()
-                .map(|answer| result(state, answer)),
-        )
+        .push_auto(result(state))
         .gap(gap::MD)
         .build();
 
-    ui::section(palette, crate::i18n::s().rule_probe, None, content)
+    let mut modal = Modal::new(content)
+        .title(crate::i18n::s().rule_probe)
+        .max_width(WIDTH)
+        .on_close(Message::SplitTunnel(SplitTunnelMessage::ProbeClosed))
+        .on_backdrop(Message::SplitTunnel(SplitTunnelMessage::ProbeClosed));
+
+    // Пустой адрес — не запрос, а незаполненная форма: ответ на неё был бы
+    // ответом ни про что.
+    if !probe.probe_destination.trim().is_empty() {
+        modal = modal.action(
+            crate::i18n::s().probe,
+            Message::SplitTunnel(SplitTunnelMessage::ProbeRequested),
+        );
+    }
+
+    modal.build().into()
 }
 
-/// Показывает результат проверки.
-fn result<'a>(state: &'a State, explanation: &'a Explanation) -> Element<'a, Message> {
+/// Что ответила проверка.
+///
+/// До первой проверки на этом месте строка о том, чего ждут: пустота под
+/// формой читается как «не ответило», и человек ждёт.
+fn result(state: &State) -> Element<'_, Message> {
     let palette = &state.palette;
+    let Some(explanation) = state.split_tunnel.probe_result.as_ref() else {
+        return ui::empty(palette, crate::i18n::s().probe_hint);
+    };
 
     let verdict =
         text(format!("{} — {}", explanation.decision, explanation.reason)).size(type_scale::LEAD);
@@ -78,7 +106,7 @@ fn result<'a>(state: &'a State, explanation: &'a Explanation) -> Element<'a, Mes
             // предыдущего» — разные вещи, и именно во втором чаще всего и
             // кроется неожиданный исход.
             let (mark, level) = match (rule.decisive, rule.matched) {
-                (true, _) => ("→", ink::SECONDARY),
+                (true, _) => (">", ink::SECONDARY),
                 (false, true) => ("·", ink::TERTIARY),
                 (false, false) => (" ", ink::TERTIARY),
             };
@@ -95,18 +123,21 @@ fn result<'a>(state: &'a State, explanation: &'a Explanation) -> Element<'a, Mes
                 .align(Alignment::Start)
                 .build()
         })
-        .collect::<Vec<Element<'a, Message>>>();
+        .collect::<Vec<Element<'_, Message>>>();
 
     Flex::col()
         .push_auto(verdict)
-        .push_auto(Flex::col().extend(rows).gap(gap::XS).build())
+        .push_auto(ui::scroll_box(
+            Flex::col().extend(rows).gap(gap::XS).build(),
+            TRACE_HEIGHT,
+        ))
         .gap(gap::SM)
         .build()
 }
 
 #[cfg(test)]
 mod tests {
-    use penguin_ipc::schema::RuleTrace;
+    use penguin_ipc::schema::{Explanation, RuleTrace};
 
     use super::*;
 
@@ -145,6 +176,17 @@ mod tests {
     fn renders_a_result() {
         let mut state = State::default();
         state.split_tunnel.probe_result = Some(explanation());
+        let _ = view(&state);
+    }
+
+    #[test]
+    fn an_empty_address_offers_no_answer() {
+        // Пустой адрес — не запрос, а незаполненная форма.
+        let mut state = State::default();
+        state.split_tunnel.probe_destination = "   ".to_owned();
+        let _ = view(&state);
+
+        state.split_tunnel.probe_destination = "example.com:443".to_owned();
         let _ = view(&state);
     }
 
