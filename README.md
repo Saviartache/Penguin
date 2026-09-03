@@ -25,6 +25,16 @@
 <img src="assets/screens/dark.png" alt="Главное окно, тёмная тема" width="330">
 
 <br>
+<br>
+
+<img src="assets/screens/servers-light.png" alt="Экран «Серверы», светлая тема" width="680">
+
+<br>
+<br>
+
+<img src="assets/screens/servers-dark.png" alt="Экран «Серверы», тёмная тема" width="680">
+
+<br>
 
 </div>
 
