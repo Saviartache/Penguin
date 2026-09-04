@@ -156,10 +156,39 @@ impl OutboundPool {
     }
 }
 
+/// Фичи, включённые в эту сборку, через запятую.
+///
+/// Считает `build.rs` по переменным Cargo — то есть по тому, что на самом
+/// деле включено, а не по списку, который можно забыть пополнить. Ради этого
+/// он и заведён: см. тест `every_enabled_feature_brings_its_protocols`.
+pub const FEATURES: &str = env!("PENGUIN_FEATURES");
+
+/// Что каждая фича обязана положить в реестр.
+///
+/// Оракул для тестов ниже, и потому `cfg(test)`: в работе программе это знание
+/// не нужно — она спрашивает реестр. Нужно оно проверке, и забыть здесь так же
+/// нельзя, как забыть строку регистрации: тест смотрит в обе стороны — и что
+/// объявленное зарегистрировано, и что зарегистрированное объявлено.
+///
+/// `None` — фича не про протоколы (`default`) либо про протокол, о котором
+/// здесь не написали. Второе тест считает ошибкой.
+#[cfg(test)]
+fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
+    Some(match feature {
+        // Не протокол: перечисление остальных.
+        "default" => &[],
+        "hysteria2" => &["hysteria2"],
+        "socks5" => &["socks5"],
+        // Одна фича, два имени в настройках.
+        "http-proxy" => &["http", "https"],
+        _ => return None,
+    })
+}
+
 /// Регистрирует протоколы, включённые в сборку.
 ///
-/// Добавление протокола — одна строка здесь и одна фича в `Cargo.toml`.
-/// Больше нигде в программе трогать ничего не нужно.
+/// Добавление протокола — одна строка здесь, одна фича в `Cargo.toml` и одна
+/// строка в [`protocols_of`]. Больше нигде в программе трогать ничего не нужно.
 fn register_protocols(registry: &mut ProtocolRegistry) {
     #[cfg(feature = "hysteria2")]
     registry.register(Arc::new(penguin_hysteria2::Hysteria2Factory::new()));
@@ -204,28 +233,6 @@ mod tests {
         assert!(pool.get(&OutboundId::direct()).is_some());
     }
 
-    #[cfg(feature = "hysteria2")]
-    #[test]
-    fn hysteria2_is_registered() {
-        assert!(pool().protocols().contains(&"hysteria2"));
-    }
-
-    #[cfg(feature = "socks5")]
-    #[test]
-    fn socks5_is_registered() {
-        assert!(pool().protocols().contains(&"socks5"));
-    }
-
-    #[cfg(feature = "http-proxy")]
-    #[test]
-    fn both_http_proxies_are_registered() {
-        // Имена разные, крейт один: реестр обязан знать оба, иначе профиль
-        // `https` в файле настроек окажется профилем неизвестного протокола.
-        let protocols = pool().protocols();
-        assert!(protocols.contains(&"http"));
-        assert!(protocols.contains(&"https"));
-    }
-
     #[cfg(feature = "socks5")]
     #[test]
     fn a_proxy_profile_is_checked_without_network() {
@@ -239,6 +246,61 @@ mod tests {
         );
         pool.validate(&profile("socks5", json!({ "server": "127.0.0.1:1080" })))
             .expect("настройки верны");
+    }
+
+    /// Фичи этой сборки, кроме служебных.
+    fn enabled_features() -> Vec<&'static str> {
+        FEATURES
+            .split(',')
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    // Своего теста «протокол зарегистрирован» у протоколов нет намеренно:
+    // два теста ниже покрывают их все сразу и по построению не могут отстать
+    // от списка. Двадцать шесть одинаковых тестов — это двадцать шесть
+    // поводов забыть двадцать седьмой.
+    #[test]
+    fn every_enabled_feature_brings_its_protocols() {
+        // Главная ошибка при добавлении протокола: фича есть, зависимость
+        // подключилась, крейт собрался — а строку регистрации забыли.
+        // Собирается такое молча, а находится профилем «неизвестный протокол»
+        // у человека, который ничего не менял.
+        let registered = pool().protocols();
+
+        for feature in enabled_features() {
+            let expected = protocols_of(feature).unwrap_or_else(|| {
+                panic!(
+                    "фича `{feature}` включена, а что она даёт — нигде не сказано:                      допишите её в `protocols_of`"
+                )
+            });
+            for protocol in expected {
+                assert!(
+                    registered.contains(protocol),
+                    "фича `{feature}` включена, а протокола `{protocol}` в реестре нет"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_registered_protocol_comes_from_an_enabled_feature() {
+        // Обратная сторона: протокол, зарегистрированный мимо фичи, нельзя ни
+        // выключить, ни найти по имени фичи — и `--no-default-features`
+        // соберёт демона с ним внутри.
+        let announced: Vec<&str> = enabled_features()
+            .into_iter()
+            .filter_map(protocols_of)
+            .flatten()
+            .copied()
+            .collect();
+
+        for protocol in pool().protocols() {
+            assert!(
+                announced.contains(&protocol),
+                "`{protocol}` в реестре есть, а фичи, которая его даёт, нет"
+            );
+        }
     }
 
     #[test]
