@@ -20,14 +20,23 @@ pub(super) fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
 
     match crate::command::run(OSASCRIPT, &["-e", &script]) {
         Ok(_) => Ok(true),
-        // Отказ в окне и неудача самой команды выглядят одинаково — ненулевым
-        // кодом возврата. Отличить их нечем, да и незачем: и то и другое
-        // означает «не получилось».
-        Err(err) => {
-            tracing::debug!(?err, "права не получены");
+        Err(err) if refused(err.reason()) => {
+            tracing::info!("человек отказался дать права");
             Ok(false)
         }
+        // Всё остальное — настоящий сбой, и молчать о нём нельзя: снаружи он
+        // выглядит так же, как отказ, а лечится совсем иначе.
+        Err(err) => Err(err.into_error(PlatformError::Service, "повышение прав")),
     }
+}
+
+/// Отказался ли человек в окне.
+///
+/// Отказ система обозначает номером ошибки `-128`, и номер этот — не слово: он
+/// один и тот же на любом языке. Разбирать сообщение целиком было бы нельзя,
+/// а найти в нём номер — можно.
+fn refused(reason: &str) -> bool {
+    reason.contains("-128")
 }
 
 /// Команда для оболочки, завёрнутая в строку сценария.
@@ -58,6 +67,21 @@ fn quote(part: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancelled_dialog_is_not_a_failure() {
+        // Номер `-128` система ставит на отказ человека и не переводит его;
+        // само сообщение приходит на языке системы, и опираться на него
+        // нельзя.
+        assert!(refused(
+            "execution error: Пользователь отменил операцию. (-128)"
+        ));
+        assert!(refused("execution error: User canceled. (-128)"));
+        assert!(!refused(
+            "execution error: osascript is not allowed (-1743)"
+        ));
+        assert!(!refused("sh: penguin: command not found"));
+    }
 
     #[test]
     fn a_path_with_spaces_stays_one_argument() {

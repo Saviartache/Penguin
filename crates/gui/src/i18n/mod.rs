@@ -73,6 +73,8 @@ pub struct Strings {
     pub service_starting: &'static str,
     /// Прав не дали.
     pub service_needs_rights: &'static str,
+    /// Служба поставлена, но на связь не вышла.
+    pub service_silent: &'static str,
     /// Служба останавливается вместе с окном.
     pub service_stopping: &'static str,
 

@@ -4,7 +4,7 @@ use iced::Task;
 use penguin_ipc::schema::{Event, Request, Response};
 
 use crate::app::App;
-use crate::app::message::{HomeMessage, IpcMessage, Message};
+use crate::app::message::{HomeMessage, IpcMessage, Message, ServiceOutcome};
 use crate::app::update::request;
 
 /// Разбирает всё, что пришло от демона.
@@ -157,35 +157,40 @@ pub fn handle_home(app: &mut App, message: HomeMessage) -> Task<Message> {
             }
         }
 
-        HomeMessage::ServiceReady(true) => {
+        HomeMessage::ServiceReady(ServiceOutcome::Ready) => {
             app.state_mut().connection.starting = false;
             request(Request::Connect { profile: None })
         }
 
-        HomeMessage::ServiceReady(false) => {
+        HomeMessage::ServiceReady(outcome) => {
             app.state_mut().connection.starting = false;
-            // Отказ в окне UAC — решение человека, а не сбой. Строка в журнале
-            // говорит, что произошло, и на этом всё.
-            app.state_mut().connection.push_log(
-                penguin_ipc::schema::LogLevel::Error,
-                crate::i18n::s().service_needs_rights.to_owned(),
-            );
+            complain(app, &outcome);
             Task::none()
         }
 
-        HomeMessage::ServiceChecked(ready) => {
+        HomeMessage::ServiceChecked(outcome) => {
             app.state_mut().connection.starting = false;
-            if !ready {
-                app.state_mut().connection.push_log(
-                    penguin_ipc::schema::LogLevel::Error,
-                    crate::i18n::s().service_needs_rights.to_owned(),
-                );
-            }
+            complain(app, &outcome);
             // Спрашиваем в любом случае. Не вышло сейчас — подписка
             // достучится сама, когда служба поднимется, и ответ придёт тогда.
             crate::app::update::request_initial_state()
         }
     }
+}
+
+/// Пишет в журнал окна, почему службы нет.
+///
+/// Отказ в системном окне и сбой — разные строки: первое человек сделал сам и
+/// знает почему, второе он видит впервые и лечится оно совсем иначе.
+fn complain(app: &mut App, outcome: &ServiceOutcome) {
+    let message = match outcome {
+        ServiceOutcome::Ready => return,
+        ServiceOutcome::Refused => crate::i18n::s().service_needs_rights.to_owned(),
+        ServiceOutcome::Failed(reason) => reason.clone(),
+    };
+    app.state_mut()
+        .connection
+        .push_log(penguin_ipc::schema::LogLevel::Error, message);
 }
 
 /// Опускает тоннель и останавливает службу — перед тем, как закрыть окно.
@@ -216,7 +221,7 @@ const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Сначала вопрос, а не действие: служба стоит с автозапуском и почти всегда
 /// уже работает. Просить права в этом случае незачем — окно UAC при каждом
 /// запуске приучает нажимать «Да», не читая.
-pub async fn ensure_at_startup() -> bool {
+pub async fn ensure_at_startup() -> ServiceOutcome {
     // Мало того, что служба отвечает: ответить может и служба от другой
     // сборки — от прошлой версии, из другого каталога. Тоннель тогда поднимает
     // не та программа, которую запустили, и рядом с ней может не оказаться ни
@@ -236,7 +241,7 @@ pub async fn ensure_at_startup() -> bool {
             .unwrap_or_default();
 
         if !penguin_platform::build::is_stale(&running, &penguin_platform::build_stamp()) {
-            return true;
+            return ServiceOutcome::Ready;
         }
         tracing::info!("служба работает прежней сборкой — перезапускаю");
         return elevated_service(&["service", "restart"]).await;
@@ -250,20 +255,23 @@ pub async fn ensure_at_startup() -> bool {
 /// Установка идёт в отдельном процессе с правами администратора — иначе никак:
 /// права в Windows получает только новый процесс. Всё это время окно обязано
 /// оставаться живым, поэтому ожидание уехало в задачу.
-async fn ensure_service() -> bool {
+async fn ensure_service() -> ServiceOutcome {
     elevated_service(&["service", "ensure"]).await
 }
 
 /// Выполняет команду службы с правами и дожидается, пока служба ответит.
-async fn elevated_service(arguments: &'static [&'static str]) -> bool {
-    let started = tokio::task::spawn_blocking(move || {
-        penguin_platform::run_elevated(arguments).unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome {
+    let asked =
+        tokio::task::spawn_blocking(move || penguin_platform::run_elevated(arguments)).await;
 
-    if !started {
-        return false;
+    match asked {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return ServiceOutcome::Refused,
+        // Настоящий сбой: нет службы запроса прав, программу не пустили,
+        // установка не удалась. Человек должен прочитать причину, а не
+        // «нужны права» — оно тут ни при чём.
+        Ok(Err(err)) => return ServiceOutcome::Failed(err.to_string()),
+        Err(err) => return ServiceOutcome::Failed(err.to_string()),
     }
 
     // Служба запущена, но канал управления открывается не мгновенно. Без
@@ -271,11 +279,11 @@ async fn elevated_service(arguments: &'static [&'static str]) -> bool {
     // ошибку там, где всё получилось.
     for _ in 0..SERVICE_WAIT_ATTEMPTS {
         if penguin_ipc::Client::connect().await.is_ok() {
-            return true;
+            return ServiceOutcome::Ready;
         }
         tokio::time::sleep(SERVICE_WAIT_STEP).await;
     }
-    false
+    ServiceOutcome::Failed(crate::i18n::s().service_silent.to_owned())
 }
 
 /// Сколько раз спросить службу, прежде чем сдаться.
@@ -376,30 +384,52 @@ mod tests {
 
     #[test]
     fn checking_the_service_ends_the_waiting() {
-        // Флаг снимается в обоих исходах: иначе окно навсегда осталось бы с
+        // Флаг снимается во всех исходах: иначе окно навсегда осталось бы с
         // надписью «Запускаю службу».
-        for ready in [true, false] {
+        for outcome in [
+            ServiceOutcome::Ready,
+            ServiceOutcome::Refused,
+            ServiceOutcome::Failed("нет polkit".to_owned()),
+        ] {
             let mut app = app();
-            let _ = handle_home(&mut app, HomeMessage::ServiceChecked(ready));
-            assert!(!app.state().connection.starting, "исход {ready}");
+            let _ = handle_home(&mut app, HomeMessage::ServiceChecked(outcome.clone()));
+            assert!(!app.state().connection.starting, "исход {outcome:?}");
         }
     }
 
     #[test]
     fn a_refused_prompt_is_explained() {
-        // Отказ в UAC — решение человека, но молчать в ответ нельзя: окно
-        // осталось бы пустым без единого объяснения.
+        // Отказ в системном окне — решение человека, но молчать в ответ
+        // нельзя: окно осталось бы пустым без единого объяснения.
         let mut app = app();
-        let _ = handle_home(&mut app, HomeMessage::ServiceChecked(false));
+        let _ = handle_home(
+            &mut app,
+            HomeMessage::ServiceChecked(ServiceOutcome::Refused),
+        );
 
         let line = app.state().connection.log.back().expect("строка есть");
         assert_eq!(line.level, LogLevel::Error);
+        assert_eq!(line.message, crate::i18n::s().service_needs_rights);
+    }
+
+    #[test]
+    fn a_real_failure_says_what_happened() {
+        // «Нужны права» на машине без службы запроса прав — тупик: человек
+        // нажимает «Подключить» снова и снова и видит то же самое.
+        let mut app = app();
+        let _ = handle_home(
+            &mut app,
+            HomeMessage::ServiceChecked(ServiceOutcome::Failed("не найден pkexec".to_owned())),
+        );
+
+        let line = app.state().connection.log.back().expect("строка есть");
+        assert_eq!(line.message, "не найден pkexec");
     }
 
     #[test]
     fn a_working_service_is_not_complained_about() {
         let mut app = app();
-        let _ = handle_home(&mut app, HomeMessage::ServiceChecked(true));
+        let _ = handle_home(&mut app, HomeMessage::ServiceChecked(ServiceOutcome::Ready));
         assert!(app.state().connection.log.is_empty());
     }
 

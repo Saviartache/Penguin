@@ -33,4 +33,6 @@ windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", 
 widestring = "1"
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["user", "socket"] }
+# `fs` — ради `chown`: каталог канала управления отдаётся группе
+# администраторов, иначе окно под пользователем до службы не дотянется.
+nix = { workspace = true, features = ["user", "socket", "fs"] }

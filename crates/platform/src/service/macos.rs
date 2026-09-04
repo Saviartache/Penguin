@@ -23,9 +23,20 @@ const PLIST_PATH: &str = "/Library/LaunchDaemons/com.penguin.vpn.plist";
 /// Область, в которой живёт служба: системная, а не пользовательская.
 const DOMAIN: &str = "system";
 
+/// Права файла описания.
+///
+/// launchd проверяет их сам и отказывается грузить службу, описание которой
+/// доступно на запись кому-то, кроме владельца: иначе любой желающий подменил
+/// бы программу, работающую с правами системы.
+const PLIST_MODE: u32 = 0o644;
+
 /// Ставит службу.
 pub fn install(executable: &Path) -> PlatformResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     std::fs::write(PLIST_PATH, plist(executable))
+        .map_err(|err| PlatformError::Service(format!("{PLIST_PATH}: {err}")))?;
+    std::fs::set_permissions(PLIST_PATH, std::fs::Permissions::from_mode(PLIST_MODE))
         .map_err(|err| PlatformError::Service(format!("{PLIST_PATH}: {err}")))?;
 
     // Загрузка ставит службу на автозапуск и поднимает её сразу: `RunAtLoad`
@@ -100,6 +111,11 @@ fn target() -> String {
 ///
 /// Свободная функция с тестом: потерянный здесь `--service` означает службу,
 /// которая поднимется окном, а `KeepAlive` — тоннель, не переживший обрыва.
+///
+/// `KeepAlive` — не «всегда», а «кроме удачного выхода». Разница решающая:
+/// окно останавливает службу, когда его закрывают, и с безусловным
+/// `KeepAlive` launchd поднимал бы её обратно через секунду — тоннель жил бы
+/// после закрытия программы.
 fn plist(executable: &Path) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -117,7 +133,10 @@ fn plist(executable: &Path) -> String {
          \x20 <key>RunAtLoad</key>\n\
          \x20 <true/>\n\
          \x20 <key>KeepAlive</key>\n\
-         \x20 <true/>\n\
+         \x20 <dict>\n\
+         \x20   <key>SuccessfulExit</key>\n\
+         \x20   <false/>\n\
+         \x20 </dict>\n\
          </dict>\n\
          </plist>\n",
         escape(&executable.display().to_string())
@@ -186,6 +205,23 @@ mod tests {
         let text = plist(Path::new("/usr/local/bin/penguin"));
         assert!(text.contains("<key>KeepAlive</key>"), "{text}");
         assert!(text.contains("<key>RunAtLoad</key>"), "{text}");
+    }
+
+    #[test]
+    fn a_service_stopped_on_purpose_stays_stopped() {
+        // Окно останавливает службу, когда его закрывают. Безусловный
+        // `KeepAlive` поднял бы её обратно, и тоннель пережил бы программу.
+        let text = plist(Path::new("/usr/local/bin/penguin"));
+        assert!(text.contains("<key>SuccessfulExit</key>"), "{text}");
+
+        let after = text
+            .split("<key>SuccessfulExit</key>")
+            .nth(1)
+            .expect("есть");
+        assert!(
+            after.trim_start().starts_with("<false/>"),
+            "удачный выход не должен перезапускать службу: {text}"
+        );
     }
 
     #[test]

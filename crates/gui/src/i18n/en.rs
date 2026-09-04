@@ -34,6 +34,7 @@ pub static STRINGS: Strings = Strings {
     daemon_offline: "Service is not responding",
     service_starting: "Starting the service",
     service_needs_rights: "The tunnel needs administrator rights: the service is not installed",
+    service_silent: "The service is installed but does not answer — check its log",
     service_stopping: "Closing: lowering the tunnel and stopping the service",
 
     connect: "Connect",

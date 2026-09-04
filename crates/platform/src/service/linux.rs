@@ -19,9 +19,19 @@ const UNIT: &str = "penguin.service";
 /// Где лежит описание службы.
 const UNIT_PATH: &str = "/etc/systemd/system/penguin.service";
 
+/// Права файла описания.
+///
+/// Описание задаёт программу, которая работает с правами системы: доступное
+/// на запись кому попало, оно и есть способ эти права получить.
+const UNIT_MODE: u32 = 0o644;
+
 /// Ставит службу.
 pub fn install(executable: &Path) -> PlatformResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
     std::fs::write(UNIT_PATH, unit(executable))
+        .map_err(|err| PlatformError::Service(format!("{UNIT_PATH}: {err}")))?;
+    std::fs::set_permissions(UNIT_PATH, std::fs::Permissions::from_mode(UNIT_MODE))
         .map_err(|err| PlatformError::Service(format!("{UNIT_PATH}: {err}")))?;
 
     // Без перечитывания systemd не увидит нового файла и ответит «нет такой

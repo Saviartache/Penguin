@@ -21,6 +21,8 @@ pub(crate) struct Failure {
     program: String,
     /// Что сказала программа.
     reason: String,
+    /// С каким кодом она завершилась. `None` — не запустилась вовсе.
+    code: Option<i32>,
     /// Не хватило прав.
     denied: bool,
 }
@@ -32,6 +34,21 @@ impl Failure {
             return PlatformError::PermissionDenied(what.to_owned());
         }
         make(format!("{}: {}", self.program, self.reason))
+    }
+
+    /// Код возврата.
+    ///
+    /// По нему запрос прав отличает отказ человека от настоящего сбоя: слова
+    /// в сообщении переводятся, а коды — нет.
+    #[allow(dead_code, reason = "нужен не каждой системе")]
+    pub(crate) fn code(&self) -> Option<i32> {
+        self.code
+    }
+
+    /// Что сказала программа.
+    #[allow(dead_code, reason = "нужно не каждой системе")]
+    pub(crate) fn reason(&self) -> &str {
+        &self.reason
     }
 }
 
@@ -102,6 +119,7 @@ fn finish(output: std::io::Result<std::process::Output>, program: &str) -> Resul
         } else {
             reason
         },
+        code: output.status.code(),
         // Программа уже запустилась, значит отказ пришёл от системы, а не от
         // оболочки. Отличить нехватку прав по коду нельзя, и решает её здесь
         // вызывающий: почти всё в этом крейте прав требует.
@@ -114,6 +132,7 @@ fn spawn_failure(program: &str, err: &std::io::Error) -> Failure {
     Failure {
         program: program.to_owned(),
         reason: err.to_string(),
+        code: None,
         denied: err.kind() == std::io::ErrorKind::PermissionDenied,
     }
 }
