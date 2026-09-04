@@ -36,7 +36,6 @@ static SECURE: &[FieldSpec] = &[
 pub static HTTP: ProtocolSpec = ProtocolSpec {
     id: "http",
     label: "HTTP",
-    summary: |s| s.http_summary,
     fields: PLAIN,
     schemes: &["http://"],
     from_link: Some(from_link),
@@ -46,7 +45,6 @@ pub static HTTP: ProtocolSpec = ProtocolSpec {
 pub static HTTPS: ProtocolSpec = ProtocolSpec {
     id: "https",
     label: "HTTPS",
-    summary: |s| s.https_summary,
     fields: SECURE,
     schemes: &["https://"],
     from_link: Some(from_link),

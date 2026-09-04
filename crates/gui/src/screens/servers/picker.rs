@@ -11,15 +11,16 @@
 //! существующего профиля это не касается: протокол у него уже выбран, и
 //! менять его сменой полей нельзя — это другой сервер, а не тот же самый.
 //!
-//! # Почему строка, а не выпадающий список
+//! # Почему список строк, а не выпадающий
 //!
-//! Выбирают здесь один раз и по незнанию: разница между `http` и `https`
-//! человеку, который пришёл вставить настройки от провайдера, не очевидна.
-//! Выпадающий список показывает только имена; строка с пояснением отвечает на
-//! вопрос «а какой мой» до того, как его зададут.
+//! Протоколов будет много, и выбирают из них глазами: открытый список читается
+//! целиком, а выпадающий приходится сперва открыть, чтобы узнать, что в нём.
+//! Пояснений под именами нет — человек приходит сюда, уже зная, что ему
+//! прислал провайдер, и лишняя строка под каждым именем растягивает список
+//! ровно вдвое.
 
 use iced::widget::button;
-use iced::{Alignment, Element, Length};
+use iced::{Element, Length};
 use uikit::layout::{Flex, Sizable, Size, gap};
 use uikit::style::tokens::type_scale;
 use uikit::widgets::Modal;
@@ -46,17 +47,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .gap(gap::SM)
         .build();
 
-    let content = Flex::col()
-        .push_auto(ui::faint(
-            &state.palette,
-            crate::i18n::s().choose_protocol_hint,
-            type_scale::MICRO,
-        ))
-        .push_auto(ui::scroll_box(list, HEIGHT))
-        .gap(gap::SM)
-        .build();
-
-    Modal::new(content)
+    Modal::new(ui::scroll_box(list, HEIGHT))
         .title(crate::i18n::s().choose_protocol)
         .max_width(WIDTH)
         // Ряда ответов у окна нет: выбор и есть ответ, а кнопка «Дальше» под
@@ -67,27 +58,14 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-/// Строка списка: имя протокола и чем он отличается от соседнего.
+/// Строка списка — имя протокола.
 fn row<'a>(state: &'a State, spec: &'static ProtocolSpec) -> Element<'a, Message> {
-    let strings = crate::i18n::s();
+    let label = iced::widget::text(spec.label)
+        .size(type_scale::LEAD)
+        .color(state.palette.text)
+        .width(Length::Fill);
 
-    let text = Flex::col()
-        .w(Size::FILL)
-        .push_auto(
-            iced::widget::text(spec.label)
-                .size(type_scale::LEAD)
-                .color(state.palette.text),
-        )
-        .push_auto(ui::faint(
-            &state.palette,
-            (spec.summary)(strings),
-            type_scale::MICRO,
-        ))
-        .gap(gap::NONE)
-        .align(Alignment::Start)
-        .build();
-
-    button(text)
+    button(label)
         .width(Length::Fill)
         .padding(gap::SM)
         .style(uikit::style::button::ghost)
@@ -97,8 +75,6 @@ fn row<'a>(state: &'a State, spec: &'static ProtocolSpec) -> Element<'a, Message
 
 #[cfg(test)]
 mod tests {
-    use uikit::style::tokens::ink;
-
     use super::*;
 
     #[test]
@@ -111,15 +87,11 @@ mod tests {
     }
 
     #[test]
-    fn every_row_says_what_it_is() {
-        // Пустая строка под именем — это место, отведённое под ответ, в
-        // котором ответа нет.
+    fn every_row_is_named() {
+        // Строка без подписи — это строка, по которой не понять, куда она
+        // ведёт.
         for spec in protocol::ALL {
-            assert!(
-                !(spec.summary)(crate::i18n::s()).trim().is_empty(),
-                "`{}` без пояснения",
-                spec.id
-            );
+            assert!(!spec.label.trim().is_empty(), "`{}` без подписи", spec.id);
         }
     }
 
@@ -128,12 +100,5 @@ mod tests {
         // Растянутое содержимое в панели «по содержимому» схлопывается в ноль,
         // поэтому высота фиксированная — и обязана помещаться.
         const { assert!(HEIGHT < crate::app::EXPANDED.height) };
-    }
-
-    #[test]
-    fn ink_levels_are_used() {
-        // Подпись ярче пояснения: иначе строка читается как один абзац.
-        let palette = State::default().palette;
-        assert_ne!(palette.text.a, ink::level(&palette, ink::TERTIARY).a);
     }
 }

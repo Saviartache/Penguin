@@ -28,7 +28,6 @@ static FIELDS: &[FieldSpec] = &[
 pub static SPEC: ProtocolSpec = ProtocolSpec {
     id: "socks5",
     label: "SOCKS5",
-    summary: |s| s.socks5_summary,
     fields: FIELDS,
     // `socks5h` отличается от `socks5` тем, что имя разрешает прокси, — а мы
     // и так всегда отдаём имя прокси, иначе правила по доменам теряют смысл.

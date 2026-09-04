@@ -42,7 +42,6 @@ static FIELDS: &[FieldSpec] = &[
 pub static SPEC: ProtocolSpec = ProtocolSpec {
     id: "hysteria2",
     label: "Hysteria 2",
-    summary: |s| s.hysteria2_summary,
     fields: FIELDS,
     schemes: &["hy2://", "hysteria2://"],
     from_link: Some(from_link),
