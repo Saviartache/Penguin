@@ -28,6 +28,7 @@ pub mod http;
 pub mod hysteria2;
 pub mod socks5;
 pub mod spec;
+pub mod trojan;
 
 pub use catalog::{ALL, DEFAULT, by_id, by_scheme};
 pub use spec::{FieldSpec, ProtocolSpec};

@@ -53,6 +53,18 @@ services:
       - "127.0.0.1:18888:8888"
     networks: [interop]
 
+  # sing-box в роли сервера. Он умеет почти все протоколы плана, поэтому
+  # следующие фазы добавляют сюда файл настроек, а не новый образ.
+  trojan:
+    image: ghcr.io/sagernet/sing-box
+    command: run -c /etc/sing-box/config.json
+    volumes:
+      - ./singbox/trojan.json:/etc/sing-box/config.json:ro
+      - ./tls:/etc/sing-box/tls:ro
+    ports:
+      - "127.0.0.1:14431:443"
+    networks: [interop]
+
   hysteria2:
     image: tobyxdd/hysteria
     command: server -c /etc/hysteria/config.yaml

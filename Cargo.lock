@@ -3458,6 +3458,7 @@ dependencies = [
  "penguin-proto",
  "penguin-router",
  "penguin-socks5",
+ "penguin-trojan",
  "penguin-tun",
  "serde",
  "serde_json",
@@ -3673,6 +3674,23 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
+name = "penguin-trojan"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 

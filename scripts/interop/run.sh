@@ -177,6 +177,16 @@ insecure = true'
 
 check http http 'server = "127.0.0.1:18888"'
 
+# Сертификат самоподписанный — отсюда `insecure`. Пароль проверить нечем:
+# сервер Trojan не отвечает на заголовок ничем, и неверный пароль выглядит
+# ровно так же, как верный (см. документ крейта).
+check trojan trojan 'server   = "127.0.0.1:14431"
+password = "secret"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
 check hysteria2 hysteria2 'server   = "127.0.0.1:14443"
 password = "secret"
 
