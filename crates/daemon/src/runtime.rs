@@ -95,8 +95,8 @@ pub fn run_foreground(config_dir: Option<PathBuf>, verbose: bool) -> Result<()> 
         let signal = {
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    tracing::info!("получен Ctrl+C, останавливаюсь");
+                if wait_for_stop().await {
+                    tracing::info!("получен сигнал остановки");
                     cancel.cancel();
                 }
             })
@@ -106,6 +106,39 @@ pub fn run_foreground(config_dir: Option<PathBuf>, verbose: bool) -> Result<()> 
         signal.abort();
         result
     })
+}
+
+/// Ждёт сигнала остановки. `false` — разобрать сигналы не удалось, и ждать
+/// больше нечего.
+///
+/// Сигналов два, и второй не менее важен первого: Ctrl+C приходит от человека
+/// в терминале, `SIGTERM` — от systemd и launchd, когда службу останавливают
+/// (`systemctl stop`, `launchctl bootout`). Не разобрать `SIGTERM` значит
+/// умереть по умолчанию системы, не сняв ни TUN-адаптера, ни маршрутов, ни
+/// правил брандмауэра, — то есть оставить машину без сети.
+#[cfg(unix)]
+async fn wait_for_stop() -> bool {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let Ok(mut terminate) = signal(SignalKind::terminate()) else {
+        return tokio::signal::ctrl_c().await.is_ok();
+    };
+
+    tokio::select! {
+        Ok(()) = tokio::signal::ctrl_c() => true,
+        Some(()) = terminate.recv() => true,
+        else => false,
+    }
+}
+
+/// Ждёт Ctrl+C. `false` — разобрать его не удалось.
+///
+/// Об остановке службы Windows узнаёт не сигналом, а от диспетчера
+/// ([`crate::service::windows`]); здесь остаётся только запуск на переднем
+/// плане.
+#[cfg(not(unix))]
+async fn wait_for_stop() -> bool {
+    tokio::signal::ctrl_c().await.is_ok()
 }
 
 /// Открывает файл настроек.

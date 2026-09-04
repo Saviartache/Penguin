@@ -170,7 +170,11 @@ fn traffic(state: &State) -> Vec<Line> {
 fn status(state: &State) -> Line {
     let connection = &state.connection;
 
-    let (label, tone) = if connection.online {
+    // Остановка — первой: связь в этот момент ещё может быть жива, но
+    // показывать «Подключено» окну, которое уже закрывается, значит соврать.
+    let (label, tone) = if connection.stopping {
+        (crate::i18n::s().daemon_stopping.to_owned(), Tone::Busy)
+    } else if connection.online {
         describe(&connection.tunnel_now())
     } else if connection.starting {
         (crate::i18n::s().service_starting.to_owned(), Tone::Busy)
@@ -350,6 +354,21 @@ mod tests {
         };
         assert_eq!(label, crate::i18n::s().status.to_uppercase());
         assert_eq!(value, crate::i18n::s().daemon_offline.to_uppercase());
+    }
+
+    #[test]
+    fn a_service_we_are_stopping_ourselves_is_not_called_missing() {
+        // Окно закрывают: служба ушла со связи потому, что мы сами её гасим, и
+        // человек в этот момент отвечает на запрос пароля администратора.
+        // «Служба не отвечает» на экране — это обвинение самим себе.
+        let mut state = State::default();
+        state.connection.stopping = true;
+        state.connection.mark_offline("служба остановлена");
+
+        let Line::Toned(_, value, _) = status(&state) else {
+            panic!("состояние не строкой состояния")
+        };
+        assert_eq!(value, crate::i18n::s().daemon_stopping.to_uppercase());
     }
 
     #[test]

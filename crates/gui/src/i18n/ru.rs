@@ -32,6 +32,7 @@ pub static STRINGS: Strings = Strings {
     disconnecting: "Отключение…",
     disconnected: "Отключено",
     daemon_offline: "Служба не отвечает",
+    daemon_stopping: "Останавливаю службу",
     service_starting: "Запускаю службу",
     service_needs_rights: "Без прав администратора тоннель не поднять: служба не установлена",
     service_silent: "Служба поставлена, но не отвечает — посмотрите её журнал",

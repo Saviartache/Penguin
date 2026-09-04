@@ -195,20 +195,48 @@ fn complain(app: &mut App, outcome: &ServiceOutcome) {
 
 /// Опускает тоннель и останавливает службу — перед тем, как закрыть окно.
 ///
-/// Прав не спрашивает: службу останавливает не диспетчер, а она сама, по
-/// запросу из канала управления. Она уже работает с нужными правами, а окну
-/// UAC при каждом закрытии приучил бы нажимать «Да», не читая.
+/// Шага два, и оба нужны.
 ///
-/// Ответа ждёт, но не вечно: закрытие не должно зависеть от того, ответила ли
-/// служба. Не ответила за отведённое время — окно всё равно закрывается, а
-/// служба доводит остановку сама.
+/// Первый — запрос по каналу управления: тоннель опускает сама служба, теми
+/// правами, которые у неё уже есть. Ответа ждёт, но не вечно: закрытие не
+/// должно зависеть от того, ответила ли служба. Не ответила за отведённое
+/// время — окно всё равно закрывается, а служба доводит остановку сама.
+///
+/// Второй — команда диспетчеру служб, и вот она стоит прав администратора.
+/// Вышедший демон — это ещё не остановленная служба: launchd держит задание
+/// загруженным, systemd — юнит на автозапуске, и оба поднимут службу обратно,
+/// стоит демону выйти не с нулевым кодом. Тогда программы на экране нет, а
+/// служба висит в памяти. Права здесь ровно те же, что и на запуск, и
+/// спрашиваются тем же способом; цена — запрос при следующем открытии окна, и
+/// она честнее живой службы у закрытой программы.
 pub async fn shutdown_service() {
     let _ = tokio::time::timeout(
         SHUTDOWN_WAIT,
         crate::ipc::client::send(penguin_ipc::schema::Request::Shutdown),
     )
     .await;
+
+    stop_service().await;
 }
+
+/// Гасит службу в диспетчере системы.
+///
+/// На Windows этого шага нет: диспетчер служб узнаёт об остановке от самой
+/// службы, и лишний UAC при каждом закрытии окна приучил бы нажимать «Да», не
+/// читая.
+#[cfg(not(windows))]
+async fn stop_service() {
+    match ask_elevated(&["service", "stop"]).await {
+        ServiceOutcome::Ready => {}
+        // Окно закрывается в любом случае: писать в его журнал уже некуда и
+        // некому — через мгновение журнала не будет вместе с окном.
+        ServiceOutcome::Refused => tracing::info!("человек не дал остановить службу"),
+        ServiceOutcome::Failed(reason) => tracing::warn!(%reason, "служба не остановлена"),
+    }
+}
+
+#[cfg(windows)]
+async fn stop_service() {}
 
 /// Сколько ждать, пока служба опустит тоннель и остановится.
 ///
@@ -259,19 +287,31 @@ async fn ensure_service() -> ServiceOutcome {
     elevated_service(&["service", "ensure"]).await
 }
 
-/// Выполняет команду службы с правами и дожидается, пока служба ответит.
-async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome {
+/// Просит права и выполняет команду службы. Ответа службы не ждёт.
+///
+/// Отдельно от [`elevated_service`] ради остановки: после неё службы как раз
+/// не должно остаться, и общее ожидание обернулось бы пятью секундами
+/// молчания перед тем, как окно наконец закроется.
+async fn ask_elevated(arguments: &'static [&'static str]) -> ServiceOutcome {
     let asked =
         tokio::task::spawn_blocking(move || penguin_platform::run_elevated(arguments)).await;
 
     match asked {
-        Ok(Ok(true)) => {}
-        Ok(Ok(false)) => return ServiceOutcome::Refused,
+        Ok(Ok(true)) => ServiceOutcome::Ready,
+        Ok(Ok(false)) => ServiceOutcome::Refused,
         // Настоящий сбой: нет службы запроса прав, программу не пустили,
         // установка не удалась. Человек должен прочитать причину, а не
         // «нужны права» — оно тут ни при чём.
-        Ok(Err(err)) => return ServiceOutcome::Failed(err.to_string()),
-        Err(err) => return ServiceOutcome::Failed(err.to_string()),
+        Ok(Err(err)) => ServiceOutcome::Failed(err.to_string()),
+        Err(err) => ServiceOutcome::Failed(err.to_string()),
+    }
+}
+
+/// Выполняет команду службы с правами и дожидается, пока служба ответит.
+async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome {
+    match ask_elevated(arguments).await {
+        ServiceOutcome::Ready => {}
+        outcome => return outcome,
     }
 
     // Служба запущена, но канал управления открывается не мгновенно. Без
@@ -424,6 +464,24 @@ mod tests {
 
         let line = app.state().connection.log.back().expect("строка есть");
         assert_eq!(line.message, "не найден pkexec");
+    }
+
+    #[test]
+    fn the_service_is_not_polled_while_we_are_busy_with_it() {
+        // Пока идёт установка или остановка, стучаться к службе некуда:
+        // отвечать некому, а каждая неудачная попытка — это «Служба не
+        // отвечает» на экране в тот момент, когда поверх окна открыт запрос
+        // пароля администратора.
+        let mut connection = crate::app::state::Connection::default();
+        connection.starting = true;
+        assert!(connection.is_busy_with_service());
+
+        connection.starting = false;
+        connection.stopping = true;
+        assert!(connection.is_busy_with_service());
+
+        connection.stopping = false;
+        assert!(!connection.is_busy_with_service());
     }
 
     #[test]

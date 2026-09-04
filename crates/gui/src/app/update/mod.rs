@@ -77,6 +77,10 @@ fn handle_window(app: &mut App, message: WindowMessage) -> Task<Message> {
             if !app.state().connection.online {
                 return window::close(app.window());
             }
+            // Флаг до задачи, а не после: связь оборвётся раньше, чем человек
+            // ответит на запрос пароля, и без него окно успело бы показать
+            // «Служба не отвечает» — про службу, которую само же и гасит.
+            app.state_mut().connection.stopping = true;
             app.state_mut().connection.push_log(
                 penguin_ipc::schema::LogLevel::Info,
                 crate::i18n::s().service_stopping.to_owned(),

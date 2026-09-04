@@ -69,6 +69,8 @@ pub struct Strings {
     pub disconnected: &'static str,
     /// Демон не отвечает.
     pub daemon_offline: &'static str,
+    /// Службу гасят вместе с окном.
+    pub daemon_stopping: &'static str,
     /// Служба поднимается.
     pub service_starting: &'static str,
     /// Прав не дали.
@@ -329,6 +331,7 @@ mod tests {
                 table.disconnecting,
                 table.disconnected,
                 table.daemon_offline,
+                table.daemon_stopping,
                 table.connect,
                 table.disconnect,
                 table.save,
