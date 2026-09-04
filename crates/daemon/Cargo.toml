@@ -41,13 +41,14 @@ windows-service.workspace = true
 [features]
 # Набор протоколов задаётся движком; перечисление здесь нужно только затем,
 # чтобы `--no-default-features` собирал демона без единого протокола.
-default = ["hysteria2", "tuic", "vless", "trojan", "shadowsocks", "socks5", "http-proxy"]
+default = ["hysteria2", "tuic", "anytls", "vless", "trojan", "shadowsocks", "socks5", "http-proxy"]
 hysteria2 = ["penguin-engine/hysteria2"]
 socks5 = ["penguin-engine/socks5"]
 trojan = ["penguin-engine/trojan"]
 shadowsocks = ["penguin-engine/shadowsocks"]
 vless = ["penguin-engine/vless"]
 tuic = ["penguin-engine/tuic"]
+anytls = ["penguin-engine/anytls"]
 http-proxy = ["penguin-engine/http-proxy"]
 
 [dev-dependencies]

@@ -23,6 +23,7 @@
 //! до него добавление протокола означало правку `Draft`, `Field`, редактора и
 //! всех их тестов разом.
 
+pub mod anytls;
 pub mod catalog;
 pub mod http;
 pub mod hysteria2;

@@ -3344,6 +3344,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
+name = "penguin-anytls"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "md-5",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "penguin-app"
 version = "0.1.0"
 dependencies = [
@@ -3456,6 +3475,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "dashmap",
+ "penguin-anytls",
  "penguin-config",
  "penguin-core",
  "penguin-dns",
