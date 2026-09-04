@@ -85,6 +85,19 @@ services:
       - "127.0.0.1:14432:443"
     networks: [interop]
 
+  # Схема дополнения не задана нарочно: у сервера она тогда та же, что у
+  # клиента по умолчанию, и `cmdUpdatePaddingScheme` не приходит. Приём новой
+  # схемы проверяется тестами — по сети он ничего видимого не меняет.
+  anytls:
+    image: ghcr.io/sagernet/sing-box
+    command: run -c /etc/sing-box/config.json
+    volumes:
+      - ./singbox/anytls.json:/etc/sing-box/config.json:ro
+      - ./tls:/etc/sing-box/tls:ro
+    ports:
+      - "127.0.0.1:14434:443"
+    networks: [interop]
+
   shadowsocks:
     image: ghcr.io/sagernet/sing-box
     command: run -c /etc/sing-box/config.json

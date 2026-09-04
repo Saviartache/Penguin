@@ -6,7 +6,7 @@
 //! они проще, честнее и уместны там, где сеть своя.
 
 use crate::forms::protocol::spec::ProtocolSpec;
-use crate::forms::protocol::{http, hysteria2, shadowsocks, socks5, trojan, tuic, vless};
+use crate::forms::protocol::{anytls, http, hysteria2, shadowsocks, socks5, trojan, tuic, vless};
 
 /// Протоколы в порядке показа.
 ///
@@ -15,6 +15,7 @@ use crate::forms::protocol::{http, hysteria2, shadowsocks, socks5, trojan, tuic,
 pub static ALL: &[&ProtocolSpec] = &[
     &hysteria2::SPEC,
     &tuic::SPEC,
+    &anytls::SPEC,
     &vless::SPEC,
     &trojan::SPEC,
     &shadowsocks::SPEC,

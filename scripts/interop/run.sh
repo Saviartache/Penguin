@@ -196,6 +196,16 @@ uuid   = "b831381d-6324-4d53-ad4f-8cda48b30811"
 sni      = "interop.penguin.test"
 insecure = true'
 
+# Пароля сервер не подтверждает: не узнав отпечаток, он закрывает соединение —
+# как Trojan и VLESS. Проверяется здесь то, что после опознания сессия
+# поднимается и по ней идут данные.
+check anytls anytls 'server   = "127.0.0.1:14434"
+password = "secret"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
 # Метод — часть договора с сервером: он же стоит в `singbox/shadowsocks.json`,
 # и разойтись им нельзя, иначе соединение откроется и ничего не передаст.
 check shadowsocks shadowsocks 'server   = "127.0.0.1:18388"

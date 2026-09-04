@@ -1,0 +1,17 @@
+{
+  "log": { "level": "warn" },
+  "inbounds": [
+    {
+      "type": "anytls",
+      "listen": "::",
+      "listen_port": 443,
+      "users": [{ "name": "penguin", "password": "secret" }],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/tls/cert.pem",
+        "key_path": "/etc/sing-box/tls/key.pem"
+      }
+    }
+  ],
+  "outbounds": [{ "type": "direct" }]
+}
