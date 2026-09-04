@@ -65,6 +65,16 @@ services:
       - "127.0.0.1:14431:443"
     networks: [interop]
 
+  shadowsocks:
+    image: ghcr.io/sagernet/sing-box
+    command: run -c /etc/sing-box/config.json
+    volumes:
+      - ./singbox/shadowsocks.json:/etc/sing-box/config.json:ro
+    ports:
+      - "127.0.0.1:18388:8388"
+      - "127.0.0.1:18388:8388/udp"
+    networks: [interop]
+
   hysteria2:
     image: tobyxdd/hysteria
     command: server -c /etc/hysteria/config.yaml

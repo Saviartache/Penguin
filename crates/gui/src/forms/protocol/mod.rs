@@ -26,6 +26,7 @@
 pub mod catalog;
 pub mod http;
 pub mod hysteria2;
+pub mod shadowsocks;
 pub mod socks5;
 pub mod spec;
 pub mod trojan;
