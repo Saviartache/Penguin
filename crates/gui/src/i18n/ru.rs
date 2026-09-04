@@ -91,6 +91,8 @@ pub static STRINGS: Strings = Strings {
     bandwidth_up: "Отдача",
     bandwidth_down: "Приём",
     insecure: "Не проверять сертификат",
+    chain_fingerprint: "Отпечаток цепочки",
+    chain_fingerprint_example: "его выдаёт сервер; вместо проверки цепочки",
     need_server: "Не задан адрес сервера",
     need_password: "Не задан пароль",
     bad_server: "Адрес нужен в виде example.com:443",

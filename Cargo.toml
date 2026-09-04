@@ -23,6 +23,7 @@ members = [
     "protocols/transport",
     "protocols/hysteria2",
     "protocols/anytls",
+    "protocols/juicity",
     "protocols/tuic",
     "protocols/vless",
     "protocols/shadowsocks",
@@ -63,6 +64,7 @@ penguin-cli      = { path = "crates/cli" }
 penguin-gui      = { path = "crates/gui" }
 penguin-transport = { path = "protocols/transport" }
 penguin-anytls = { path = "protocols/anytls" }
+penguin-juicity = { path = "protocols/juicity" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-tuic = { path = "protocols/tuic" }
 penguin-vless = { path = "protocols/vless" }

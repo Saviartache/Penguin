@@ -108,6 +108,17 @@ services:
       - "127.0.0.1:18388:8388/udp"
     networks: [interop]
 
+  # Свой образ, а не sing-box: Juicity тот не умеет. Порт по UDP — под ним
+  # QUIC, и проброс TCP здесь не значил бы ничего.
+  juicity:
+    image: ghcr.io/juicity/juicity:main
+    volumes:
+      - ./juicity/server.json:/etc/juicity/server.json:ro
+      - ./tls:/etc/juicity/tls:ro
+    ports:
+      - "127.0.0.1:14435:443/udp"
+    networks: [interop]
+
   hysteria2:
     image: tobyxdd/hysteria
     command: server -c /etc/hysteria/config.yaml
