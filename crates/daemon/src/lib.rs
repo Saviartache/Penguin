@@ -69,6 +69,25 @@ fn prepare_shared_config() -> Result<Option<PathBuf>> {
     Ok(Some(target))
 }
 
+/// Отвечает ли служба на запросы.
+///
+/// Не то же самое, что «числится работающей». Демон, зависший с поднятым
+/// тоннелем, для диспетчера служб жив: процесс есть, состояние `running`. А на
+/// запросы он не отвечает, и толку от него ровно столько же, сколько от
+/// остановленного, — с той разницей, что маршруты машины идут через него.
+///
+/// Своя среда выполнения: спрашивают отсюда из обычного, не асинхронного кода —
+/// из команды `service ensure`, которая идёт отдельным процессом с правами.
+pub fn responds() -> bool {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return false;
+    };
+    runtime.block_on(penguin_ipc::client::answers())
+}
+
 /// Убирает службу.
 pub fn uninstall() -> Result<()> {
     penguin_platform::service::uninstall().context("не удалось удалить службу")?;

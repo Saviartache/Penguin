@@ -35,8 +35,9 @@ impl Header {
 
 /// Читает один пакет, снимая заголовок.
 ///
-/// `Ok(None)` — пришло меньше, чем один заголовок: пакета в этом нет, и
-/// отдавать наверх нечего.
+/// Пустой буфер — пришло меньше, чем один заголовок: пакета в этом нет, и
+/// отдавать наверх нечего. Конец файла — ошибка: адаптера больше нет, и
+/// молчаливо возвращать из него пустоту значит крутить цикл чтения вечно.
 pub(super) fn read(fd: BorrowedFd<'_>, mtu: u16, header: Header) -> std::io::Result<BytesMut> {
     let mut buffer = BytesMut::zeroed(usize::from(mtu) + header.len());
 
@@ -53,6 +54,14 @@ pub(super) fn read(fd: BorrowedFd<'_>, mtu: u16, header: Header) -> std::io::Res
     }
 
     let read = usize::try_from(read).unwrap_or(0);
+    // Ноль байт — конец файла: адаптера больше нет. Пустым буфером это
+    // возвращать нельзя. Дескриптор на конце файла готов к чтению **всегда**,
+    // и цикл `recv` крутился бы на полном ядре без единой ошибки в журнале —
+    // с поднятым тоннелем, живым адаптером в системе и маршрутами, ведущими
+    // в никуда. Ошибка же доходит до стека, и тот останавливается.
+    if read == 0 {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+    }
     if read < header.len() {
         // Заголовок без пакета. Не ошибка ввода-вывода, но и не пакет:
         // пустой буфер стек отбросит сам.
@@ -125,6 +134,22 @@ mod tests {
     fn header_length_matches_the_platform() {
         assert_eq!(Header::None.len(), 0);
         assert_eq!(Header::AddressFamily.len(), 4);
+    }
+
+    #[test]
+    fn a_closed_adapter_is_an_error_not_an_empty_packet() {
+        // Дескриптор на конце файла готов к чтению всегда. Пустой буфер
+        // наверх означал бы вечный опрос на полном ядре — с поднятым
+        // тоннелем, живым адаптером и маршрутами в никуда, и без единой
+        // строки в журнале.
+        use std::os::fd::AsFd;
+
+        let (reader, writer) = std::io::pipe().expect("труба заводится");
+        drop(writer);
+
+        let err = read(reader.as_fd(), 1500, Header::AddressFamily)
+            .expect_err("конец файла — это ошибка");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[test]

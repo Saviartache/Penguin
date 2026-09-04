@@ -258,16 +258,13 @@ pub async fn ensure_at_startup() -> ServiceOutcome {
         .await
         .unwrap_or(false);
 
-    if ours && let Ok(mut client) = penguin_ipc::Client::connect().await {
+    // Спрашивается не соединение, а ответ: демон, зависший с поднятым
+    // тоннелем, соединение принимает и молчит, и окно, поверившее ему,
+    // осталось бы висеть на первом же запросе.
+    if ours && let Some(running) = penguin_ipc::client::greet().await {
         // Тот файл и служба отвечает — остаётся спросить, тем ли образом она
         // запущена. Отвечать может и служба, поднятая до того, как файл
         // заменили: тоннель она держит прежним кодом.
-        let running = client
-            .hello()
-            .await
-            .map(|(_, build)| build)
-            .unwrap_or_default();
-
         if !penguin_platform::build::is_stale(&running, &penguin_platform::build_stamp()) {
             return ServiceOutcome::Ready;
         }
@@ -275,6 +272,8 @@ pub async fn ensure_at_startup() -> ServiceOutcome {
         return elevated_service(&["service", "restart"]).await;
     }
 
+    // Молчащая служба лечится тем же, чем и отсутствующая: `ensure` поднимет
+    // её заново, а зависшую — перезапустит.
     elevated_service(&["service", "ensure"]).await
 }
 
@@ -317,8 +316,13 @@ async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome 
     // Служба запущена, но канал управления открывается не мгновенно. Без
     // ожидания первое же подключение упёрлось бы в отказ, и человек увидел бы
     // ошибку там, где всё получилось.
-    for _ in 0..SERVICE_WAIT_ATTEMPTS {
-        if penguin_ipc::Client::connect().await.is_ok() {
+    //
+    // Спрашивается ответ, а не соединение: принять его может и зависший
+    // демон, и «служба готова» в этом случае было бы враньём, за которым
+    // окно встанет на первом же запросе.
+    let deadline = tokio::time::Instant::now() + SERVICE_WAIT;
+    while tokio::time::Instant::now() < deadline {
+        if penguin_ipc::client::answers().await {
             return ServiceOutcome::Ready;
         }
         tokio::time::sleep(SERVICE_WAIT_STEP).await;
@@ -326,8 +330,12 @@ async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome 
     ServiceOutcome::Failed(crate::i18n::s().service_silent.to_owned())
 }
 
-/// Сколько раз спросить службу, прежде чем сдаться.
-const SERVICE_WAIT_ATTEMPTS: usize = 20;
+/// Сколько всего ждать, пока служба выйдет на связь.
+///
+/// Сроком, а не числом попыток: у каждой попытки свой предел ожидания
+/// ([`penguin_ipc::client::ANSWER_TIMEOUT`]), и двадцать таких попыток
+/// означали бы минуту неподвижного окна.
+const SERVICE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Пауза между попытками.
 const SERVICE_WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(250);

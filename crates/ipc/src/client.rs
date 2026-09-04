@@ -86,6 +86,35 @@ impl Client {
     }
 }
 
+/// Сколько ждать, пока служба отзовётся.
+///
+/// Приветствие — самый дешёвый запрос: демон отвечает на него, не трогая ни
+/// тоннеля, ни настроек. Не ответил за это время — значит не отвечает вовсе.
+pub const ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Отпечаток сборки работающей службы. `None` — служба не отвечает.
+///
+/// Открытого соединения для этого вопроса мало, и это не осторожность, а
+/// опыт: демон, зависший с поднятым тоннелем, соединение всё равно принимает —
+/// его дослушивает ядро, — и молчит. Тот, кто счёл такое соединение ответом,
+/// встаёт на первом же запросе навсегда: окно не открывается, а человек видит
+/// «Запускаю службу» и больше ничего.
+pub async fn greet() -> Option<String> {
+    let greeting = tokio::time::timeout(ANSWER_TIMEOUT, async {
+        let mut client = Client::connect().await.ok()?;
+        let (_, build) = client.hello().await.ok()?;
+        Some(build)
+    })
+    .await;
+
+    greeting.ok().flatten()
+}
+
+/// Отвечает ли служба.
+pub async fn answers() -> bool {
+    greet().await.is_some()
+}
+
 /// Поток событий от демона.
 pub struct EventStream {
     reader: ReadHalf<LocalSocketStream>,

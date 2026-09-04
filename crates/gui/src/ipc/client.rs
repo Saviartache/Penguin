@@ -12,10 +12,37 @@ use penguin_ipc::schema::{Request, Response};
 use penguin_ipc::{Client, IpcResult};
 
 /// Отправляет запрос и возвращает ответ.
+///
+/// Со сроком: демон, зависший с поднятым тоннелем, соединение принимает — его
+/// дослушивает ядро — и молчит. Без срока запрос к такому демону не
+/// возвращается никогда, и окно ждёт ответа, которого не будет.
 pub async fn send(request: Request) -> IpcResult<Response> {
-    let mut client = Client::connect().await?;
-    client.request(request).await
+    let limit = limit_for(&request);
+
+    tokio::time::timeout(limit, async {
+        let mut client = Client::connect().await?;
+        client.request(request).await
+    })
+    .await
+    .unwrap_or(Err(penguin_ipc::IpcError::DaemonNotRunning))
 }
+
+/// Сколько ждать ответа на этот запрос.
+///
+/// Два срока, потому что запросы разные. Подъём тоннеля — это набор сервера,
+/// рукопожатие, маршруты и брандмауэр, и минута тут не расточительность.
+/// Вопрос о состоянии или настройках демон отвечает из памяти, и три секунды
+/// молчания на него означают, что отвечать некому.
+fn limit_for(request: &Request) -> std::time::Duration {
+    if request.is_mutating() {
+        WORK_TIMEOUT
+    } else {
+        penguin_ipc::client::ANSWER_TIMEOUT
+    }
+}
+
+/// Сколько ждать запрос, который делает работу.
+const WORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Отправляет запрос, превращая ошибку связи в ответ об ошибке.
 ///
@@ -35,6 +62,17 @@ pub async fn send_or_error(request: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_gets_more_time_than_a_question() {
+        // Один срок на оба означал бы либо оборванное подключение, либо
+        // минуту неподвижного окна в ответ на вопрос к зависшей службе.
+        assert!(limit_for(&Request::Connect { profile: None }) > limit_for(&Request::Status));
+        assert_eq!(
+            limit_for(&Request::Ping),
+            penguin_ipc::client::ANSWER_TIMEOUT
+        );
+    }
 
     #[tokio::test]
     async fn missing_daemon_becomes_an_error_response() {
