@@ -1,9 +1,10 @@
 //! macOS: служба launchd.
 //!
-//! launchd различает «описание есть» и «описание загружено». Первое — файл в
-//! `/Library/LaunchDaemons`, и он переживает перезагрузку; второе — команда
-//! `bootstrap`, и она держится до `bootout`. На этом различии и построено
-//! состояние: файл есть, но не загружено — служба остановлена.
+//! launchd различает «описание есть», «описание загружено» и «процесс
+//! работает». Первое — файл в `/Library/LaunchDaemons`, и он переживает
+//! перезагрузку; второе — команда `bootstrap`, и она держится до `bootout`;
+//! третье launchd называет сам, в ответе `print`. Из этих трёх и складывается
+//! состояние.
 
 use std::path::{Path, PathBuf};
 
@@ -88,10 +89,37 @@ pub fn status() -> PlatformResult<ServiceStatus> {
 
     // `print` возвращает ненулевой код, когда служба не загружена, — это не
     // ошибка, а ответ.
-    if command::run(LAUNCHCTL, &["print", &target()]).is_err() {
+    let Ok(report) = command::run(LAUNCHCTL, &["print", &target()]) else {
         return Ok(ServiceStatus::Stopped);
+    };
+    Ok(state_from(&report))
+}
+
+/// Состояние службы из ответа `launchctl print`.
+///
+/// Загруженная служба и работающая — разные вещи: после выхода демона описание
+/// остаётся у launchd, а процесса больше нет. Считать такую службу работающей
+/// значит не запустить её и ждать ответа от того, кого нет.
+///
+/// Слово состояния — часть машинного ответа launchd, а не сообщение человеку:
+/// оно одно и то же на любом языке системы. Берётся первое: поля самой службы
+/// печатаются до вложенных, а у тех есть своё `state`.
+fn state_from(report: &str) -> ServiceStatus {
+    match first_state(report) {
+        Some("running") => ServiceStatus::Running,
+        Some("spawn scheduled") => ServiceStatus::Transitioning,
+        // Всё прочее — служба загружена, но не работает. Дорога отсюда одна:
+        // запустить, и запуск уже загруженной ничего не ломает.
+        _ => ServiceStatus::Stopped,
     }
-    Ok(ServiceStatus::Running)
+}
+
+/// Первое поле `state` в ответе.
+fn first_state(report: &str) -> Option<&str> {
+    report
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("state = "))
 }
 
 /// Путь к файлу, который зарегистрирован службой.
@@ -253,5 +281,53 @@ mod tests {
     #[test]
     fn a_description_without_a_command_names_nothing() {
         assert!(executable_from("<plist><dict></dict></plist>").is_none());
+    }
+
+    /// Ответ `launchctl print` с заданным состоянием службы.
+    ///
+    /// Вложенное `state` в нём не для красоты: launchd печатает своё состояние
+    /// и у объединения ресурсов, и перепутать их — значит звать работающей
+    /// службу, от которой остался один заголовок.
+    fn report(state: &str) -> String {
+        format!(
+            "system/com.penguin.vpn = {{\n\
+             \tactive count = 0\n\
+             \tstate = {state}\n\
+             \tprogram = /usr/local/bin/penguin\n\
+             \tresource coalition = {{\n\
+             \t\tstate = active\n\
+             \t}}\n\
+             \tjob state = exited\n\
+             }}\n"
+        )
+    }
+
+    #[test]
+    fn a_loaded_but_dead_service_is_not_running() {
+        // Служба, вышедшая по своей воле, остаётся загруженной: описание у
+        // launchd есть, процесса нет. Принять её за работающую значит не
+        // запустить её и ждать ответа от того, кого нет.
+        assert_eq!(state_from(&report("not running")), ServiceStatus::Stopped);
+    }
+
+    #[test]
+    fn a_working_service_is_running() {
+        assert_eq!(state_from(&report("running")), ServiceStatus::Running);
+    }
+
+    #[test]
+    fn a_service_about_to_start_is_transitioning() {
+        assert_eq!(
+            state_from(&report("spawn scheduled")),
+            ServiceStatus::Transitioning
+        );
+    }
+
+    #[test]
+    fn an_unreadable_answer_is_not_taken_for_a_running_service() {
+        // Молчание и незнакомый ответ лечатся одинаково — запуском; а вот
+        // «работает» без основания оставило бы человека без тоннеля.
+        assert_eq!(state_from(""), ServiceStatus::Stopped);
+        assert_eq!(state_from("Could not find service"), ServiceStatus::Stopped);
     }
 }
