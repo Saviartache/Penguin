@@ -18,7 +18,7 @@ use crate::app::update::save;
 /// Разбирает экран настроек.
 pub fn handle(app: &mut App, message: SettingsMessage) -> Task<Message> {
     match message {
-        SettingsMessage::AutostartToggled(enabled) => {
+        SettingsMessage::Autostart(enabled) => {
             app.state_mut().config.app.autostart = enabled;
 
             // Автозапуск интерфейса — запись в ветку текущего пользователя, и
@@ -28,17 +28,17 @@ pub fn handle(app: &mut App, message: SettingsMessage) -> Task<Message> {
             save(app)
         }
 
-        SettingsMessage::AutoconnectToggled(enabled) => {
+        SettingsMessage::Autoconnect(enabled) => {
             app.state_mut().config.app.autoconnect = enabled;
             save(app)
         }
 
-        SettingsMessage::KillSwitchToggled(enabled) => {
+        SettingsMessage::KillSwitch(enabled) => {
             app.state_mut().config.network.kill_switch = enabled;
             save(app)
         }
 
-        SettingsMessage::AllowLanToggled(enabled) => {
+        SettingsMessage::AllowLan(enabled) => {
             app.state_mut().config.network.allow_lan = enabled;
             save(app)
         }
@@ -78,14 +78,14 @@ mod tests {
         // несработавший, и человек щёлкает ещё раз.
         let mut app = app();
 
-        let _ = handle(&mut app, SettingsMessage::KillSwitchToggled(false));
+        let _ = handle(&mut app, SettingsMessage::KillSwitch(false));
         assert!(!app.state().config.network.kill_switch);
         assert!(!app.state().saved.network.kill_switch, "не уехало демону");
 
-        let _ = handle(&mut app, SettingsMessage::AllowLanToggled(false));
+        let _ = handle(&mut app, SettingsMessage::AllowLan(false));
         assert!(!app.state().saved.network.allow_lan);
 
-        let _ = handle(&mut app, SettingsMessage::AutoconnectToggled(true));
+        let _ = handle(&mut app, SettingsMessage::Autoconnect(true));
         assert!(app.state().saved.app.autoconnect);
 
         assert!(
@@ -103,7 +103,7 @@ mod tests {
             penguin_config::schema::routing::TunnelMode::Allowlist;
         app.state_mut().dirty = true;
 
-        let _ = handle(&mut app, SettingsMessage::AllowLanToggled(false));
+        let _ = handle(&mut app, SettingsMessage::AllowLan(false));
 
         assert_eq!(
             app.state().saved.routing.mode,

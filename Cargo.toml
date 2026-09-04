@@ -21,6 +21,8 @@ members = [
     "crates/cli",
     "crates/app",
     "protocols/hysteria2",
+    "protocols/socks5",
+    "protocols/http-proxy",
 ]
 
 # У кита свои `rustfmt.toml` и свои пороги clippy: в нашем workspace он
@@ -54,6 +56,8 @@ penguin-daemon   = { path = "crates/daemon" }
 penguin-cli      = { path = "crates/cli" }
 penguin-gui      = { path = "crates/gui" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
+penguin-socks5 = { path = "protocols/socks5" }
+penguin-http-proxy = { path = "protocols/http-proxy" }
 
 # --- UI ---
 uikit = { package = "rust-ui-kit", path = "vendor/rust-ui-kit" }

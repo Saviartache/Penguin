@@ -8,7 +8,6 @@
 use penguin_ipc::schema::{Event, Response};
 
 use crate::forms::rule::Action as DraftAction;
-use crate::forms::server::Field as ServerField;
 
 /// Что произошло в интерфейсе.
 #[derive(Debug, Clone)]
@@ -172,16 +171,42 @@ pub enum ServersMessage {
     /// Проверить задержку.
     Probe,
 
-    /// Открыть редактор. `None` — новый профиль.
-    EditorOpened(Option<String>),
+    /// Показать список протоколов.
+    ///
+    /// Отдельный шаг перед формой: полей у формы нет, пока не известно, чьи
+    /// они. Раньше «Добавить сервер» открывала форму Hysteria 2, и второй
+    /// протокол в неё было некуда добавить.
+    PickerOpened,
+    /// Закрыть список протоколов, ничего не выбрав.
+    PickerClosed,
+    /// Выбран протокол — открывается его форма.
+    ///
+    /// Имя протокола, а не место в списке: список собирается каталогом, и
+    /// номер в нём поменяется при добавлении соседа.
+    ProtocolChosen(&'static str),
+
+    /// Открыть редактор существующего профиля.
+    ///
+    /// Нового здесь быть не может: у нового сначала выбирают протокол
+    /// ([`Self::PickerOpened`]).
+    EditorOpened(String),
     /// Закрыть редактор, ничего не сохранив.
     EditorClosed,
-    /// Изменено поле редактора.
-    EditorChanged(ServerField, String),
+    /// Изменено имя профиля.
+    ///
+    /// Отдельно от полей протокола: имя есть у любого профиля, в том числе у
+    /// того, чей протокол окну неизвестен.
+    EditorNameChanged(String),
+    /// Изменено поле формы — местом в форме, а не именем.
+    ///
+    /// Место, потому что виджет знает только свой номер: имена полей у
+    /// каждого протокола свои, и тащить их в сообщение значит тащить туда
+    /// весь каталог.
+    EditorChanged(usize, String),
+    /// Переключён флажок формы.
+    EditorToggled(usize, bool),
     /// Вставлена ссылка-приглашение.
     LinkChanged(String),
-    /// Переключена проверка сертификата.
-    EditorInsecureToggled(bool),
     /// Сохранить профиль из редактора.
     EditorSubmitted,
     /// Удалить профиль.
@@ -223,6 +248,16 @@ pub enum SplitTunnelMessage {
     AppSearchChanged(String),
     /// Приложение отмечено или снято — полным путём.
     AppToggled(String, bool),
+    /// Показать системное окно выбора файла.
+    ///
+    /// Список от службы — только про запущенное, а правило пишут и для игры, в
+    /// которую сегодня не играли.
+    AppPickRequested,
+    /// Что ответило окно выбора файла.
+    ///
+    /// `Ok(None)` — человек закрыл окно, ничего не выбрав; это не ошибка и
+    /// показывать по этому поводу нечего.
+    AppPicked(Result<Option<String>, String>),
     /// Изменено имя нового правила.
     DraftNameChanged(String),
     /// Изменена строка адресов нового правила.
@@ -245,13 +280,13 @@ pub enum SplitTunnelMessage {
 #[derive(Debug, Clone)]
 pub enum SettingsMessage {
     /// Автозапуск.
-    AutostartToggled(bool),
+    Autostart(bool),
     /// Автоподключение.
-    AutoconnectToggled(bool),
+    Autoconnect(bool),
     /// Kill switch.
-    KillSwitchToggled(bool),
+    KillSwitch(bool),
     /// Локальная сеть мимо тоннеля.
-    AllowLanToggled(bool),
+    AllowLan(bool),
 }
 
 #[cfg(test)]

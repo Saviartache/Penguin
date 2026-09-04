@@ -113,6 +113,37 @@ impl ServerEndpoint {
     }
 }
 
+impl FromStr for ServerEndpoint {
+    type Err = CoreError;
+
+    /// Разбирает `example.com:443`, `[2001:db8::1]:443`, `example.com:20000-30000`.
+    ///
+    /// Здесь, а не в каждом протоколе по разу: запись адреса сервера у всех
+    /// одна, а разбирали её порознь — и первым же расхождением стал IPv6,
+    /// у которого двоеточий больше одного.
+    fn from_str(s: &str) -> CoreResult<Self> {
+        let raw = s.trim();
+        let (host, ports) =
+            split_host_ports(raw).ok_or_else(|| CoreError::InvalidAddress(raw.to_owned()))?;
+        Ok(Self::new(host.parse()?, ports.parse()?))
+    }
+}
+
+/// Делит `host:ports`, не путаясь в двоеточиях IPv6.
+///
+/// `None` — порта нет вовсе. Умолчания здесь не подставляются: у каждого
+/// протокола порт свой, а молча подставленный чужой означает сервер, к
+/// которому не подключиться.
+fn split_host_ports(raw: &str) -> Option<(&str, &str)> {
+    // IPv6 в скобках: `[::1]:443`. Без этого разбора двоеточия адреса приняли
+    // бы за разделитель порта.
+    if let Some(rest) = raw.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']')?;
+        return Some((host, tail.trim().strip_prefix(':')?));
+    }
+    raw.rsplit_once(':')
+}
+
 impl FromStr for PortSpec {
     type Err = CoreError;
 
@@ -249,5 +280,33 @@ mod tests {
             let parsed: PortSpec = raw.parse().expect("разбирается");
             assert_eq!(parsed.to_string(), raw);
         }
+    }
+
+    #[test]
+    fn parses_an_endpoint_in_every_notation() {
+        let endpoint: ServerEndpoint = "example.com:443".parse().expect("разбирается");
+        assert_eq!(endpoint.host.as_domain(), Some("example.com"));
+        assert_eq!(endpoint.ports, PortSpec::Single(443));
+
+        let endpoint: ServerEndpoint = "1.2.3.4:1080".parse().expect("разбирается");
+        assert!(endpoint.host.as_ip().is_some());
+
+        // IPv6 в скобках: двоеточий в нём больше, чем разделителей.
+        let endpoint: ServerEndpoint = "[2001:db8::1]:443".parse().expect("разбирается");
+        assert!(endpoint.host.as_ip().is_some_and(|ip| ip.is_ipv6()));
+        assert_eq!(endpoint.ports, PortSpec::Single(443));
+
+        let endpoint: ServerEndpoint = "example.com:20000-30000".parse().expect("разбирается");
+        assert!(endpoint.ports.is_hopping());
+    }
+
+    #[test]
+    fn an_endpoint_without_a_port_is_refused() {
+        // Молча подставленный чужой порт — это сервер, к которому не
+        // подключиться, и узнать об этом можно будет только по таймауту.
+        assert!("example.com".parse::<ServerEndpoint>().is_err());
+        assert!("[2001:db8::1]".parse::<ServerEndpoint>().is_err());
+        assert!("example.com:абв".parse::<ServerEndpoint>().is_err());
+        assert!(":443".parse::<ServerEndpoint>().is_err());
     }
 }

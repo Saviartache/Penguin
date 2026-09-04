@@ -6,6 +6,7 @@ pub mod error;
 pub mod flow;
 pub mod id;
 pub mod network;
+pub mod path;
 pub mod state;
 pub mod stats;
 pub mod time;

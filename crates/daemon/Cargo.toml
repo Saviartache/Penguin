@@ -41,5 +41,7 @@ windows-service.workspace = true
 [features]
 # Набор протоколов задаётся движком; перечисление здесь нужно только затем,
 # чтобы `--no-default-features` собирал демона без единого протокола.
-default = ["hysteria2"]
+default = ["hysteria2", "socks5", "http-proxy"]
 hysteria2 = ["penguin-engine/hysteria2"]
+socks5 = ["penguin-engine/socks5"]
+http-proxy = ["penguin-engine/http-proxy"]

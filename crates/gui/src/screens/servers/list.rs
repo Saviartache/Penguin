@@ -100,7 +100,9 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         .push_auto(
             ui::button(ButtonVariant::Primary, crate::i18n::s().add_server)
                 .h(px(BUTTON_HEIGHT))
-                .on_press(Message::Servers(ServersMessage::EditorOpened(None))),
+                // Сначала протокол, потом его форма: полей у формы нет, пока
+                // не известно, чьи они.
+                .on_press(Message::Servers(ServersMessage::PickerOpened)),
         )
         .push_auto(probe)
         .push(ui::spring())
@@ -263,7 +265,7 @@ fn row<'a>(
         .push_auto(table::action(
             crate::i18n::s().edit,
             ACTION_WIDTH,
-            Message::Servers(ServersMessage::EditorOpened(Some(id))),
+            Message::Servers(ServersMessage::EditorOpened(id)),
         ))
         .gap(gap::NONE)
         .align(Alignment::Center)

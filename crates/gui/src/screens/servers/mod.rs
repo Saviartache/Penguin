@@ -15,9 +15,14 @@
 //! девяти полей под списком отодвигает сам список за нижний край, и человек
 //! правит один сервер, не видя остальных, — тогда как выбирают их именно
 //! сравнением.
+//!
+//! Новый сервер заводится в два шага: сначала протокол ([`picker`]), потом его
+//! форма ([`editor`]). Поля формы **и есть** протокол, и показывать их до того,
+//! как он выбран, нечем.
 
 pub mod editor;
 pub mod list;
+pub mod picker;
 
 use iced::Element;
 use penguin_config::schema::profile::Profile;
@@ -29,6 +34,13 @@ use crate::app::state::State;
 pub fn view(state: &State) -> Element<'_, Message> {
     // Модальное окно **заменяет** тело экрана: в `iced 0.12` наложения поверх
     // содержимого нет, и так это устроено в самом ките.
+    //
+    // Порядок веток — порядок шагов: выбор протокола, потом его форма. Открыт
+    // может быть только один из них: выбор протокола закрывает себя, открывая
+    // форму.
+    if state.servers.picker {
+        return picker::view(state);
+    }
     if let Some(draft) = state.servers.editor.as_ref() {
         return editor::view(state, draft);
     }
@@ -90,6 +102,16 @@ mod tests {
         // В `iced 0.12` наложения поверх содержимого нет: модальное окно
         // занимает место тела экрана целиком.
         let mut state = State::default();
+        state.servers.editor = Some(crate::forms::server::Draft::default());
+        let _ = view(&state);
+    }
+
+    #[test]
+    fn the_protocol_list_comes_before_the_form() {
+        // Оба открытыми быть не должны, но если такое случилось — показать
+        // надо первый шаг, а не второй.
+        let mut state = State::default();
+        state.servers.picker = true;
         state.servers.editor = Some(crate::forms::server::Draft::default());
         let _ = view(&state);
     }

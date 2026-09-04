@@ -16,13 +16,13 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 /// сворачиваются один раз в конце.
 pub fn sum(data: &[u8]) -> u32 {
     let mut total = 0u32;
-    let mut chunks = data.chunks_exact(2);
+    let (words, tail) = data.as_chunks::<2>();
 
-    for chunk in &mut chunks {
-        total += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
+    for word in words {
+        total += u32::from(u16::from_be_bytes(*word));
     }
     // Нечётный хвост дополняется нулём справа, а не слева.
-    if let [last] = chunks.remainder() {
+    if let [last] = tail {
         total += u32::from(u16::from_be_bytes([*last, 0]));
     }
     total

@@ -1,9 +1,16 @@
-//! Модальное окно профиля: ссылка, адрес, пароль, полоса, TLS.
+//! Модальное окно профиля: ссылка, имя и поля выбранного протокола.
+//!
+//! Полей окно не знает: их приносит описание протокола
+//! ([`crate::forms::protocol`]), и рисуются они одинаково — подпись слева,
+//! поле справа. До этого здесь стоял список из восьми полей Hysteria 2
+//! поимённо, и второй протокол некуда было добавить, не заведя второе такое же
+//! окно.
 //!
 //! Первое поле — ссылка-приглашение. Её присылают в мессенджере, и переносить
 //! из неё поля руками — семь шансов ошибиться в пароле; вставил — остальное
-//! заполнилось само. Всё, что ниже, остаётся на месте для тех, у кого ссылки
-//! нет: настройки от провайдера приходят и списком полей.
+//! заполнилось само. Показывается она только у протоколов, у которых ссылки
+//! бывают: пустое поле «Ссылка» у прокси, которому её взять неоткуда, — это
+//! вопрос без ответа.
 //!
 //! Подсказок под полями нет намеренно. В модальном окне их некуда деть: они
 //! удваивают его высоту, а прочитывают их один раз в жизни. То, что нужно
@@ -17,7 +24,8 @@ use uikit::widgets::{Checkbox, Modal, TextInput};
 
 use crate::app::message::{Message, ServersMessage};
 use crate::app::state::State;
-use crate::forms::server::{Draft, Field};
+use crate::forms::protocol::FieldSpec;
+use crate::forms::server::Draft;
 use crate::ui;
 
 /// Ширина окна.
@@ -35,68 +43,26 @@ const FORM_HEIGHT: f32 = 300.0;
 
 /// Собирает модальное окно правки профиля.
 pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
-    let title = if draft.is_edit() {
-        crate::i18n::s().edit_server
-    } else {
-        crate::i18n::s().new_server
-    };
+    // Строки добавляются по одной, а не собираются списком с пустышками на
+    // месте ненужных: пустая строка в столбце с зазором — это зазор, который
+    // видно, и форма прокси стояла бы с дырой на месте поля ссылки.
+    let mut form = Flex::col();
+    if draft.spec().is_some_and(|spec| spec.takes_links()) {
+        form = form.push_auto(link(state));
+    }
+    form = form.push_auto(name(draft));
+    if draft.spec().is_none() {
+        form = form.push_auto(unknown(state));
+    }
 
-    let form = Flex::col()
-        .push_auto(link(state))
-        .push_auto(field(
-            crate::i18n::s().server_name,
-            draft,
-            Field::Name,
-            "",
-            false,
-        ))
-        .push_auto(field(
-            crate::i18n::s().server_address,
-            draft,
-            Field::Server,
-            crate::i18n::s().server_address_example,
-            false,
-        ))
-        .push_auto(field(
-            crate::i18n::s().password,
-            draft,
-            Field::Password,
-            "",
-            true,
-        ))
-        .push_auto(field(
-            crate::i18n::s().bandwidth_down,
-            draft,
-            Field::Down,
-            crate::i18n::s().bandwidth_down_example,
-            false,
-        ))
-        .push_auto(field(
-            crate::i18n::s().bandwidth_up,
-            draft,
-            Field::Up,
-            crate::i18n::s().bandwidth_up_example,
-            false,
-        ))
-        .push_auto(field(
-            crate::i18n::s().sni,
-            draft,
-            Field::Sni,
-            crate::i18n::s().sni_example,
-            false,
-        ))
-        .push_auto(field(
-            crate::i18n::s().obfs,
-            draft,
-            Field::Obfs,
-            crate::i18n::s().obfs_example,
-            true,
-        ))
-        .push_auto(ui::form_row(
-            crate::i18n::s().insecure,
-            Checkbox::new(String::new(), draft.insecure)
-                .on_toggle(|value| Message::Servers(ServersMessage::EditorInsecureToggled(value))),
-        ))
+    let form = form
+        .extend(
+            draft
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(index, field)| row(draft, index, field)),
+        )
         .gap(gap::MD)
         .build();
 
@@ -107,7 +73,7 @@ pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
         .build();
 
     let mut modal = Modal::new(content)
-        .title(title)
+        .title(title(draft))
         .max_width(WIDTH)
         // `Esc` и нажатие мимо панели означают «Отмена»: отдельной кнопки для
         // этого не нужно, а место в ряду ответов дорого.
@@ -130,7 +96,30 @@ pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     modal.build().into()
 }
 
+/// Заголовок окна: что делаем и с чем.
+///
+/// Имя протокола в заголовке, а не строкой в форме: оно не правится, а
+/// строка формы читается как поле, которое можно тронуть. Свободная функция
+/// с тестом — заголовок, потерявший протокол, оставляет два одинаковых окна
+/// для двух разных форм.
+fn title(draft: &Draft) -> String {
+    let what = if draft.is_edit() {
+        crate::i18n::s().edit_server
+    } else {
+        crate::i18n::s().new_server
+    };
+
+    match draft.spec() {
+        Some(spec) => format!("{what} · {}", spec.label),
+        // У чужого протокола подписи нет — только имя из настроек.
+        None => format!("{what} · {}", draft.protocol()),
+    }
+}
+
 /// Поле вставки ссылки-приглашения.
+///
+/// Показывается только у протоколов, у которых ссылки бывают: поле, в которое
+/// нечего вставить, — это вопрос, на который нет ответа.
 fn link(state: &State) -> Element<'_, Message> {
     ui::form_row(
         crate::i18n::s().link,
@@ -140,19 +129,49 @@ fn link(state: &State) -> Element<'_, Message> {
     )
 }
 
-/// Одно поле формы.
-fn field<'a>(
-    label: &'a str,
-    draft: &'a Draft,
-    which: Field,
-    example: &'a str,
-    secret: bool,
-) -> Element<'a, Message> {
+/// Имя профиля — единственное поле, общее всем протоколам.
+fn name(draft: &Draft) -> Element<'_, Message> {
+    ui::form_row(
+        crate::i18n::s().server_name,
+        TextInput::new("", &draft.name)
+            .on_input(|value| Message::Servers(ServersMessage::EditorNameChanged(value)))
+            .build(),
+    )
+}
+
+/// Объяснение для профиля, чей протокол окну неизвестен.
+///
+/// Пустая форма без слов читается как поломка. Здесь же сказано, что
+/// настройки не потеряются: их правит файл, а окно бережёт как есть.
+fn unknown(state: &State) -> Element<'_, Message> {
+    ui::muted(
+        &state.palette,
+        crate::i18n::s().protocol_unknown,
+        type_scale::MICRO,
+    )
+}
+
+/// Одна строка формы — по описанию поля.
+fn row<'a>(draft: &'a Draft, index: usize, field: &'static FieldSpec) -> Element<'a, Message> {
+    let strings = crate::i18n::s();
+    let label = (field.label)(strings);
+
+    if field.is_flag() {
+        return ui::form_row(
+            label,
+            Checkbox::new(String::new(), draft.flag(field.key)).on_toggle(move |value| {
+                Message::Servers(ServersMessage::EditorToggled(index, value))
+            }),
+        );
+    }
+
+    let example = field.example.map_or("", |example| example(strings));
+
     ui::form_row(
         label,
-        TextInput::new(example, draft.get(which))
-            .secure(secret)
-            .on_input(move |value| Message::Servers(ServersMessage::EditorChanged(which, value)))
+        TextInput::new(example, draft.text(field.key))
+            .secure(field.is_secret())
+            .on_input(move |value| Message::Servers(ServersMessage::EditorChanged(index, value)))
             .build(),
     )
 }
@@ -180,15 +199,19 @@ fn problem<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
 
 #[cfg(test)]
 mod tests {
+    use penguin_config::schema::outbound::RawOutbound;
+    use penguin_config::schema::profile::Profile;
+    use serde_json::json;
+
     use super::*;
+    use crate::forms::protocol;
 
     fn filled() -> Draft {
-        Draft {
-            name: "Дом".to_owned(),
-            server: "example.com:443".to_owned(),
-            password: "секрет".to_owned(),
-            ..Draft::default()
-        }
+        let mut draft = Draft::default();
+        draft.name = "Дом".to_owned();
+        draft.set_text("server", "example.com:443".to_owned());
+        draft.set_text("password", "секрет".to_owned());
+        draft
     }
 
     #[test]
@@ -198,12 +221,43 @@ mod tests {
     }
 
     #[test]
+    fn renders_every_protocol_in_the_catalog() {
+        // Форма собирается описанием: протокол, который она не рисует, — это
+        // протокол, который нельзя добавить.
+        let state = State::default();
+        for spec in protocol::ALL {
+            let _ = view(&state, &Draft::new(spec));
+        }
+    }
+
+    #[test]
     fn renders_an_edited_profile() {
-        let draft = Draft {
-            id: Some("home".to_owned()),
-            ..filled()
-        };
-        let _ = view(&State::default(), &draft);
+        let _ = view(
+            &State::default(),
+            &filled().with_id(Some("home".to_owned())),
+        );
+    }
+
+    #[test]
+    fn the_title_names_the_protocol() {
+        // Два окна с одним заголовком для двух разных форм — верный способ
+        // сохранить не туда.
+        let new = title(&Draft::new(protocol::by_id("socks5").expect("есть")));
+        assert!(new.contains("SOCKS5"), "нет протокола: {new}");
+        assert!(new.contains(crate::i18n::s().new_server));
+
+        let edit = title(&filled().with_id(Some("home".to_owned())));
+        assert!(edit.contains(crate::i18n::s().edit_server));
+    }
+
+    #[test]
+    fn a_protocol_without_links_has_no_link_field() {
+        // Поле, в которое нечего вставить, — это вопрос, на который нет
+        // ответа. Проверяется описанием: у SOCKS5 ссылки есть, у выдуманного
+        // протокола без схем поля быть не должно.
+        for spec in protocol::ALL {
+            assert!(spec.takes_links(), "`{}` остался без ссылок", spec.id);
+        }
     }
 
     #[test]
@@ -229,6 +283,19 @@ mod tests {
             "hy2://source:s3cret@example.net:3478?sni=example.net#source".to_owned();
         let draft = crate::forms::link::parse(&state.servers.link).expect("ссылка разбирается");
         let _ = view(&state, &draft);
+    }
+
+    #[test]
+    fn an_unknown_protocol_renders_with_an_explanation() {
+        // Пустое окно без слов читается как поломка.
+        let profile = Profile::new(
+            "чужой",
+            "Чужой",
+            RawOutbound::new("vless", json!({ "server": "example.com:443" })),
+        );
+        let draft = Draft::from_profile(&profile);
+        assert!(draft.fields().is_empty());
+        let _ = view(&State::default(), &draft);
     }
 
     #[test]

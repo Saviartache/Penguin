@@ -1,20 +1,25 @@
-//! Разбор ссылки-приглашения Hysteria 2.
+//! Разбор ссылки-приглашения.
 //!
 //! ```text
 //! hy2://source:s3cret@example.net:3478?sni=example.net&insecure=0#source
+//! socks5://penguin:s3cret@127.0.0.1:1080#Дома
 //! ```
 //!
 //! Ссылку присылают в мессенджере, и переносить из неё поля руками — семь
 //! шансов ошибиться в пароле. Поэтому разбор здесь, а не «скопируйте адрес,
 //! потом пароль».
 //!
-//! # Что здесь не как в обычном URL
+//! # Что здесь общее, а что — протокола
 //!
-//! **Двоеточие в userinfo — часть пароля, а не разделитель.** У Hysteria 2
-//! userinfo целиком и есть строка проверки подлинности: в примере выше пароль
-//! — `source:s3cret`, а не пользователь `source` с паролем
-//! `s3cret`. Разделить их значило бы молча отдать серверу половину
-//! пароля.
+//! Общее — разбор самой записи: схема, userinfo, адрес, запрос, имя после
+//! `#`. Он одинаков у всех, кто пишет ссылки, и живёт здесь.
+//!
+//! Своё у протокола — что из разобранного куда положить: у Hysteria 2
+//! userinfo целиком и есть пароль, у SOCKS5 это `имя:пароль` через двоеточие.
+//! Это описывает [`crate::forms::protocol::ProtocolSpec::from_link`], и
+//! новый протокол добавляется вместе со своими ссылками, не трогая этот файл.
+//!
+//! # Что здесь не как в обычном URL
 //!
 //! **`+` в запросе означает пробел, а в userinfo — плюс.** Ссылки делает
 //! реализация на Go, а её `url.Query()` разбирает запрос как форму, где `+`
@@ -24,13 +29,8 @@
 //! **Порт может быть диапазоном** (`host:20000-30000`) — это смена порта на
 //! ходу. Он передаётся в настройки как есть: разбирать его умеет сам протокол.
 
+use crate::forms::protocol;
 use crate::forms::server::Draft;
-
-/// Схемы, под которыми ходит одна и та же ссылка.
-const SCHEMES: [&str; 2] = ["hysteria2://", "hy2://"];
-
-/// Порт, если в ссылке его не указали.
-const DEFAULT_PORT: u16 = 443;
 
 /// Похожа ли строка на ссылку-приглашение.
 ///
@@ -38,10 +38,11 @@ const DEFAULT_PORT: u16 = 443;
 /// разбирать каждое нажатие клавиши и показывать ошибку на каждой букве —
 /// худший способ помочь.
 pub fn looks_like_link(raw: &str) -> bool {
-    let raw = raw.trim();
-    SCHEMES
+    let raw = raw.trim().to_lowercase();
+    protocol::ALL
         .iter()
-        .any(|scheme| raw.len() > scheme.len() && raw.to_lowercase().starts_with(scheme))
+        .flat_map(|spec| spec.schemes)
+        .any(|scheme| raw.len() > scheme.len() && raw.starts_with(scheme))
 }
 
 /// Разбирает ссылку в черновик профиля.
@@ -49,15 +50,85 @@ pub fn looks_like_link(raw: &str) -> bool {
 /// `Err` — текст, который можно показать как есть: разбирать код ошибки в
 /// интерфейсе всё равно некому.
 pub fn parse(raw: &str) -> Result<Draft, String> {
-    let raw = raw.trim();
+    let link = split(raw)?;
+    let spec = protocol::by_scheme(&link.scheme)
+        .ok_or_else(|| crate::i18n::s().link_not_a_link.to_owned())?;
 
-    let rest = SCHEMES
-        .iter()
-        .find_map(|scheme| {
-            raw.get(..scheme.len())
-                .filter(|head| head.eq_ignore_ascii_case(scheme))
-                .map(|_| &raw[scheme.len()..])
-        })
+    let Some(from_link) = spec.from_link else {
+        return Err(crate::i18n::s().link_not_a_link.to_owned());
+    };
+
+    let mut draft = Draft::new(spec);
+    for (key, value) in from_link(&link)? {
+        draft.set_text(key, value);
+    }
+
+    // Имя из ссылки, а если его нет — адрес: безымянный профиль неотличим в
+    // списке от соседнего.
+    draft.name = link
+        .name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| link.host.clone());
+
+    Ok(draft)
+}
+
+/// Ссылка, разобранная на части.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// Схема без `://`, в нижнем регистре: `hy2`.
+    pub scheme: String,
+    /// Всё до `@`, как оно написано.
+    ///
+    /// Не разделено на имя и пароль намеренно: где здесь разделитель, знает
+    /// только протокол. У Hysteria 2 двоеточие — часть пароля, у SOCKS5 —
+    /// граница между именем и паролем, и разделить это здесь значило бы
+    /// молча отдать серверу половину пароля.
+    pub userinfo: Option<String>,
+    /// Хост без скобок, даже если это IPv6.
+    pub host: String,
+    /// Порт или диапазон портов, как он написан.
+    pub port: Option<String>,
+    /// Параметры запроса.
+    pub query: Query,
+    /// Имя после `#`, уже раскодированное.
+    pub name: Option<String>,
+}
+
+impl Link {
+    /// Адрес сервера в том виде, в каком он ложится в настройки.
+    ///
+    /// IPv6 берётся обратно в скобки: без них `2001:db8::1:443` — это
+    /// законный адрес IPv6 сам по себе, и где в нём порт, не знает никто.
+    pub fn server(&self, default_port: u16) -> String {
+        let port = self
+            .port
+            .clone()
+            .unwrap_or_else(|| default_port.to_string());
+
+        if self.host.contains(':') {
+            format!("[{}]:{port}", self.host)
+        } else {
+            format!("{}:{port}", self.host)
+        }
+    }
+
+    /// Userinfo, раскодированное как userinfo: проценты да, `+` нет.
+    pub fn userinfo(&self) -> String {
+        self.userinfo
+            .as_deref()
+            .map(str::trim)
+            .map(percent_decode)
+            .unwrap_or_default()
+    }
+}
+
+/// Разбирает запись ссылки, не зная протокола.
+pub fn split(raw: &str) -> Result<Link, String> {
+    let raw = raw.trim();
+    let (scheme, rest) = raw
+        .split_once("://")
         .ok_or_else(|| crate::i18n::s().link_not_a_link.to_owned())?;
 
     // Порядок разбора: сначала имя (после `#`), потом запрос (после `?`), и
@@ -70,8 +141,8 @@ pub fn parse(raw: &str) -> Result<Draft, String> {
     // невидимый пробел в адресе означает сервер, к которому не подключиться.
     let authority = authority.trim().trim_end_matches('/').trim();
 
-    let (auth, host_port) = match authority.rsplit_once('@') {
-        Some((auth, host)) => (Some(auth), host),
+    let (userinfo, host_port) = match authority.rsplit_once('@') {
+        Some((userinfo, host)) => (Some(userinfo.to_owned()), host),
         None => (None, authority),
     };
 
@@ -81,33 +152,14 @@ pub fn parse(raw: &str) -> Result<Draft, String> {
         return Err(crate::i18n::s().link_no_host.to_owned());
     }
 
-    let params = Query::parse(query);
-
-    let mut draft = Draft {
-        server: format!("{host}:{port}"),
-        // Пароль — весь userinfo целиком, вместе с двоеточиями.
-        password: auth.map(str::trim).map(decode_userinfo).unwrap_or_default(),
-        sni: params.get("sni").unwrap_or_default(),
-        obfs: params.get("obfs-password").unwrap_or_default(),
-        // `insecure` и `allowInsecure` встречаются оба; достаточно одного.
-        insecure: params.flag("insecure") || params.flag("allowInsecure"),
-        ..Draft::default()
-    };
-
-    // Имя из ссылки, а если его нет — адрес: безымянный профиль неотличим в
-    // списке от соседнего.
-    draft.name = name
-        .map(decode_query)
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| host.to_owned());
-
-    if draft.password.is_empty() {
-        return Err(crate::i18n::s().link_no_password.to_owned());
-    }
-
-    // `alpn` в ссылке встречается, но в настройках его нет: Hysteria 2 ходит
-    // только по `h3`, и хранить единственное возможное значение незачем.
-    Ok(draft)
+    Ok(Link {
+        scheme: scheme.trim().to_lowercase(),
+        userinfo,
+        host: host.to_owned(),
+        port,
+        query: Query::parse(query),
+        name: name.map(decode_query),
+    })
 }
 
 /// Делит строку по первому вхождению разделителя.
@@ -119,7 +171,7 @@ fn split_once(raw: &str, separator: char) -> (&str, Option<&str>) {
 }
 
 /// Разделяет `host:port`, не путаясь в двоеточиях IPv6.
-fn split_host_port(raw: &str) -> Result<(&str, String), String> {
+fn split_host_port(raw: &str) -> Result<(&str, Option<String>), String> {
     // IPv6 в скобках: `[::1]:443`. Без этого разбора двоеточия адреса приняли
     // бы за разделитель порта.
     if let Some(rest) = raw.strip_prefix('[') {
@@ -129,20 +181,20 @@ fn split_host_port(raw: &str) -> Result<(&str, String), String> {
         let port = tail
             .trim()
             .strip_prefix(':')
-            .map_or_else(|| DEFAULT_PORT.to_string(), |port| port.trim().to_owned());
+            .map(|port| port.trim().to_owned());
         return Ok((host, port));
     }
 
     match raw.rsplit_once(':') {
-        Some((host, port)) => Ok((host, port.trim().to_owned())),
-        // Порт не указан — берётся тот, на котором Hysteria 2 работает чаще
-        // всего.
-        None => Ok((raw, DEFAULT_PORT.to_string())),
+        Some((host, port)) => Ok((host, Some(port.trim().to_owned()))),
+        // Порт не указан — его подставит протокол: у каждого он свой.
+        None => Ok((raw, None)),
     }
 }
 
 /// Параметры запроса.
-struct Query(Vec<(String, String)>);
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Query(Vec<(String, String)>);
 
 impl Query {
     /// Разбирает `a=1&b=2`.
@@ -166,7 +218,7 @@ impl Query {
     }
 
     /// Значение параметра, если оно непустое.
-    fn get(&self, key: &str) -> Option<String> {
+    pub fn get(&self, key: &str) -> Option<String> {
         self.0
             .iter()
             .find(|(name, _)| name == &key.to_lowercase())
@@ -179,14 +231,9 @@ impl Query {
     /// `insecure=0` — это **не** «не проверять сертификат». Прочитать наличие
     /// параметра как согласие значило бы молча снять единственную защиту от
     /// подмены сервера.
-    fn flag(&self, key: &str) -> bool {
+    pub fn flag(&self, key: &str) -> bool {
         matches!(self.get(key).as_deref(), Some("1" | "true" | "yes" | "on"))
     }
-}
-
-/// Раскодирует userinfo: только проценты, `+` остаётся плюсом.
-fn decode_userinfo(raw: &str) -> String {
-    percent_decode(raw)
 }
 
 /// Раскодирует часть запроса: проценты и `+` как пробел.
@@ -232,13 +279,13 @@ mod tests {
     fn the_sample_link_parses_completely() {
         let draft = parse(SAMPLE).expect("ссылка разбирается");
 
-        assert_eq!(draft.server, "example.net:3478");
+        assert_eq!(draft.text("server"), "example.net:3478");
         // Двоеточие — часть пароля, а не разделитель: половина пароля на
         // сервере не подойдёт.
-        assert_eq!(draft.password, "source:s3cret");
-        assert_eq!(draft.sni, "example.net");
+        assert_eq!(draft.text("password"), "source:s3cret");
+        assert_eq!(draft.text("sni"), "example.net");
         assert_eq!(draft.name, "source");
-        assert!(!draft.insecure, "`insecure=0` — это «проверять»");
+        assert!(!draft.flag("insecure"), "`insecure=0` — это «проверять»");
     }
 
     #[test]
@@ -251,6 +298,7 @@ mod tests {
             .expect("профиль собирается");
 
         assert_eq!(profile.name, "source");
+        assert_eq!(profile.outbound.protocol, "hysteria2");
         assert_eq!(
             profile.outbound.field("server").and_then(|v| v.as_str()),
             Some("example.net:3478")
@@ -258,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn both_schemes_work() {
+    fn both_hysteria_schemes_work() {
         assert!(parse("hy2://pass@example.com:443").is_ok());
         assert!(parse("hysteria2://pass@example.com:443").is_ok());
         // Регистр схемы значения не имеет: ссылку могли переписать руками.
@@ -266,22 +314,79 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_port_falls_back_to_the_usual_one() {
-        let draft = parse("hy2://pass@example.com").expect("разбирается");
-        assert_eq!(draft.server, "example.com:443");
+    fn a_socks_link_parses() {
+        let draft = parse("socks5://penguin:s3cret@127.0.0.1:1080#Дома").expect("разбирается");
+
+        assert_eq!(draft.protocol(), "socks5");
+        assert_eq!(draft.text("server"), "127.0.0.1:1080");
+        // У SOCKS5 двоеточие — граница имени и пароля, а не часть пароля.
+        assert_eq!(draft.text("username"), "penguin");
+        assert_eq!(draft.text("password"), "s3cret");
+        assert_eq!(draft.name, "Дома");
+    }
+
+    #[test]
+    fn a_socks_link_without_a_password_is_fine() {
+        // Прокси без пароля — обычное дело: `ssh -D` поднимает именно такой.
+        let draft = parse("socks5://127.0.0.1:1080").expect("разбирается");
+        assert!(draft.text("username").is_empty());
+        assert_eq!(draft.name, "127.0.0.1");
+        draft.to_profile().expect("профиль собирается");
+    }
+
+    #[test]
+    fn an_http_proxy_link_parses_under_both_schemes() {
+        let draft = parse("http://proxy.example.com:8080").expect("разбирается");
+        assert_eq!(draft.protocol(), "http");
+
+        let draft = parse("https://user:pass@proxy.example.com:8443").expect("разбирается");
+        assert_eq!(draft.protocol(), "https");
+        assert_eq!(draft.text("username"), "user");
+        assert_eq!(draft.text("password"), "pass");
+    }
+
+    #[test]
+    fn a_missing_port_falls_back_to_the_usual_one_of_that_protocol() {
+        // У каждого протокола он свой, и общего умолчания тут быть не может.
+        assert_eq!(
+            parse("hy2://pass@example.com")
+                .expect("разбирается")
+                .text("server"),
+            "example.com:443"
+        );
+        assert_eq!(
+            parse("socks5://example.com")
+                .expect("разбирается")
+                .text("server"),
+            "example.com:1080"
+        );
+    }
+
+    #[test]
+    fn a_web_address_is_not_taken_for_a_proxy() {
+        // `http://` и `https://` — это ещё и любая ссылка на страницу, и
+        // вставляют их сюда чаще по ошибке, чем нарочно. Отличает их порт: у
+        // прокси он написан почти всегда, у страницы — почти никогда.
+        let reason = parse("https://example.com").expect_err("это не прокси");
+        assert_eq!(reason, crate::i18n::s().link_no_port);
+
+        parse("https://example.com:8443").expect("а это прокси");
     }
 
     #[test]
     fn a_port_range_survives_as_written() {
         // Диапазон — это смена порта на ходу; разбирать его умеет протокол.
         let draft = parse("hy2://pass@example.com:20000-30000").expect("разбирается");
-        assert_eq!(draft.server, "example.com:20000-30000");
+        assert_eq!(draft.text("server"), "example.com:20000-30000");
     }
 
     #[test]
-    fn an_ipv6_host_keeps_its_brackets_apart_from_the_port() {
+    fn an_ipv6_host_keeps_its_brackets() {
+        // Без скобок `2001:db8::1:443` — это законный адрес IPv6 сам по себе,
+        // и где в нём порт, не знает никто.
         let draft = parse("hy2://pass@[2001:db8::1]:443").expect("разбирается");
-        assert_eq!(draft.server, "2001:db8::1:443");
+        assert_eq!(draft.text("server"), "[2001:db8::1]:443");
+        draft.to_profile().expect("профиль собирается");
     }
 
     #[test]
@@ -291,26 +396,26 @@ mod tests {
         assert!(
             !parse("hy2://p@h.io?insecure=0")
                 .expect("разбирается")
-                .insecure
+                .flag("insecure")
         );
         assert!(
             parse("hy2://p@h.io?insecure=1")
                 .expect("разбирается")
-                .insecure
+                .flag("insecure")
         );
         assert!(
             parse("hy2://p@h.io?allowInsecure=1")
                 .expect("разбирается")
-                .insecure
+                .flag("insecure")
         );
-        assert!(!parse("hy2://p@h.io").expect("разбирается").insecure);
+        assert!(!parse("hy2://p@h.io").expect("разбирается").flag("insecure"));
     }
 
     #[test]
     fn percent_encoded_values_are_decoded() {
         let draft = parse("hy2://%D0%BF%D0%B0%D1%80%D0%BE%D0%BB%D1%8C@h.io#%D0%94%D0%BE%D0%BC")
             .expect("разбирается");
-        assert_eq!(draft.password, "пароль");
+        assert_eq!(draft.text("password"), "пароль");
         assert_eq!(draft.name, "Дом");
     }
 
@@ -319,8 +424,8 @@ mod tests {
         // Ссылки делает реализация на Go: её `url.Query()` разбирает запрос
         // как форму, а userinfo — нет.
         let draft = parse("hy2://a+b@h.io?obfs-password=c+d").expect("разбирается");
-        assert_eq!(draft.password, "a+b");
-        assert_eq!(draft.obfs, "c d");
+        assert_eq!(draft.text("password"), "a+b");
+        assert_eq!(draft.text("obfs"), "c d");
     }
 
     #[test]
@@ -341,23 +446,23 @@ mod tests {
         // Мессенджер переносит длинную ссылку, и вставляется она с пробелами.
         // Невидимый пробел в адресе — это сервер, к которому не подключиться.
         let draft = parse(
-            "hy2://source:s3cret@example.net:3478 
+            "hy2://source:s3cret@example.net:3478
  ?sni=example.net #source",
         )
         .expect("разбирается");
 
-        assert_eq!(draft.server, "example.net:3478");
-        assert_eq!(draft.password, "source:s3cret");
+        assert_eq!(draft.text("server"), "example.net:3478");
+        assert_eq!(draft.text("password"), "source:s3cret");
     }
 
     #[test]
     fn a_link_with_stray_spaces_parses() {
         let draft = parse("  hy2://pass@example.com:443  ").expect("разбирается");
-        assert_eq!(draft.server, "example.com:443");
+        assert_eq!(draft.text("server"), "example.com:443");
     }
 
     #[test]
-    fn a_link_without_a_password_is_refused() {
+    fn a_hysteria_link_without_a_password_is_refused() {
         // Профиль без пароля не подключится, и узнать об этом лучше сразу.
         assert!(parse("hy2://example.com:443").is_err());
     }
@@ -365,7 +470,7 @@ mod tests {
     #[test]
     fn something_that_is_not_a_link_is_refused() {
         assert!(parse("просто текст").is_err());
-        assert!(parse("https://example.com").is_err());
+        assert!(parse("ftp://example.com").is_err());
         assert!(parse("").is_err());
     }
 
@@ -375,6 +480,7 @@ mod tests {
         // имени, а не чтобы проверить её.
         assert!(looks_like_link("hy2://x"));
         assert!(looks_like_link("  HYSTERIA2://x  "));
+        assert!(looks_like_link("socks5://x"));
         assert!(!looks_like_link("hy2://"));
         assert!(!looks_like_link("Дом"));
         assert!(!looks_like_link(""));
@@ -383,8 +489,8 @@ mod tests {
     #[test]
     fn a_trailing_slash_is_allowed() {
         let draft = parse("hy2://p@example.com:443/?sni=a.io").expect("разбирается");
-        assert_eq!(draft.server, "example.com:443");
-        assert_eq!(draft.sni, "a.io");
+        assert_eq!(draft.text("server"), "example.com:443");
+        assert_eq!(draft.text("sni"), "a.io");
     }
 
     #[test]
@@ -408,7 +514,7 @@ mod tests {
         // Имя отделяется первым `#`, и только потом разбирается запрос.
         let draft = parse("hy2://p@h.io?sni=a.io#Мой сервер").expect("разбирается");
         assert_eq!(draft.name, "Мой сервер");
-        assert_eq!(draft.sni, "a.io");
+        assert_eq!(draft.text("sni"), "a.io");
     }
 
     #[test]

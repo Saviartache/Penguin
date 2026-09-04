@@ -87,6 +87,9 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             // Поиск по приложениям остался бы от прошлого правила, и список в
             // свежем окне оказался бы уже отобранным неизвестно по чему.
             app.state_mut().split_tunnel.app_search.clear();
+            // То же и с жалобой окна выбора: к новому правилу она отношения
+            // не имеет.
+            app.state_mut().split_tunnel.pick_error = None;
             // Список запущенного мог устареть за то время, что окно открыто:
             // спрашиваем заново ровно тогда, когда он понадобился.
             request_processes()
@@ -105,6 +108,41 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
         SplitTunnelMessage::AppToggled(path, checked) => {
             if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
                 draft.toggle_process(&path, checked);
+            }
+            Task::none()
+        }
+
+        SplitTunnelMessage::AppPickRequested => {
+            // Второе окно поверх первого — два ответа на один вопрос, и
+            // второй придёт тогда, когда правило уже собрано по первому.
+            if app.state().split_tunnel.picking {
+                return Task::none();
+            }
+            app.state_mut().split_tunnel.picking = true;
+            // Прошлая беда к этому нажатию отношения не имеет.
+            app.state_mut().split_tunnel.pick_error = None;
+
+            Task::perform(pick_program(), |picked| {
+                Message::SplitTunnel(SplitTunnelMessage::AppPicked(picked))
+            })
+        }
+
+        SplitTunnelMessage::AppPicked(picked) => {
+            app.state_mut().split_tunnel.picking = false;
+
+            match picked {
+                // Человек закрыл окно, ничего не выбрав, и знает об этом сам.
+                Ok(None) => {}
+                Ok(Some(path)) => {
+                    // Окно правила могли закрыть, пока человек искал файл.
+                    if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
+                        draft.toggle_process(&path, true);
+                    }
+                    // Отбор по строке поиска спрятал бы только что выбранное:
+                    // кнопку нажали как раз потому, что поиск ничего не нашёл.
+                    app.state_mut().split_tunnel.app_search.clear();
+                }
+                Err(reason) => app.state_mut().split_tunnel.pick_error = Some(reason),
             }
             Task::none()
         }
@@ -158,6 +196,38 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
 /// Спрашивает список запущенных приложений.
 pub fn request_processes() -> Task<Message> {
     request(Request::ListProcesses)
+}
+
+/// Просит систему показать окно выбора файла.
+///
+/// Окно системное и **держит поток**, пока человек в нём ищет; в потоке
+/// отрисовки это остановило бы окно программы, поэтому оно уезжает в отдельный.
+///
+/// Путь приводится к тому виду, в каком пути приходят от службы. Иначе
+/// `C:\Program Files\App\App.exe` из окна выбора и
+/// `c:/program files/app/app.exe` из списка запущенного — два разных
+/// приложения для набора правил и две одинаковые строки на экране.
+async fn pick_program() -> Result<Option<String>, String> {
+    // Подписи переведены здесь: платформенный слой языка интерфейса не знает.
+    let title = crate::i18n::s().pick_app_title;
+    let filter = crate::i18n::s().programs;
+
+    let picked =
+        tokio::task::spawn_blocking(move || penguin_platform::dialog::pick_program(title, filter))
+            .await;
+
+    match picked {
+        Ok(Ok(path)) => Ok(path.map(|path| penguin_core::path::normalize(&path.to_string_lossy()))),
+        Ok(Err(err)) => Err(failure(err)),
+        // Поток с окном не довёл дело до конца. Для человека это то же самое,
+        // что и отказ системы: окно было, ответа нет.
+        Err(err) => Err(failure(err)),
+    }
+}
+
+/// Складывает сообщение о том, что окно выбора не открылось.
+fn failure(reason: impl std::fmt::Display) -> String {
+    format!("{}: {reason}", crate::i18n::s().pick_failed)
 }
 
 /// Разбирает режим из подписи в списке.
@@ -337,6 +407,93 @@ mod tests {
 
         assert_eq!(rule::unique_id(&rules), "rule-2");
         assert_eq!(rule::unique_id(&[]), "rule-1");
+    }
+
+    #[test]
+    fn a_chosen_file_becomes_a_condition() {
+        let mut app = app_with_rules(json!([]));
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(
+            &mut app,
+            SplitTunnelMessage::AppSearchChanged("doom".to_owned()),
+        );
+
+        let _ = handle(
+            &mut app,
+            SplitTunnelMessage::AppPicked(Ok(Some("c:/games/doom/doom.exe".to_owned()))),
+        );
+
+        let draft = app
+            .state()
+            .split_tunnel
+            .editor
+            .as_ref()
+            .expect("окно открыто");
+        assert_eq!(draft.processes, ["c:/games/doom/doom.exe"]);
+        assert!(
+            app.state().split_tunnel.app_search.is_empty(),
+            "отбор по строке поиска спрятал бы только что выбранное"
+        );
+    }
+
+    #[test]
+    fn a_closed_window_adds_nothing() {
+        // «Отмена» — не ошибка, и говорить о ней нечего.
+        let mut app = app_with_rules(json!([]));
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::AppPicked(Ok(None)));
+
+        let draft = app
+            .state()
+            .split_tunnel
+            .editor
+            .as_ref()
+            .expect("окно открыто");
+        assert!(draft.processes.is_empty());
+        assert!(app.state().split_tunnel.pick_error.is_none());
+    }
+
+    #[test]
+    fn a_window_that_did_not_open_is_reported() {
+        // Ничего не произошло — и человек решает, что сломана кнопка.
+        let mut app = app_with_rules(json!([]));
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(
+            &mut app,
+            SplitTunnelMessage::AppPicked(Err("нечем показать".to_owned())),
+        );
+
+        assert_eq!(
+            app.state().split_tunnel.pick_error.as_deref(),
+            Some("нечем показать")
+        );
+        assert!(!app.state().split_tunnel.picking, "окна уже нет");
+    }
+
+    #[test]
+    fn only_one_window_at_a_time() {
+        // Второе окно поверх первого дало бы два ответа на один вопрос.
+        let mut app = app_with_rules(json!([]));
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        app.state_mut().split_tunnel.picking = true;
+        app.state_mut().split_tunnel.pick_error = Some("прошлая беда".to_owned());
+
+        let _ = handle(&mut app, SplitTunnelMessage::AppPickRequested);
+
+        assert_eq!(
+            app.state().split_tunnel.pick_error.as_deref(),
+            Some("прошлая беда"),
+            "нажатие, которого не было, стёрло состояние"
+        );
+    }
+
+    #[test]
+    fn a_new_window_forgets_the_previous_complaint() {
+        let mut app = app_with_rules(json!([]));
+        app.state_mut().split_tunnel.pick_error = Some("прошлая беда".to_owned());
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+
+        assert!(app.state().split_tunnel.pick_error.is_none());
     }
 
     #[test]

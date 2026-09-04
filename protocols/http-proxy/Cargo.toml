@@ -1,0 +1,34 @@
+[package]
+name = "penguin-http-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Исходящее направление через прокси HTTP CONNECT, с TLS и без"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта и общих типов. Ни TUN, ни правил,
+# ни GUI он не видит — это и делает его заменяемым.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+
+# TLS нужен только варианту `https`; выключить его отдельной фичей нельзя без
+# того, чтобы `https` перестал существовать, — а он и есть половина смысла.
+rustls = { workspace = true, features = ["ring", "std"] }
+rustls-platform-verifier.workspace = true
+tokio-rustls.workspace = true
+
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
+# разбирает их только этот крейт.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

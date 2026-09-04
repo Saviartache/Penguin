@@ -143,7 +143,7 @@ fn set_option(
         (IPPROTO_IP.0, IP_UNICAST_IF)
     };
 
-    let code = unsafe { setsockopt(SOCKET(socket as usize), level, name as i32, Some(&bytes)) };
+    let code = unsafe { setsockopt(SOCKET(socket as usize), level, name, Some(&bytes)) };
     check(code)
 }
 

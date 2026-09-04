@@ -123,6 +123,20 @@ pub struct Strings {
     pub managed: &'static str,
     /// Добавить сервер.
     pub add_server: &'static str,
+    /// Заголовок окна выбора протокола.
+    pub choose_protocol: &'static str,
+    /// Что это за окно — строкой под заголовком.
+    pub choose_protocol_hint: &'static str,
+    /// Чем Hysteria 2 отличается от соседей — строкой в списке выбора.
+    pub hysteria2_summary: &'static str,
+    /// То же про SOCKS5.
+    pub socks5_summary: &'static str,
+    /// То же про HTTP.
+    pub http_summary: &'static str,
+    /// То же про HTTPS.
+    pub https_summary: &'static str,
+    /// Протокол профиля этой сборке неизвестен.
+    pub protocol_unknown: &'static str,
     /// Новый сервер.
     pub new_server: &'static str,
     /// Правка сервера.
@@ -143,6 +157,20 @@ pub struct Strings {
     pub obfs_example: &'static str,
     /// Пароль.
     pub password: &'static str,
+    /// Имя пользователя.
+    pub username: &'static str,
+    /// Адрес прокси.
+    pub proxy_address: &'static str,
+    /// Пример адреса прокси SOCKS5.
+    pub socks_address_example: &'static str,
+    /// Пример адреса прокси HTTP.
+    pub http_address_example: &'static str,
+    /// Пример адреса прокси HTTPS.
+    pub https_address_example: &'static str,
+    /// Поле можно не заполнять — подсказкой внутри него.
+    pub optional_hint: &'static str,
+    /// Пускать ли UDP через прокси.
+    pub proxy_udp: &'static str,
     /// Имя для TLS.
     pub sni: &'static str,
     /// Пароль обфускации.
@@ -171,6 +199,8 @@ pub struct Strings {
     pub link_bad_host: &'static str,
     /// В ссылке нет пароля.
     pub link_no_password: &'static str,
+    /// В ссылке нет порта.
+    pub link_no_port: &'static str,
 
     // --- правила ---
     /// Режим тоннелирования.
@@ -226,6 +256,14 @@ pub struct Strings {
     pub no_apps: &'static str,
     /// Поиск ничего не нашёл.
     pub nothing_found: &'static str,
+    /// Показать программу файлом — кнопкой рядом с поиском.
+    pub pick_app: &'static str,
+    /// Заголовок системного окна выбора файла.
+    pub pick_app_title: &'static str,
+    /// Как назван вид исполняемых файлов в окне выбора.
+    pub programs: &'static str,
+    /// Окно выбора файла не открылось.
+    pub pick_failed: &'static str,
 
     // --- журнал ---
     /// Метка ошибки.
@@ -349,6 +387,21 @@ mod tests {
                 table.millis,
                 table.managed,
                 table.add_server,
+                table.choose_protocol,
+                table.choose_protocol_hint,
+                table.hysteria2_summary,
+                table.socks5_summary,
+                table.http_summary,
+                table.https_summary,
+                table.protocol_unknown,
+                table.username,
+                table.proxy_address,
+                table.socks_address_example,
+                table.http_address_example,
+                table.https_address_example,
+                table.optional_hint,
+                table.proxy_udp,
+                table.link_no_port,
                 table.new_server,
                 table.edit_server,
                 table.server_name,
@@ -383,6 +436,10 @@ mod tests {
                 table.app_search,
                 table.no_apps,
                 table.nothing_found,
+                table.pick_app,
+                table.pick_app_title,
+                table.programs,
+                table.pick_failed,
                 table.level_error,
                 table.level_warning,
                 table.on,

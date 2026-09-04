@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::id::ProfileId;
 
 /// Состояние тоннеля.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum TunnelState {
     /// Выключен. Трафик идёт как обычно.
+    #[default]
     Disconnected,
 
     /// Поднимается.
@@ -74,12 +75,6 @@ impl TunnelState {
             | Self::Reconnecting { profile, .. } => Some(profile),
             Self::Disconnected | Self::Failed { .. } | Self::Disconnecting => None,
         }
-    }
-}
-
-impl Default for TunnelState {
-    fn default() -> Self {
-        Self::Disconnected
     }
 }
 

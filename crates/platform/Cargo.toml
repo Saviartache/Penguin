@@ -35,6 +35,8 @@ windows = { workspace = true, features = [
     "Win32_System_Services",
     "Win32_System_Registry",
     "Win32_UI_Shell",
+    # `COMDLG_FILTERSPEC` в окне выбора файла живёт здесь.
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-service.workspace = true
