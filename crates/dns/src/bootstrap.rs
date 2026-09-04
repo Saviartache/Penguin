@@ -15,6 +15,19 @@
 //!
 //! Поэтому имя сервера спрашивается у своих апстримов напрямую
 //! (`dns.bootstrap` в настройках), мимо системы и мимо тоннеля.
+//!
+//! # Когда своих апстримов не хватает
+//!
+//! Публичный резолвер бывает недостижим: провайдер режет порт 53, до адреса
+//! нет маршрута, машина за строгим брандмауэром. Системный резолвер в таких
+//! сетях обычно работает — он ходит через настроенную службу, а не своим
+//! сокетом наружу, — и отказываться от него значило бы оставить человека без
+//! связи там, где связь есть.
+//!
+//! Поэтому он остаётся запасным путём: спрашивается последним, и **ответ его
+//! проверяется**. Адрес из подсети подставных — это мы сами, и такой ответ
+//! отбрасывается. Круг остаётся разорванным, а сеть, где иначе ничего бы не
+//! вышло, — рабочей.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -38,8 +51,13 @@ use crate::upstream::Upstream;
 /// системный, потому что «тоннель ведь ещё не поднят». Тоннеля может не быть, а
 /// подмена DNS от прошлого запуска — быть.
 pub fn resolver_for(config: &crate::config::DnsConfig) -> Arc<dyn Resolver> {
+    // Подсеть подставных адресов — та же, что у перехвата. Ошибку в ней здесь
+    // не разбираем: её ловит проверка настроек, а без подсети разрешение имён
+    // работает, просто без последней проверки ответа.
+    let fake_ip = crate::fakeip::FakeIpPool::parse(&config.fake_ip_range).ok();
+
     match BootstrapResolver::from_config(&config.bootstrap) {
-        Ok(bootstrap) => Arc::new(bootstrap),
+        Ok(bootstrap) => Arc::new(bootstrap.rejecting(fake_ip)),
         Err(err) => {
             tracing::warn!(%err, "загрузочное разрешение имён не собрано");
             Arc::new(crate::resolver::SystemResolver)
@@ -51,6 +69,13 @@ pub fn resolver_for(config: &crate::config::DnsConfig) -> Arc<dyn Resolver> {
 pub struct BootstrapResolver {
     /// Куда спрашивать. Список — запасные пути друг для друга.
     upstreams: Vec<Arc<dyn Upstream>>,
+    /// Подсеть подставных адресов — то, чему верить нельзя.
+    ///
+    /// Нужна запасному пути. Системный резолвер зовут, только когда свои
+    /// апстримы молчат, и он может оказаться подменённым: тогда он отвечает
+    /// адресом из этой подсети, и принять такой ответ значит позвонить самому
+    /// себе.
+    fake_ip: Option<crate::fakeip::FakeIpPool>,
 }
 
 impl std::fmt::Debug for BootstrapResolver {
@@ -66,7 +91,45 @@ impl BootstrapResolver {
     pub fn from_config(configs: &[UpstreamConfig]) -> DnsResult<Self> {
         Ok(Self {
             upstreams: crate::upstream::build_all(configs)?,
+            fake_ip: None,
         })
+    }
+
+    /// Учит отвергать адреса из подсети подставных.
+    pub fn rejecting(mut self, fake_ip: Option<crate::fakeip::FakeIpPool>) -> Self {
+        self.fake_ip = fake_ip;
+        self
+    }
+
+    /// Запасной путь: спросить систему и не поверить ей на слово.
+    ///
+    /// Свои апстримы бывают недостижимы — их режет провайдер, до них нет
+    /// маршрута, машина за строгим брандмауэром. Системный резолвер в таких
+    /// сетях обычно работает: он ходит через настроенную службу, а не своим
+    /// сокетом наружу.
+    ///
+    /// Опасность у него ровно одна — та, ради которой всё это и затевалось:
+    /// он может быть подменён нами же и ответить подставным адресом. Значит,
+    /// проверяем ответ, а не отказываемся от него.
+    async fn ask_the_system(&self, host: &str) -> Vec<IpAddr> {
+        use crate::resolver::SystemResolver;
+
+        let Ok(addresses) = SystemResolver.resolve(host).await else {
+            return Vec::new();
+        };
+
+        addresses
+            .into_iter()
+            .filter(|address| !self.is_fake(*address))
+            .collect()
+    }
+
+    /// Подставной ли это адрес — то есть наш собственный.
+    fn is_fake(&self, address: IpAddr) -> bool {
+        let (Some(pool), IpAddr::V4(v4)) = (&self.fake_ip, address) else {
+            return false;
+        };
+        pool.contains(v4)
     }
 
     /// Спрашивает апстримы по очереди, пока кто-нибудь не ответит.
@@ -119,9 +182,16 @@ impl Resolver for BootstrapResolver {
             addresses = self.ask(host, RecordType::AAAA).await;
         }
 
+        // Свои апстримы молчат — спрашиваем систему. Это запасной путь, а не
+        // равноправный: он идёт последним и его ответу не верят на слово.
+        if addresses.is_empty() {
+            tracing::debug!(host, "загрузочные апстримы молчат — спрашиваю систему");
+            addresses = self.ask_the_system(host).await;
+        }
+
         if addresses.is_empty() {
             return Err(DnsError::Upstream(format!(
-                "загрузочные апстримы не назвали адрес `{host}`"
+                "адрес `{host}` не назвали ни загрузочные апстримы, ни система"
             )));
         }
         Ok(addresses)
@@ -160,7 +230,15 @@ mod tests {
     }
 
     fn resolver(upstreams: Vec<Arc<dyn Upstream>>) -> BootstrapResolver {
-        BootstrapResolver { upstreams }
+        BootstrapResolver {
+            upstreams,
+            fake_ip: None,
+        }
+    }
+
+    /// Разрешатель, знающий подсеть подставных адресов из настроек.
+    fn guarded(upstreams: Vec<Arc<dyn Upstream>>) -> BootstrapResolver {
+        resolver(upstreams).rejecting(crate::fakeip::FakeIpPool::parse("198.18.0.0/15").ok())
     }
 
     #[tokio::test]
@@ -210,9 +288,31 @@ mod tests {
     async fn nobody_answering_is_an_error_not_an_empty_list() {
         // Пустой список означал бы «такого имени нет», и клиент сказал бы
         // человеку не то: имя есть, спросить некого.
-        let resolver = resolver(vec![Arc::new(Canned(Err(DnsError::Upstream(
+        //
+        // Имя заведомо несуществующее: запасной путь спросит о нём систему, и
+        // та тоже не назовёт адреса.
+        let resolver = guarded(vec![Arc::new(Canned(Err(DnsError::Upstream(
             "молчит".to_owned(),
         ))))]);
-        assert!(resolver.resolve("ndfl.online").await.is_err());
+        assert!(resolver.resolve("такого-имени-нет.invalid").await.is_err());
+    }
+
+    #[test]
+    fn a_fake_address_is_never_taken_for_an_answer() {
+        // Запасной путь спрашивает систему, а она может быть подменена нами
+        // же. Поверить её ответу — значит позвонить самому себе, и это ровно
+        // тот круг, ради выхода из которого всё это написано.
+        let resolver = guarded(Vec::new());
+
+        assert!(resolver.is_fake("198.18.0.13".parse().expect("адрес")));
+        assert!(!resolver.is_fake("45.150.33.10".parse().expect("адрес")));
+    }
+
+    #[test]
+    fn without_a_known_range_nothing_is_rejected() {
+        // Подсеть могла не разобраться. Отвергать тогда всё подряд значило бы
+        // остаться вовсе без разрешения имён.
+        let resolver = resolver(Vec::new());
+        assert!(!resolver.is_fake("198.18.0.13".parse().expect("адрес")));
     }
 }
