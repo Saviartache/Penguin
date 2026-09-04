@@ -165,6 +165,16 @@ password = "secret"'
 
 check socks5-open socks5 'server = "127.0.0.1:11081"'
 
+# Тот же прокси и тот же пароль — но по дороге не видно ни того, ни адреса
+# назначения. Сертификат самоподписанный, отсюда `insecure`.
+check socks5-tls socks5-tls 'server   = "127.0.0.1:11443"
+username = "penguin"
+password = "secret"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
 check http http 'server = "127.0.0.1:18888"'
 
 check hysteria2 hysteria2 'server   = "127.0.0.1:14443"

@@ -72,6 +72,7 @@ pub static STRINGS: Strings = Strings {
     https_address_example: "proxy.example.com:8443",
     optional_hint: "optional",
     proxy_udp: "Send UDP through the proxy",
+    proxy_udp_plain: "Send UDP — outside TLS, in the clear",
     sni: "TLS name",
     obfs: "Obfuscation",
     bandwidth_up: "Upload",

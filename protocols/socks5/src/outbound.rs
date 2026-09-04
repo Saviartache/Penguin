@@ -20,7 +20,7 @@ use penguin_proto::error::ProtocolError;
 use penguin_proto::outbound::Outbound;
 use penguin_proto::stream::ProxyStream;
 use penguin_transport::deadline;
-use tokio::net::TcpStream;
+use penguin_transport::tls::{ALPN_HTTP11, TlsClient};
 
 use crate::config::Socks5Config;
 use crate::datagram::Socks5Datagram;
@@ -35,6 +35,11 @@ pub struct Socks5Outbound {
     host: Address,
     /// Порт прокси.
     port: u16,
+    /// Собранный слой TLS. `None` — протокол `socks5`, разговор в открытую.
+    ///
+    /// Собирается один раз: разбор сертификатов на каждое открытие вкладки
+    /// стоил бы дороже самого рукопожатия.
+    tls: Option<TlsClient>,
     dialer: Arc<dyn Dialer>,
 }
 
@@ -43,6 +48,7 @@ impl std::fmt::Debug for Socks5Outbound {
         f.debug_struct("Socks5Outbound")
             .field("id", &self.id)
             .field("config", &self.config)
+            .field("tls", &self.tls.is_some())
             .finish()
     }
 }
@@ -55,31 +61,54 @@ impl Socks5Outbound {
     pub fn new(
         id: OutboundId,
         config: Socks5Config,
+        secure: bool,
         dialer: Arc<dyn Dialer>,
     ) -> Socks5Result<Self> {
-        config.validate()?;
+        config.validate(secure)?;
         let (host, port) = config.endpoint()?;
+
+        let tls = if secure {
+            // ALPN — `http/1.1`: своего у SOCKS5 нет, а объявить нечего значит
+            // отличаться от браузера первым же пакетом рукопожатия. Прокси,
+            // которому ALPN безразличен, его просто не читает.
+            Some(TlsClient::new(&config.tls, &host, &[ALPN_HTTP11])?)
+        } else {
+            None
+        };
+
         Ok(Self {
             id,
             config,
             host,
             port,
+            tls,
             dialer,
         })
     }
 
     /// Открывает соединение до прокси и проходит проверку подлинности.
     ///
+    /// Возвращает готовый поток и адрес, к которому он подключён. Адрес нужен
+    /// отдельно: под TLS до сокета уже не добраться, а `UDP ASSOCIATE` без
+    /// него не разберёт, куда слать датаграммы.
+    ///
     /// Срок здесь обязателен: прокси, принявший соединение и замолчавший,
     /// иначе держал бы поток приложения вечно — а выглядит это как страница,
     /// которая грузится и не загружается.
-    async fn open(&self) -> Result<TcpStream, ProtocolError> {
-        let mut io = connect::dial(&*self.dialer, &self.host, self.port).await?;
+    async fn open(&self) -> Result<(Box<dyn ProxyStream>, SocketAddr), ProtocolError> {
+        let plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
+        let proxy = plain.peer_addr()?;
+
+        let mut io: Box<dyn ProxyStream> = match &self.tls {
+            Some(tls) => Box::new(tls.connect(plain).await?),
+            None => Box::new(plain),
+        };
+
         deadline::handshake::<_, Socks5Error>("приветствие SOCKS5", async {
             handshake::negotiate(&mut io, self.config.credentials()).await
         })
         .await?;
-        Ok(io)
+        Ok((io, proxy))
     }
 
     /// Проверяет, что прокси на месте и пускает.
@@ -92,6 +121,15 @@ impl Socks5Outbound {
         let _connection = self.open().await?;
         Ok(())
     }
+
+    /// Имя протокола: с TLS или без.
+    fn name(&self) -> &'static str {
+        if self.tls.is_some() {
+            crate::PROTOCOL_TLS
+        } else {
+            crate::PROTOCOL
+        }
+    }
 }
 
 #[async_trait]
@@ -101,7 +139,7 @@ impl Outbound for Socks5Outbound {
     }
 
     fn protocol(&self) -> &'static str {
-        crate::PROTOCOL
+        self.name()
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -120,12 +158,12 @@ impl Outbound for Socks5Outbound {
         &self,
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
-        let mut io = self.open().await?;
+        let (mut io, _proxy) = self.open().await?;
         deadline::handshake::<_, Socks5Error>("команда SOCKS5", async {
             handshake::command(&mut io, CMD_CONNECT, target).await
         })
         .await?;
-        Ok(Box::new(io))
+        Ok(io)
     }
 
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
@@ -133,8 +171,7 @@ impl Outbound for Socks5Outbound {
             return Err(Socks5Error::UdpDisabled.into());
         }
 
-        let mut control = self.open().await?;
-        let proxy = control.peer_addr()?;
+        let (mut control, proxy) = self.open().await?;
 
         // Адрес, с которого мы будем слать, прокси знать не обязан: локальный
         // порт станет известен только после привязки, а требовать его заранее

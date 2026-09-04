@@ -12,7 +12,13 @@ use crate::forms::protocol::{http, hysteria2, socks5};
 ///
 /// Добавление протокола — строка здесь и файл с описанием рядом. Ни экран
 /// выбора, ни редактор, ни разбор ссылок при этом не трогаются.
-pub static ALL: &[&ProtocolSpec] = &[&hysteria2::SPEC, &socks5::SPEC, &http::HTTPS, &http::HTTP];
+pub static ALL: &[&ProtocolSpec] = &[
+    &hysteria2::SPEC,
+    &socks5::TLS,
+    &socks5::SPEC,
+    &http::HTTPS,
+    &http::HTTP,
+];
 
 /// Чем заполняется форма, когда протокол не выбирали.
 ///

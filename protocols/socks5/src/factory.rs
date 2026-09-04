@@ -10,18 +10,30 @@ use penguin_proto::error::ProtocolError;
 use penguin_proto::factory::{BuildContext, ProtocolFactory};
 use penguin_proto::outbound::Outbound;
 
-use crate::PROTOCOL;
 use crate::config::Socks5Config;
 use crate::outbound::Socks5Outbound;
+use crate::{PROTOCOL, PROTOCOL_TLS};
 
 /// Фабрика SOCKS5.
+///
+/// Их две: с TLS и без. Один крейт и две записи в реестре — как у
+/// `http`/`https`, и по той же причине: разница между ними видна не в поле
+/// внутри профиля, а в том, что уходит по сети открытым текстом.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct Socks5Factory;
+pub struct Socks5Factory {
+    /// Заворачивать ли разговор с прокси в TLS.
+    secure: bool,
+}
 
 impl Socks5Factory {
-    /// Создаёт фабрику.
+    /// Разговор с прокси в открытую.
     pub fn new() -> Self {
-        Self
+        Self { secure: false }
+    }
+
+    /// Разговор с прокси внутри TLS.
+    pub fn tls() -> Self {
+        Self { secure: true }
     }
 
     /// Разбирает параметры из конфигурации.
@@ -34,13 +46,15 @@ impl Socks5Factory {
 #[async_trait]
 impl ProtocolFactory for Socks5Factory {
     fn protocol(&self) -> &'static str {
-        PROTOCOL
+        if self.secure { PROTOCOL_TLS } else { PROTOCOL }
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
         // Проверка без сети: интерфейс должен показать ошибку в поле сразу,
         // а не через минуту неудачного подключения.
-        Self::parse(params)?.validate().map_err(Into::into)
+        Self::parse(params)?
+            .validate(self.secure)
+            .map_err(Into::into)
     }
 
     async fn build(
@@ -49,7 +63,7 @@ impl ProtocolFactory for Socks5Factory {
         params: &serde_json::Value,
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = Self::parse(params)?;
-        let outbound = Socks5Outbound::new(ctx.id, config, ctx.dialer)?;
+        let outbound = Socks5Outbound::new(ctx.id, config, self.secure, ctx.dialer)?;
 
         // Пробное соединение при подъёме направления. Без него «Подключено»
         // загоралось бы и на прокси, которого нет: постоянного соединения у
@@ -107,7 +121,22 @@ mod tests {
 
     #[test]
     fn protocol_name_is_stable() {
-        // Имя стоит в конфигурациях пользователей — менять его нельзя.
+        // Имена стоят в конфигурациях пользователей — менять их нельзя.
         assert_eq!(Socks5Factory::new().protocol(), "socks5");
+        assert_eq!(Socks5Factory::tls().protocol(), "socks5-tls");
+    }
+
+    #[test]
+    fn tls_settings_belong_to_the_tls_protocol_only() {
+        // Иначе человек ставит `insecure`, видит сохранённый профиль и уверен,
+        // что TLS есть, — а пароль всё это время уходит открытым текстом.
+        let params = json!({
+            "server": "127.0.0.1:1080",
+            "tls": { "sni": "proxy.example.com" }
+        });
+        assert!(Socks5Factory::new().validate(&params).is_err());
+        Socks5Factory::tls()
+            .validate(&params)
+            .expect("под TLS это законно");
     }
 }
