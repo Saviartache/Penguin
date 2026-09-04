@@ -17,13 +17,6 @@ use crate::handlers::DaemonHandler;
 
 /// Собирает и запускает демона, пока не отменят.
 pub async fn run(config_dir: Option<PathBuf>, cancel: CancellationToken) -> Result<()> {
-    // До всего остального: убитый прошлый запуск мог оставить запрет
-    // исходящего трафика, а он переживает перезагрузку. Служба поднимается
-    // вместе с системой — значит, сеть вернётся сама.
-    if let Err(err) = penguin_platform::firewall::recover_leftovers() {
-        tracing::error!(%err, "не снят запрет, оставшийся от прошлого запуска");
-    }
-
     let store = open_store(config_dir)?;
     let config = match store.load() {
         Ok(config) => config,
@@ -47,6 +40,15 @@ pub async fn run(config_dir: Option<PathBuf>, cancel: CancellationToken) -> Resu
     if store.init_if_missing().unwrap_or(false) {
         tracing::info!(path = %store.paths().config_file().display(), "создан файл настроек");
     }
+
+    // До движка и до первого подключения: убитый прошлый запуск оставляет
+    // запрет трафика, поднятый адаптер и подменённый DNS. Первое переживает
+    // перезагрузку, а два других не дают клиенту даже узнать адрес своего
+    // сервера — сколько его ни перезапускай (см. [`penguin_platform::leftovers`]).
+    //
+    // Адрес адаптера берётся из тех же настроек, по которым он и поднимался:
+    // так свой след отличается от чужого интерфейса.
+    penguin_platform::leftovers::recover(config.network.tun.ipv4);
 
     let autoconnect = config.app.autoconnect;
     let engine = Engine::new(config).context("не удалось собрать движок")?;
