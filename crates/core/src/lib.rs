@@ -1,6 +1,7 @@
 //! Общие доменные типы. Чистые данные: ни ввода-вывода, ни tokio, ни платформы.
 
 pub mod address;
+pub mod base64;
 pub mod endpoint;
 pub mod error;
 pub mod flow;
@@ -10,3 +11,4 @@ pub mod path;
 pub mod state;
 pub mod stats;
 pub mod time;
+pub mod uuid;
