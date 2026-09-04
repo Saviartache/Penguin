@@ -29,6 +29,13 @@ pub enum FieldKind {
     Secret,
     /// Переключатель.
     Flag,
+    /// Выбор из известного набора.
+    ///
+    /// Заводится не ради удобства: перенос у Trojan, метод шифрования
+    /// Shadowsocks и версия Snell — это поля, где опечатка означает не
+    /// «сервер отказал», а «сервер молчит», и искать её человек будет в сети.
+    /// Набор, который нельзя набрать руками, снимает этот вопрос целиком.
+    Choice,
 }
 
 /// Одно поле формы.
@@ -71,6 +78,11 @@ pub struct FieldSpec {
     /// **отличается** от умолчания. Так файл настроек остаётся коротким, а
     /// прочитанное совпадает с записанным.
     pub default_on: bool,
+    /// Что можно выбрать. Значимо только у [`FieldKind::Choice`].
+    ///
+    /// Первое значение — умолчание нового профиля. Пустым у поля выбора не
+    /// бывает: пустой список в форме обещает выбор, которого в нём нет.
+    pub options: &'static [&'static str],
     /// Откуда ещё прочитать значение при открытии профиля.
     ///
     /// Конфигурацию приносят от провайдера как есть, и одно и то же поле в ней
@@ -91,6 +103,7 @@ impl FieldSpec {
             check: None,
             default_on: false,
             with: &[],
+            options: &[],
             also: &[],
         }
     }
@@ -107,6 +120,20 @@ impl FieldSpec {
     pub const fn flag(key: &'static str, path: &'static [&'static str], label: Label) -> Self {
         Self {
             kind: FieldKind::Flag,
+            ..Self::text(key, path, label)
+        }
+    }
+
+    /// Выбор из набора. Первое значение — умолчание нового профиля.
+    pub const fn choice(
+        key: &'static str,
+        path: &'static [&'static str],
+        label: Label,
+        options: &'static [&'static str],
+    ) -> Self {
+        Self {
+            kind: FieldKind::Choice,
+            options,
             ..Self::text(key, path, label)
         }
     }
@@ -155,6 +182,21 @@ impl FieldSpec {
     /// Значение прячется при вводе.
     pub fn is_secret(&self) -> bool {
         matches!(self.kind, FieldKind::Secret)
+    }
+
+    /// Это выбор из набора.
+    pub fn is_choice(&self) -> bool {
+        matches!(self.kind, FieldKind::Choice)
+    }
+
+    /// Значение, с которым поле заводится в новом профиле.
+    ///
+    /// У выбора это первое из набора; у остальных — пусто.
+    pub fn default_text(&self) -> &'static str {
+        match self.kind {
+            FieldKind::Choice => self.options.first().copied().unwrap_or_default(),
+            _ => "",
+        }
     }
 }
 

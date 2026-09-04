@@ -169,6 +169,14 @@ pub struct Strings {
     pub proxy_udp_plain: &'static str,
     /// Имя для TLS.
     pub sni: &'static str,
+    /// Чем переносится поток: голый TCP, WebSocket, `Upgrade`.
+    pub transport: &'static str,
+    /// Путь запроса у переносов поверх HTTP.
+    pub path: &'static str,
+    /// Пример пути.
+    pub path_example: &'static str,
+    /// Заголовок `Host` у них же.
+    pub http_host: &'static str,
     /// Пароль обфускации.
     pub obfs: &'static str,
     /// Отдача.
@@ -400,6 +408,10 @@ mod tests {
                 table.server_address,
                 table.password,
                 table.sni,
+                table.transport,
+                table.path,
+                table.path_example,
+                table.http_host,
                 table.obfs,
                 table.bandwidth_up,
                 table.bandwidth_down,

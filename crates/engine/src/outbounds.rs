@@ -178,6 +178,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         // Не протокол: перечисление остальных.
         "default" => &[],
         "hysteria2" => &["hysteria2"],
+        "trojan" => &["trojan"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         // Одна фича, два имени в настройках.
@@ -193,6 +194,9 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
 fn register_protocols(registry: &mut ProtocolRegistry) {
     #[cfg(feature = "hysteria2")]
     registry.register(Arc::new(penguin_hysteria2::Hysteria2Factory::new()));
+
+    #[cfg(feature = "trojan")]
+    registry.register(Arc::new(penguin_trojan::TrojanFactory::new()));
 
     // Две записи из одного крейта: `socks5` и `socks5-tls`. Под TLS не видны
     // ни имя сервера назначения, ни пароль — а без TLS видно и то и другое.

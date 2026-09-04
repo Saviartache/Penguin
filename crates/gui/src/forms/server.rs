@@ -247,7 +247,10 @@ fn blank(field: &FieldSpec) -> Value {
     if field.is_flag() {
         Value::Flag(field.default_on)
     } else {
-        Value::Text(String::new())
+        // У поля выбора пусто не бывает: пустой список в форме обещает выбор,
+        // которого в нём нет. У остальных `default_text` — пустая строка, и
+        // поведение не меняется.
+        Value::Text(field.default_text().to_owned())
     }
 }
 
@@ -265,7 +268,13 @@ fn read(field: &FieldSpec, params: &serde_json::Value) -> Value {
             value.as_bool().unwrap_or(field.default_on)
         }))
     } else {
-        Value::Text(found.and_then(as_text).unwrap_or_default())
+        let text = found.and_then(as_text).unwrap_or_default();
+        // Профиль, где поля нет, открывается на умолчании протокола, а не
+        // пустым: пустой выбор человек прочитает как поломку формы.
+        if text.is_empty() {
+            return Value::Text(field.default_text().to_owned());
+        }
+        Value::Text(text)
     }
 }
 

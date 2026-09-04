@@ -20,7 +20,7 @@
 use iced::Element;
 use uikit::layout::{Flex, gap};
 use uikit::style::tokens::type_scale;
-use uikit::widgets::{Checkbox, Modal, TextInput};
+use uikit::widgets::{Checkbox, Modal, Select, TextInput};
 
 use crate::app::message::{Message, ServersMessage};
 use crate::app::state::State;
@@ -165,6 +165,10 @@ fn row<'a>(draft: &'a Draft, index: usize, field: &'static FieldSpec) -> Element
         );
     }
 
+    if field.is_choice() {
+        return ui::form_row(label, choice(draft, index, field));
+    }
+
     let example = field.example.map_or("", |example| example(strings));
 
     ui::form_row(
@@ -174,6 +178,24 @@ fn row<'a>(draft: &'a Draft, index: usize, field: &'static FieldSpec) -> Element
             .on_input(move |value| Message::Servers(ServersMessage::EditorChanged(index, value)))
             .build(),
     )
+}
+
+/// Список выбора для поля с известным набором значений.
+///
+/// Значение, которого в наборе нет, в список **дописывается**. Оно приходит из
+/// чужой конфигурации: сервер может уметь то, чего не знаем мы, и показать
+/// вместо него пустоту значит потерять его при первом сохранении.
+fn choice<'a>(draft: &'a Draft, index: usize, field: &'static FieldSpec) -> Element<'a, Message> {
+    let current = draft.text(field.key);
+    let mut options: Vec<String> = field.options.iter().map(|o| (*o).to_owned()).collect();
+    if !current.is_empty() && !options.iter().any(|option| option == current) {
+        options.push(current.to_owned());
+    }
+
+    Select::new(options, Some(current.to_owned()), move |value| {
+        Message::Servers(ServersMessage::EditorChanged(index, value))
+    })
+    .view()
 }
 
 /// Причина, по которой профиль пока не собирается.
