@@ -43,9 +43,14 @@ pub fn init(cli: &Cli) -> Option<WorkerGuard> {
     to_file(filter)
 }
 
-/// Журнал окна — в файл рядом с журналом службы, но в свой.
+/// Журнал окна — в файл в профиле пользователя.
+///
+/// Не `discover`, а именно профиль. Общий каталог принадлежит `root`: его
+/// заводит установка службы, и пользователю он открыт только на чтение. Окно
+/// же всегда работает от пользователя, и «рядом с журналом службы» для него
+/// означало бы «никуда» — на любой машине, где службу поставили.
 fn to_file(filter: EnvFilter) -> Option<WorkerGuard> {
-    let directory = penguin_config::Paths::discover()
+    let directory = penguin_config::Paths::user()
         .ok()
         .map(|paths| paths.data_dir().to_path_buf())
         .filter(|directory| std::fs::create_dir_all(directory).is_ok())?;
@@ -53,8 +58,17 @@ fn to_file(filter: EnvFilter) -> Option<WorkerGuard> {
     // `tracing_appender` разбивает журнал по дням, но старые части не убирает.
     penguin_config::logs::prune(&directory, GUI_PREFIX, penguin_config::logs::KEEP_FILES);
 
-    let (writer, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::daily(directory, GUI_PREFIX));
+    // Через билдер, а не `rolling::daily`: та на отказ не возвращает ошибку, а
+    // паникует, и окно падало бы вместо того, чтобы открыться без журнала.
+    // Проверки каталога выше для этого мало — она проходит и для чужого
+    // каталога, в который потом не пускают.
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(GUI_PREFIX)
+        .build(&directory)
+        .ok()?;
+
+    let (writer, guard) = tracing_appender::non_blocking(appender);
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)

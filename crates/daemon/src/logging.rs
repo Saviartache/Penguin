@@ -13,8 +13,8 @@ use tracing_subscriber::EnvFilter;
 
 /// Начало имени файла журнала; дату к нему приписывает `tracing_appender`.
 ///
-/// Своё у каждой программы: журналы службы и окна лежат в одном каталоге, и
-/// уборка одного не должна задевать другой.
+/// Своё у каждой программы: журналы службы и окна могут оказаться в одном
+/// каталоге, и уборка одного не должна задевать другой.
 const PREFIX: &str = "penguin.log";
 
 /// Настраивает журнал в терминал.
@@ -47,7 +47,22 @@ pub fn init_file(
     // месяцами.
     penguin_config::logs::prune(directory, PREFIX, penguin_config::logs::KEEP_FILES);
 
-    let appender = tracing_appender::rolling::daily(directory, PREFIX);
+    // Через билдер, а не `rolling::daily`: та на отказ не возвращает ошибку, а
+    // паникует. Каталог мог создаться и всё же не пустить — например, когда
+    // демона подняли на переднем плане не от администратора, — и служба обязана
+    // подняться без журнала, а не упасть вместе с ним.
+    let appender = match tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(PREFIX)
+        .build(directory)
+    {
+        Ok(appender) => appender,
+        Err(err) => {
+            eprintln!("не удалось открыть файл журнала: {err}");
+            return None;
+        }
+    };
+
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
     let _ = tracing_subscriber::fmt()
@@ -87,6 +102,36 @@ mod tests {
         let path = std::path::Path::new("");
         let guard = init_file(path, false);
         drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_directory_does_not_stop_the_daemon() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Так выглядит общий каталог, заведённый установкой службы, когда
+        // демона подняли на переднем плане не от администратора: каталог есть,
+        // права `create_dir_all` не трогает, а записи в нём нет. На этом месте
+        // `rolling::daily` паниковала, и программа падала вместо того, чтобы
+        // работать без журнала.
+        let directory = std::env::temp_dir().join(format!("penguin-{}-ro", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("каталог заводится");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555))
+            .expect("права ставятся");
+
+        let unwritable = std::fs::File::create(directory.join("проба")).is_err();
+
+        let guard = init_file(&directory, false);
+        // Под `root` права каталога не запрещают ничего, и проверять нечего —
+        // но дойти до сюда, не упав, обязаны обе учётные записи.
+        if unwritable {
+            assert!(guard.is_none(), "журнала быть не может, а падать нельзя");
+        }
+
+        drop(guard);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755))
+            .expect("права возвращаются");
+        std::fs::remove_dir_all(&directory).expect("каталог убирается");
     }
 
     #[test]
