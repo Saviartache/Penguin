@@ -3726,6 +3726,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "penguin-tuic"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "penguin-tun"
 version = "0.1.0"
 dependencies = [
