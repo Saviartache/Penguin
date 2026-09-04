@@ -18,3 +18,8 @@ workspace = true
 # проверяет.
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Только ради проверки, что доменные типы переживают круговой прогон через
+# формат, которым их и передают: параметры протокола — это JSON.
+serde_json.workspace = true
