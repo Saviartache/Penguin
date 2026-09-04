@@ -9,12 +9,16 @@ fn main() {
     // Путь от каталога крейта: сборочный скрипт запускается в нём.
     println!("cargo:rerun-if-changed=../../assets/icon.ico");
 
-    #[cfg(windows)]
-    embed_icon();
+    // Цель, а не машина сборки. `#[cfg(windows)]` здесь означал бы «собираем
+    // на Windows», и обе кросс-сборки ломались бы: поставка для Windows,
+    // собранная с macOS, осталась бы без иконки, а сборка для Linux с Windows
+    // попыталась бы встроить ресурс в файл, который его не носит.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_icon();
+    }
 }
 
 /// Кладёт `assets/icon.ico` в ресурсы `penguin.exe`.
-#[cfg(windows)]
 fn embed_icon() {
     let mut resource = winresource::WindowsResource::new();
     resource.set_icon("../../assets/icon.ico");

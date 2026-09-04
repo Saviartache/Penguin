@@ -20,6 +20,16 @@ SHA256="07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
 
 DEST="assets/wintun/wintun.dll"
 
+# Поставку для Windows собирают и с macOS, значит и качать драйвер приходится
+# оттуда. `sha256sum` есть в Linux и в Git Bash, в macOS вместо неё `shasum`.
+sha256() {
+    if command -v sha256sum > /dev/null; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
 if [[ -f "$DEST" ]]; then
     echo "уже на месте: $DEST"
     exit 0
@@ -32,7 +42,7 @@ echo "качаю $URL"
 curl -fsSL --retry 3 -o "$TEMP/wintun.zip" "$URL"
 
 echo "проверяю хеш"
-ACTUAL="$(sha256sum "$TEMP/wintun.zip" | cut -d' ' -f1)"
+ACTUAL="$(sha256 "$TEMP/wintun.zip")"
 if [[ "$ACTUAL" != "$SHA256" ]]; then
     echo "хеш не совпал!" >&2
     echo "  ожидался: $SHA256" >&2
