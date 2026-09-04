@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use penguin_config::RootConfig;
-use penguin_dns::resolver::SystemResolver;
 use penguin_engine::direct::SystemDialer;
 use penguin_engine::outbounds::OutboundPool;
 use serde::Serialize;
@@ -96,7 +95,12 @@ fn list(config: &RootConfig, format: Format) -> Result<()> {
 }
 
 fn check(config: &RootConfig, wanted: Option<&str>, format: Format) -> Result<()> {
-    let pool = OutboundPool::new(Arc::new(SystemDialer::new(Arc::new(SystemResolver))));
+    // Загрузочный разрешатель, как и везде, где спрашивают имя сервера:
+    // системный к этому моменту может отвечать подставными адресами, которые
+    // оставил после себя прошлый запуск (см. [`penguin_dns::bootstrap`]).
+    let pool = OutboundPool::new(Arc::new(SystemDialer::new(
+        penguin_dns::bootstrap::resolver_for(&config.dns),
+    )));
 
     let profiles: Vec<_> = match wanted {
         Some(name) => vec![
@@ -186,8 +190,10 @@ mod tests {
     #[test]
     fn check_separates_good_from_broken() {
         // Проверка идёт без сети: ошибку в поле надо показать сразу.
-        let pool = OutboundPool::new(Arc::new(SystemDialer::new(Arc::new(SystemResolver))));
         let config = config();
+        let pool = OutboundPool::new(Arc::new(SystemDialer::new(
+            penguin_dns::bootstrap::resolver_for(&config.dns),
+        )));
 
         assert!(pool.validate(&config.profiles[0]).is_ok());
         assert!(

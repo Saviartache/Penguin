@@ -23,6 +23,7 @@
 //! тоннеля — иначе замкнутый круг: чтобы поднять тоннель, нужен адрес
 //! сервера; чтобы узнать адрес, нужен работающий тоннель.
 
+pub mod bootstrap;
 pub mod cache;
 pub mod config;
 pub mod error;
@@ -33,6 +34,7 @@ pub mod message;
 pub mod resolver;
 pub mod upstream;
 
+pub use bootstrap::BootstrapResolver;
 pub use cache::DnsCache;
 pub use config::{DnsConfig, DnsMode};
 pub use error::{DnsError, DnsResult};

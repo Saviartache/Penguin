@@ -19,7 +19,6 @@ use penguin_config::RootConfig;
 use penguin_config::schema::profile::Profile;
 use penguin_config::schema::routing::TunnelMode;
 use penguin_core::id::OutboundId;
-use penguin_dns::resolver::SystemResolver;
 use penguin_engine::direct::SystemDialer;
 use penguin_engine::metrics::counters::Metrics;
 use penguin_engine::outbounds::OutboundPool;
@@ -46,9 +45,13 @@ pub enum Kind {
 pub async fn run(config: &RootConfig, args: &SocksArgs, kind: Kind) -> Result<()> {
     let profile = pick_profile(config, args.profile.as_deref())?;
 
-    // Разрешатель системный: TUN не поднят, и обычное разрешение имён
-    // работает как надо. Это же снимает вопрос загрузочного резолвера.
-    let dialer = Arc::new(SystemDialer::new(Arc::new(SystemResolver)));
+    // Разрешатель загрузочный, а не системный. «TUN не поднят, значит система
+    // ответит честно» — рассуждение неверное: подмена DNS от прошлого запуска
+    // переживает и тоннель, и сам клиент, и системный резолвер отвечает на имя
+    // сервера подставным адресом (см. [`penguin_dns::bootstrap`]).
+    let dialer = Arc::new(SystemDialer::new(penguin_dns::bootstrap::resolver_for(
+        &config.dns,
+    )));
     let outbounds = Arc::new(OutboundPool::new(dialer));
 
     outbounds

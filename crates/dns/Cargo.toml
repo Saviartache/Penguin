@@ -21,7 +21,10 @@ rustls = { workspace = true, features = ["ring", "std"] }
 rustls-platform-verifier.workspace = true
 tokio-rustls = { workspace = true, features = ["ring"] }
 rand.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "sync", "time"] }
+# `io-util` — для DoT: длина сообщения и само оно читаются из потока TLS.
+# Собранный вместе со всем крейт получал эту возможность от соседей, а
+# отдельно (`cargo test -p penguin-dns`) не собирался вовсе.
+tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util"] }
 parking_lot.workspace = true
 ipnet.workspace = true
 thiserror.workspace = true
