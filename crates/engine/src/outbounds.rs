@@ -71,10 +71,12 @@ impl OutboundPool {
     }
 
     /// Проверяет параметры профиля, не подключаясь.
+    ///
+    /// Через общую точку входа реестра: протокол может работать на потоках
+    /// или на пакетах, и ошибку в поле интерфейс показывает одинаково.
     pub fn validate(&self, profile: &Profile) -> Result<(), ProtocolError> {
         self.registry
-            .get(&profile.outbound.protocol)?
-            .validate(&profile.outbound.params)
+            .validate(&profile.outbound.protocol, &profile.outbound.params)
     }
 
     /// Направление профиля: из пула или свежесозданное.
