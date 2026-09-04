@@ -24,17 +24,21 @@ pub async fn send(request: Request) -> IpcResult<Response> {
         client.request(request).await
     })
     .await
-    .unwrap_or(Err(penguin_ipc::IpcError::DaemonNotRunning))
+    .unwrap_or(Err(penguin_ipc::IpcError::NoAnswer))
 }
 
 /// Сколько ждать ответа на этот запрос.
 ///
-/// Два срока, потому что запросы разные. Подъём тоннеля — это набор сервера,
-/// рукопожатие, маршруты и брандмауэр, и минута тут не расточительность.
-/// Вопрос о состоянии или настройках демон отвечает из памяти, и три секунды
-/// молчания на него означают, что отвечать некому.
+/// Два срока, потому что запросы разные. Подъём тоннеля, замер задержки, обход
+/// процессов — это работа, и минута на неё не расточительность. Состояние и
+/// настройки демон отвечает из памяти, и полторы секунды молчания на них
+/// означают, что отвечать некому.
+///
+/// Признак берётся из [`Request::does_work`], а не из `is_mutating`: замер
+/// задержки в системе ничего не меняет, но ходит до каждого сервера — и на
+/// коротком сроке отваливался, сообщая, что службы нет.
 fn limit_for(request: &Request) -> std::time::Duration {
-    if request.is_mutating() {
+    if request.does_work() {
         WORK_TIMEOUT
     } else {
         penguin_ipc::client::ANSWER_TIMEOUT
@@ -71,6 +75,21 @@ mod tests {
         assert_eq!(
             limit_for(&Request::Ping),
             penguin_ipc::client::ANSWER_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn measuring_latency_is_work_too() {
+        // Замер ходит до каждого сервера и меряется секундами. На коротком
+        // сроке он отваливался с «служба не запущена» — про работающую службу,
+        // которая просто ещё считает.
+        assert_eq!(
+            limit_for(&Request::Probe { profile: None }),
+            limit_for(&Request::Connect { profile: None })
+        );
+        assert_eq!(
+            limit_for(&Request::ListProcesses),
+            limit_for(&Request::Connect { profile: None })
         );
     }
 

@@ -17,6 +17,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -31,6 +32,34 @@ use penguin_proto::outbound::Outbound;
 use penguin_proto::stream::ProxyStream;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
+/// Как система называет открытый сокет.
+///
+/// На unix это дескриптор, на Windows — своё число, и общего типа у них нет.
+/// Привязка нужна обоим, а разводить её по `cfg` в каждом месте, где сокет
+/// открывается, — значит написать её дважды.
+trait SocketHandle {
+    /// Число, которым сокет известен системе.
+    #[cfg(unix)]
+    fn handle(&self) -> std::os::fd::RawFd;
+    /// Число, которым сокет известен системе.
+    #[cfg(windows)]
+    fn handle(&self) -> std::os::windows::io::RawSocket;
+}
+
+#[cfg(unix)]
+impl<T: std::os::fd::AsRawFd> SocketHandle for T {
+    fn handle(&self) -> std::os::fd::RawFd {
+        self.as_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl<T: std::os::windows::io::AsRawSocket> SocketHandle for T {
+    fn handle(&self) -> std::os::windows::io::RawSocket {
+        self.as_raw_socket()
+    }
+}
+
 /// Выход наружу мимо тоннеля.
 pub struct SystemDialer {
     /// Адрес физического интерфейса, к которому привязываются сокеты.
@@ -38,6 +67,18 @@ pub struct SystemDialer {
     /// `None` — привязка не нужна: TUN не поднят, и маршрут по умолчанию
     /// ведёт наружу сам.
     bind_to: Option<IpAddr>,
+
+    /// Номер физического интерфейса. Ноль — тоннеля нет, защищать не от чего.
+    ///
+    /// Адреса мало: он выбирает обратный адрес в пакете, а куда пакет поедет,
+    /// решает таблица маршрутизации — и после подъёма тоннеля она отправляет
+    /// в TUN всё подряд, включая сокет до самого сервера. Привязка к
+    /// интерфейсу таблицу обходит (см. [`penguin_platform::bind`]).
+    ///
+    /// Число, а не поле в конструкторе: тоннель поднимается и опускается, а
+    /// набиратель живёт всё это время один и тот же — он лежит в пуле
+    /// направлений, и подменить его там некому.
+    interface: AtomicU32,
 
     /// Разрешатель имён, работающий мимо тоннеля.
     resolver: Arc<dyn Resolver>,
@@ -47,6 +88,7 @@ impl std::fmt::Debug for SystemDialer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SystemDialer")
             .field("bind_to", &self.bind_to)
+            .field("interface", &self.interface.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -56,6 +98,7 @@ impl SystemDialer {
     pub fn new(resolver: Arc<dyn Resolver>) -> Self {
         Self {
             bind_to: None,
+            interface: AtomicU32::new(0),
             resolver,
         }
     }
@@ -69,6 +112,30 @@ impl SystemDialer {
     /// Адрес, к которому привязываются сокеты.
     pub fn bind_address(&self) -> Option<IpAddr> {
         self.bind_to
+    }
+
+    /// Защищает исходящие сокеты этим интерфейсом — на время жизни тоннеля.
+    ///
+    /// Ноль снимает защиту: тоннеля больше нет, и обычный сокет снова уходит
+    /// наружу сам.
+    pub fn protect_with(&self, interface: u32) {
+        self.interface.store(interface, Ordering::Relaxed);
+    }
+
+    /// Привязывает сокет к физическому интерфейсу, если тоннель поднят.
+    ///
+    /// Отказ не прерывает набор. Привязка — защита от собственного тоннеля, и
+    /// без неё соединение либо пройдёт (тоннеля ещё нет), либо не пройдёт и
+    /// так; оборвать здесь попытку значило бы отказать и в тех случаях, где
+    /// хватило бы маршрута до сервера.
+    fn protect(&self, socket: &impl SocketHandle, ipv6: bool) {
+        let interface = self.interface.load(Ordering::Relaxed);
+        if interface == 0 {
+            return;
+        }
+        if let Err(err) = penguin_platform::bind::to_interface(socket.handle(), interface, ipv6) {
+            tracing::warn!(%err, interface, "сокет не защищён от тоннеля");
+        }
     }
 
     /// Локальный адрес для привязки под семейство удалённого.
@@ -96,6 +163,10 @@ impl Dialer for SystemDialer {
         if let Some(local) = self.local_for(addr) {
             socket.bind(local)?;
         }
+        // До `connect`: маршрут для сокета система выбирает в нём, и параметр,
+        // выставленный после, опоздал бы ровно на то соединение, ради которого
+        // он и нужен.
+        self.protect(&socket, addr.is_ipv6());
 
         let stream = socket.connect(addr).await?;
         // Прокси гоняет мелкие записи — заголовки, подтверждения. Задержка
@@ -108,7 +179,9 @@ impl Dialer for SystemDialer {
         // Привязка к физическому интерфейсу важнее запрошенного адреса:
         // вызывающий указывает семейство, а не конкретный интерфейс.
         let local = self.local_for(local).unwrap_or(local);
-        Ok(UdpSocket::bind(local).await?)
+        let socket = UdpSocket::bind(local).await?;
+        self.protect(&socket, local.is_ipv6());
+        Ok(socket)
     }
 
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, ProtocolError> {

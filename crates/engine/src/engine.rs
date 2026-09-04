@@ -28,6 +28,7 @@ use penguin_core::id::{OutboundId, ProfileId};
 use penguin_core::state::TunnelState;
 use penguin_dns::resolver::{Resolver, SystemResolver};
 use penguin_process::resolver::FlowOwnerResolver;
+use penguin_proto::dialer::Dialer;
 use penguin_router::engine::Router;
 use penguin_router::ruleset::CompileContext;
 use tokio::sync::Mutex;
@@ -54,6 +55,12 @@ pub struct Engine {
     config: ArcSwap<RootConfig>,
     router: Arc<Router>,
     outbounds: Arc<OutboundPool>,
+    /// Набиратель прямого выхода — тот самый, что лежит в пуле направлений.
+    ///
+    /// Держится отдельно ради одного: пока тоннель поднят, его сокеты надо
+    /// защищать физическим интерфейсом, а пул отдаёт направления, а не
+    /// набирателя (см. [`SystemDialer::protect_with`]).
+    dialer: Arc<SystemDialer>,
     processes: Arc<dyn FlowOwnerResolver>,
     metrics: Arc<Metrics>,
     state: Arc<StateMachine>,
@@ -83,7 +90,7 @@ impl Engine {
         // трафик, и обычное разрешение имён работает как надо.
         let resolver: Arc<dyn Resolver> = Arc::new(SystemResolver);
         let dialer = Arc::new(SystemDialer::new(resolver));
-        let outbounds = Arc::new(OutboundPool::new(dialer));
+        let outbounds = Arc::new(OutboundPool::new(Arc::clone(&dialer) as Arc<dyn Dialer>));
 
         let active = config
             .active()
@@ -108,6 +115,7 @@ impl Engine {
             config: ArcSwap::from_pointee(config),
             router,
             outbounds,
+            dialer,
             processes,
             metrics: Metrics::new(),
             state: Arc::new(StateMachine::new(events.clone())),
@@ -184,6 +192,19 @@ impl Engine {
             format!("подключение к профилю «{}»", profile.name),
         ));
 
+        // Путь наружу запоминается до набора и остаётся у набирателя на всё
+        // время тоннеля. Первое рукопожатие уходит и без этого — тоннеля ещё
+        // нет, — но соединение с сервером живёт дольше рукопожатия, а
+        // переподключение случается уже при поднятом тоннеле. Без защиты такой
+        // сокет уезжает в собственный тоннель, и клиент разговаривает сам с
+        // собой: «рукопожатие не завершилось».
+        match penguin_platform::default_route() {
+            Ok(outside) => self.dialer.protect_with(outside.interface_index),
+            Err(err) => {
+                tracing::warn!(%err, "путь наружу неизвестен — сокет до сервера не защищён")
+            }
+        }
+
         // Направление поднимается первым: без него остальное бессмысленно, а
         // откатывать ещё нечего.
         let outbound = match self.outbounds.get_or_connect(profile).await {
@@ -214,6 +235,7 @@ impl Engine {
                 // Направление уже поднято — закрываем, иначе останется висеть
                 // соединение к серверу без всякого тоннеля.
                 self.outbounds.close(&outbound.id()).await;
+                self.dialer.protect_with(0);
                 self.state.failed(err.to_string());
                 Err(err)
             }
@@ -267,6 +289,11 @@ impl Engine {
     /// маршрут не повод оставить в системе ещё и правила брандмауэра.
     pub async fn disconnect(&self) -> EngineResult<()> {
         let mut session = self.session.lock().await;
+        // Защита снимается в любом случае, даже когда тоннеля не было: она
+        // держит сокеты на интерфейсе, которого после смены сети может уже не
+        // быть, и оставленная лишний раз она вреднее, чем не поставленная.
+        self.dialer.protect_with(0);
+
         let Some(started) = session.take() else {
             self.state.disconnected();
             return Ok(());
