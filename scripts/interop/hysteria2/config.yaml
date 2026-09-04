@@ -1,0 +1,17 @@
+# Сервер Hysteria 2. Сертификат самоподписанный, поэтому профиль проверки
+# ставит `insecure` — это единственное место, где он уместен.
+listen: :443
+
+tls:
+  cert: /etc/hysteria/tls/cert.pem
+  key: /etc/hysteria/tls/key.pem
+
+auth:
+  type: password
+  password: secret
+
+masquerade:
+  type: proxy
+  proxy:
+    url: http://target/
+    rewriteHost: true
