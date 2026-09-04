@@ -1,0 +1,17 @@
+{
+  "log": { "level": "warn" },
+  "inbounds": [
+    {
+      "type": "vless",
+      "listen": "::",
+      "listen_port": 443,
+      "users": [{ "name": "penguin", "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811" }],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "/etc/sing-box/tls/cert.pem",
+        "key_path": "/etc/sing-box/tls/key.pem"
+      }
+    }
+  ],
+  "outbounds": [{ "type": "direct" }]
+}

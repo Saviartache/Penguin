@@ -22,6 +22,7 @@ members = [
     "crates/app",
     "protocols/transport",
     "protocols/hysteria2",
+    "protocols/vless",
     "protocols/shadowsocks",
     "protocols/trojan",
     "protocols/socks5",
@@ -60,6 +61,7 @@ penguin-cli      = { path = "crates/cli" }
 penguin-gui      = { path = "crates/gui" }
 penguin-transport = { path = "protocols/transport" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
+penguin-vless = { path = "protocols/vless" }
 penguin-shadowsocks = { path = "protocols/shadowsocks" }
 penguin-trojan = { path = "protocols/trojan" }
 penguin-socks5 = { path = "protocols/socks5" }

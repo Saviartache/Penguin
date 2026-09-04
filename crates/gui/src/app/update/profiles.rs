@@ -549,7 +549,7 @@ mod tests {
         app.state_mut().config.profiles.push(Profile::new(
             "чужой",
             "Чужой",
-            RawOutbound::new("vless", json!({ "server": "example.com:443" })),
+            RawOutbound::new("телепатия", json!({ "server": "example.com:443" })),
         ));
 
         let _ = handle(&mut app, ServersMessage::EditorOpened("чужой".to_owned()));
