@@ -22,6 +22,7 @@ members = [
     "crates/app",
     "protocols/transport",
     "protocols/hysteria2",
+    "protocols/shadowsocks",
     "protocols/trojan",
     "protocols/socks5",
     "protocols/http-proxy",
@@ -59,6 +60,7 @@ penguin-cli      = { path = "crates/cli" }
 penguin-gui      = { path = "crates/gui" }
 penguin-transport = { path = "protocols/transport" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
+penguin-shadowsocks = { path = "protocols/shadowsocks" }
 penguin-trojan = { path = "protocols/trojan" }
 penguin-socks5 = { path = "protocols/socks5" }
 penguin-http-proxy = { path = "protocols/http-proxy" }
@@ -104,6 +106,10 @@ maxminddb = "0.24"
 # --- криптография ---
 blake2 = "0.10"
 sha2 = "0.10"
+# Только ради `EVP_BytesToKey` — вывода ключа из пароля у Shadowsocks. Своей
+# стойкости он не даёт и придуман не для этого; заменить его нельзя, потому
+# что так делает сервер.
+md-5 = "0.10"
 rand = "0.8"
 
 # --- DNS ---

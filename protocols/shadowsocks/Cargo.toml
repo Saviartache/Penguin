@@ -1,0 +1,37 @@
+[package]
+name = "penguin-shadowsocks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Протокол Shadowsocks: поток без заголовков, зашифрованный целиком"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# Шифры, HKDF и случайные байты. `ring` уже собран в дереве через `rustls`.
+ring.workspace = true
+# Вывод ключа из пароля: `EVP_BytesToKey`. Так делает сервер, и заменить это
+# на что-то разумное нельзя, не сломав совместимость.
+md-5.workspace = true
+rand.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

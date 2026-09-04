@@ -75,6 +75,8 @@ pub static STRINGS: Strings = Strings {
     proxy_udp_plain: "Send UDP — outside TLS, in the clear",
     sni: "TLS name",
     transport: "Transport",
+    method: "Encryption method",
+    need_method: "Pick the encryption method — the same one the server uses",
     path: "Path",
     path_example: "/ws",
     http_host: "Host header",

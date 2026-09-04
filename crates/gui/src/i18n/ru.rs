@@ -75,6 +75,8 @@ pub static STRINGS: Strings = Strings {
     proxy_udp_plain: "Пускать UDP — мимо TLS, открытым текстом",
     sni: "Имя для TLS",
     transport: "Перенос",
+    method: "Метод шифрования",
+    need_method: "Выберите метод шифрования — тот же, что на сервере",
     path: "Путь",
     path_example: "/ws",
     http_host: "Заголовок Host",

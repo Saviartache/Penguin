@@ -2570,6 +2570,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3457,6 +3467,7 @@ dependencies = [
  "penguin-process",
  "penguin-proto",
  "penguin-router",
+ "penguin-shadowsocks",
  "penguin-socks5",
  "penguin-trojan",
  "penguin-tun",
@@ -3638,6 +3649,25 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "penguin-shadowsocks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "md-5",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "rand 0.8.8",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -171,6 +171,10 @@ pub struct Strings {
     pub sni: &'static str,
     /// Чем переносится поток: голый TCP, WebSocket, `Upgrade`.
     pub transport: &'static str,
+    /// Метод шифрования.
+    pub method: &'static str,
+    /// Не задан метод шифрования.
+    pub need_method: &'static str,
     /// Путь запроса у переносов поверх HTTP.
     pub path: &'static str,
     /// Пример пути.
@@ -409,6 +413,8 @@ mod tests {
                 table.password,
                 table.sni,
                 table.transport,
+                table.method,
+                table.need_method,
                 table.path,
                 table.path_example,
                 table.http_host,
