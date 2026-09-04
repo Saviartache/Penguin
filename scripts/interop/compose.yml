@@ -1,0 +1,55 @@
+# Эталонные серверы для проверки протоколов.
+#
+# Задача этих контейнеров — быть чужой реализацией. Тест на записанных байтах
+# ловит ошибку в кадре, но не ловит ошибку в понимании протокола: свой разбор
+# согласится сам с собой при любой ошибке в номерах и порядке полей.
+#
+# Поднимается вручную (`./run.sh`), а не из `check.sh`: тянуть образы на каждый
+# коммит незачем.
+
+services:
+  # Куда ходит проверка. Свой, а не сайт в сети: проверяется протокол, и
+  # падение чужого сайта не должно выглядеть падением протокола.
+  target:
+    image: nginx:alpine
+    volumes:
+      - ./target:/usr/share/nginx/html:ro
+    networks: [interop]
+
+  socks5:
+    image: serjs/go-socks5-proxy
+    environment:
+      PROXY_USER: penguin
+      PROXY_PASSWORD: secret
+    ports:
+      - "127.0.0.1:11080:1080"
+    networks: [interop]
+
+  # Без пароля: `AuthUnsupported` и `AuthRejected` — разные ошибки, и
+  # проверять их надо о разные серверы.
+  socks5-open:
+    image: serjs/go-socks5-proxy
+    ports:
+      - "127.0.0.1:11081:1080"
+    networks: [interop]
+
+  http:
+    image: vimagick/tinyproxy
+    volumes:
+      - ./tinyproxy/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+    ports:
+      - "127.0.0.1:18888:8888"
+    networks: [interop]
+
+  hysteria2:
+    image: tobyxdd/hysteria
+    command: server -c /etc/hysteria/config.yaml
+    volumes:
+      - ./hysteria2/config.yaml:/etc/hysteria/config.yaml:ro
+      - ./tls:/etc/hysteria/tls:ro
+    ports:
+      - "127.0.0.1:14443:443/udp"
+    networks: [interop]
+
+networks:
+  interop:
