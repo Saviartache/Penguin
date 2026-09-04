@@ -64,6 +64,14 @@ pub enum Hysteria2Error {
         size: usize,
     },
 
+    /// Ошибка общего транспорта: TLS, срок рукопожатия, запись адреса.
+    ///
+    /// Отдельным вариантом, а не разобранной на части: классификацию
+    /// «повторять / не повторять» транспорт уже сделал, и повторять её здесь
+    /// значит однажды разойтись с ней.
+    #[error(transparent)]
+    Transport(#[from] penguin_transport::TransportError),
+
     /// Ошибка ввода-вывода.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -100,6 +108,7 @@ impl From<Hysteria2Error> for ProtocolError {
             Hysteria2Error::Disconnected(message) => Self::Disconnected(message),
             Hysteria2Error::UdpDisabled => Self::Unsupported("UDP"),
             err @ Hysteria2Error::DatagramTooLarge { .. } => Self::Unreachable(err.to_string()),
+            Hysteria2Error::Transport(err) => err.into(),
             Hysteria2Error::Io(err) => Self::Io(err),
         }
     }

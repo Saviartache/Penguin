@@ -16,6 +16,10 @@ workspace = true
 # ни GUI он не видит — это и делает его заменяемым.
 penguin-core.workspace = true
 penguin-proto.workspace = true
+# Запись адреса, срок на рукопожатие и прочее общее для протоколов.
+# `transport` стоит на их уровне и о клиенте знает столько же — ничего
+# (AGENTS.md, правило 1.1.1).
+penguin-transport.workspace = true
 
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "macros"] }
 async-trait.workspace = true

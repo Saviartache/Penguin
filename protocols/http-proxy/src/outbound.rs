@@ -17,14 +17,13 @@ use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::outbound::Outbound;
 use penguin_proto::stream::ProxyStream;
-use rustls::pki_types::ServerName;
-use tokio_rustls::TlsConnector;
+use penguin_transport::tls::{ALPN_HTTP11, TlsClient};
 
 use crate::config::HttpProxyConfig;
 use crate::connect;
 use crate::error::HttpProxyError;
 use crate::stream::Prefixed;
-use crate::{PROTOCOL_HTTP, PROTOCOL_HTTPS, tls};
+use crate::{PROTOCOL_HTTP, PROTOCOL_HTTPS};
 
 /// Исходящее направление через прокси HTTP CONNECT.
 pub struct HttpProxyOutbound {
@@ -35,15 +34,8 @@ pub struct HttpProxyOutbound {
     /// Порт прокси.
     port: u16,
     /// Собранный слой TLS. `None` — протокол `http`, разговор в открытую.
-    tls: Option<Tls>,
+    tls: Option<TlsClient>,
     dialer: Arc<dyn Dialer>,
-}
-
-/// Всё, что нужно, чтобы обернуть разговор с прокси в TLS.
-struct Tls {
-    connector: TlsConnector,
-    /// Имя, которое проверяется в сертификате.
-    name: ServerName<'static>,
 }
 
 impl std::fmt::Debug for HttpProxyOutbound {
@@ -71,13 +63,9 @@ impl HttpProxyOutbound {
         let (host, port) = config.endpoint()?;
 
         let tls = if secure {
-            let name = config.server_name()?;
-            let name = ServerName::try_from(name.clone())
-                .map_err(|e| HttpProxyError::config(format!("имя `{name}` для TLS: {e}")))?;
-            Some(Tls {
-                connector: TlsConnector::from(Arc::new(tls::client_config(&config.tls)?)),
-                name,
-            })
+            // ALPN — `http/1.1` и только он: `CONNECT` — это HTTP/1.1, и
+            // прокси, придирчивый к ALPN, от обещания HTTP/2 сломается.
+            Some(TlsClient::new(&config.tls, &host, &[ALPN_HTTP11])?)
         } else {
             None
         };
@@ -102,11 +90,7 @@ impl HttpProxyOutbound {
 
         match &self.tls {
             Some(tls) => {
-                let mut io = tls
-                    .connector
-                    .connect(tls.name.clone(), io)
-                    .await
-                    .map_err(HttpProxyError::tls)?;
+                let mut io = tls.connect(io).await?;
                 let tail = connect::perform(&mut io, target, credentials).await?;
                 Ok(Box::new(Prefixed::new(io, tail)))
             }
@@ -128,11 +112,7 @@ impl HttpProxyOutbound {
     pub async fn verify(&self) -> Result<(), ProtocolError> {
         let io = dial::dial(&*self.dialer, &self.host, self.port).await?;
         if let Some(tls) = &self.tls {
-            let _session = tls
-                .connector
-                .connect(tls.name.clone(), io)
-                .await
-                .map_err(HttpProxyError::tls)?;
+            let _session = tls.connect(io).await?;
         }
         Ok(())
     }

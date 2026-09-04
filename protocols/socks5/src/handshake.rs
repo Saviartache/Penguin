@@ -17,8 +17,9 @@
 use penguin_core::address::SocketAddress;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use penguin_transport::addr::socks::{self as address, ATYP_DOMAIN, ATYP_IPV4, ATYP_IPV6};
+
 use crate::error::{Socks5Error, Socks5Result};
-use crate::frame::address::{self, ATYP_DOMAIN, ATYP_IPV4, ATYP_IPV6};
 
 /// Версия протокола.
 pub const VERSION: u8 = 0x05;

@@ -46,7 +46,6 @@ pub mod error;
 pub mod factory;
 pub mod frame;
 pub mod session;
-pub mod tls;
 pub mod transport;
 
 pub use client::Hysteria2Client;

@@ -55,9 +55,13 @@ pub enum Socks5Error {
     #[error("проксирование UDP выключено в настройках профиля")]
     UdpDisabled,
 
-    /// Адрес не укладывается в формат SOCKS5.
-    #[error("адрес не помещается в запрос SOCKS5: {0}")]
-    Address(String),
+    /// Ошибка общего транспорта: запись адреса, срок рукопожатия, TLS.
+    ///
+    /// Отдельным вариантом, а не разобранной на части: классификацию
+    /// «повторять / не повторять» транспорт уже сделал, и повторять её здесь
+    /// значит однажды разойтись с ней.
+    #[error(transparent)]
+    Transport(#[from] penguin_transport::TransportError),
 
     /// Ошибка ввода-вывода.
     #[error(transparent)]
@@ -83,7 +87,6 @@ impl From<Socks5Error> for ProtocolError {
     fn from(err: Socks5Error) -> Self {
         match err {
             Socks5Error::Config(message) => Self::InvalidConfig(message),
-            Socks5Error::Address(message) => Self::InvalidConfig(message),
             Socks5Error::AuthRejected | Socks5Error::AuthUnsupported => Self::AuthRejected,
             // Не по протоколу — это ошибка настроек, а не сети: повторять
             // бессмысленно, пока в поле стоит адрес не того прокси.
@@ -93,6 +96,7 @@ impl From<Socks5Error> for ProtocolError {
             }
             Socks5Error::Disconnected(message) => Self::Disconnected(message),
             Socks5Error::UdpDisabled => Self::Unsupported("UDP"),
+            Socks5Error::Transport(err) => err.into(),
             Socks5Error::Io(err) => Self::Io(err),
         }
     }

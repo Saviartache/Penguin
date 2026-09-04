@@ -10,6 +10,7 @@
 //! соседнего; отправлять их незачем, а `CONNECT` без них работает у всех.
 
 use penguin_core::address::SocketAddress;
+use penguin_transport::deadline;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::basic;
@@ -94,17 +95,23 @@ pub async fn perform<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    io.write_all(request(target, credentials).as_bytes())
-        .await?;
-    io.flush().await?;
+    // Срок обязателен: прокси, принявший соединение и замолчавший на ответе,
+    // иначе держал бы поток приложения вечно — а выглядит это как страница,
+    // которая грузится и не загружается.
+    deadline::handshake("ответ прокси на CONNECT", async {
+        io.write_all(request(target, credentials).as_bytes())
+            .await?;
+        io.flush().await?;
 
-    let (head, tail) = read_head(io).await?;
-    let (status, message) = parse_status(&head)?;
+        let (head, tail) = read_head(io).await?;
+        let (status, message) = parse_status(&head)?;
 
-    match outcome(status, &message, &target.to_wire()) {
-        Some(err) => Err(err),
-        None => Ok(tail),
-    }
+        match outcome(status, &message, &target.to_wire()) {
+            Some(err) => Err(err),
+            None => Ok(tail),
+        }
+    })
+    .await
 }
 
 /// Читает ответ до пустой строки.

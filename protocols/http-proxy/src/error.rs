@@ -51,6 +51,14 @@ pub enum HttpProxyError {
     #[error("соединение с прокси потеряно: {0}")]
     Disconnected(String),
 
+    /// Ошибка общего транспорта: TLS, срок рукопожатия, запись адреса.
+    ///
+    /// Отдельным вариантом, а не разобранной на части: классификацию
+    /// «повторять / не повторять» транспорт уже сделал, и повторять её здесь
+    /// значит однажды разойтись с ней.
+    #[error(transparent)]
+    Transport(#[from] penguin_transport::TransportError),
+
     /// Ошибка ввода-вывода.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -86,6 +94,7 @@ impl From<HttpProxyError> for ProtocolError {
             HttpProxyError::Tls(message) => Self::Connect(message),
             err @ HttpProxyError::Refused { .. } => Self::Unreachable(err.to_string()),
             HttpProxyError::Disconnected(message) => Self::Disconnected(message),
+            HttpProxyError::Transport(err) => err.into(),
             HttpProxyError::Io(err) => Self::Io(err),
         }
     }

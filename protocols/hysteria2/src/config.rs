@@ -8,6 +8,9 @@ use std::time::Duration;
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::{PortSpec, ServerEndpoint};
+// Настройки TLS общие на весь проект: одна таблица доверия, одни имена
+// полей в файле настроек.
+pub use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Hysteria2Error, Hysteria2Result};
@@ -158,33 +161,6 @@ fn split_host_ports(raw: &str) -> Option<(&str, &str)> {
         return Some((host, tail.strip_prefix(':')?));
     }
     raw.rsplit_once(':')
-}
-
-/// Настройки TLS.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TlsConfig {
-    /// Имя, подставляемое в TLS вместо адреса сервера.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sni: Option<String>,
-
-    /// Не проверять сертификат.
-    ///
-    /// Снимает единственную защиту от подмены сервера. Держится отдельным
-    /// полем именно затем, чтобы интерфейс мог сказать об этом вслух.
-    #[serde(default)]
-    pub insecure: bool,
-
-    /// Отпечаток сертификата SHA-256 в шестнадцатеричной записи.
-    ///
-    /// Разумная замена `insecure` для самоподписанного сертификата: проверка
-    /// остаётся, просто доверие идёт не от удостоверяющего центра.
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "pinSHA256")]
-    pub pin_sha256: Option<String>,
-
-    /// Путь к своему корневому сертификату.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ca: Option<String>,
 }
 
 /// Обфускация.

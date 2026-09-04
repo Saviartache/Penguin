@@ -17,7 +17,7 @@ use super::socket::HysteriaSocket;
 use crate::config::{Hysteria2Config, ObfsConfig};
 use crate::congestion::brutal::{BrutalConfig, BrutalRate};
 use crate::error::{Hysteria2Error, Hysteria2Result};
-use crate::tls;
+use penguin_transport::tls::{ALPN_H3, client_config as tls_client_config};
 
 /// Установленное соединение QUIC вместе с его эндпойнтом.
 ///
@@ -133,7 +133,10 @@ fn endpoint_config(obfs_overhead: usize) -> Hysteria2Result<EndpointConfig> {
 
 /// Настройки клиента: TLS плюс параметры транспорта.
 fn client_config(config: &Hysteria2Config) -> Hysteria2Result<(ClientConfig, Option<BrutalRate>)> {
-    let crypto = tls::client_config(&config.tls)?;
+    // ALPN — `h3` и только он: сервер Hysteria 2 обязан выглядеть обычным
+    // сервером HTTP/3, и любое другое значение выдало бы его первым же
+    // пакетом рукопожатия.
+    let crypto = tls_client_config(&config.tls, &[ALPN_H3])?;
     let crypto = QuicClientConfig::try_from(crypto)
         .map_err(|e| Hysteria2Error::config(format!("TLS не годится для QUIC: {e}")))?;
 

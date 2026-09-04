@@ -17,11 +17,11 @@ workspace = true
 penguin-core.workspace = true
 penguin-proto.workspace = true
 
-# TLS нужен только варианту `https`; выключить его отдельной фичей нельзя без
-# того, чтобы `https` перестал существовать, — а он и есть половина смысла.
-rustls = { workspace = true, features = ["ring", "std"] }
-rustls-platform-verifier.workspace = true
-tokio-rustls.workspace = true
+# TLS, срок на рукопожатие и прочее общее для протоколов. Своей копии
+# настроек TLS у крейта больше нет: она была третьей в проекте, и три копии
+# одной таблицы доверия — это три разных ответа на вопрос, что именно
+# выключает `insecure` (AGENTS.md, правило 1.1.1).
+penguin-transport.workspace = true
 
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "macros"] }
 async-trait.workspace = true

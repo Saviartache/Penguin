@@ -3389,6 +3389,7 @@ name = "penguin-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
 ]
 
@@ -3489,13 +3490,11 @@ dependencies = [
  "bytes",
  "penguin-core",
  "penguin-proto",
- "rustls",
- "rustls-platform-verifier",
+ "penguin-transport",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tokio-rustls",
  "tracing",
 ]
 
@@ -3513,12 +3512,11 @@ dependencies = [
  "parking_lot",
  "penguin-core",
  "penguin-proto",
+ "penguin-transport",
  "quinn",
  "quinn-proto",
  "rand 0.8.8",
  "rustls",
- "rustls-pemfile",
- "rustls-platform-verifier",
  "serde",
  "serde_json",
  "sha2",
@@ -3648,10 +3646,32 @@ dependencies = [
  "bytes",
  "penguin-core",
  "penguin-proto",
+ "penguin-transport",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "penguin-transport"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "penguin-core",
+ "penguin-proto",
+ "rand 0.8.8",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
