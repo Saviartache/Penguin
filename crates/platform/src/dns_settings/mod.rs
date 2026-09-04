@@ -87,7 +87,18 @@ fn set_dns(interface_index: u32, server: IpAddr) -> PlatformResult<()> {
     {
         windows::set(interface_index, server)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::set(interface_index, server)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Номер интерфейса здесь не при чём: сетевой службой utun не
+        // считается, и подменять приходится настройки всей машины.
+        let _ = interface_index;
+        macos::set(server)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = (interface_index, server);
         Err(crate::error::PlatformError::Unsupported("настройки DNS"))
@@ -99,7 +110,16 @@ fn reset_dns(interface_index: u32) -> PlatformResult<()> {
     {
         windows::reset(interface_index)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::reset(interface_index)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = interface_index;
+        macos::reset()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = interface_index;
         Err(crate::error::PlatformError::Unsupported("настройки DNS"))

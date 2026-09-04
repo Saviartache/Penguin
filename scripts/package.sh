@@ -12,10 +12,20 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 DIST="dist/penguin"
 
-echo "▶ драйвер"
-./scripts/fetch-wintun.sh
+# Драйвер нужен только Windows: там TUN-адаптер создаёт `wintun.dll`, которой
+# в поставке системы нет. У Linux он в ядре (`/dev/net/tun`), у macOS — тем
+# более (utun), и класть в поставку нечего.
+WINDOWS=0
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+    WINDOWS=1
+fi
 
-echo
+if [[ $WINDOWS -eq 1 ]]; then
+    echo "▶ драйвер"
+    ./scripts/fetch-wintun.sh
+    echo
+fi
+
 echo "▶ сборка"
 cargo build --workspace --release
 
@@ -27,8 +37,14 @@ mkdir -p "$DIST"
 rm -f "$DIST"/*
 
 # `.exe` только на Windows; на остальных платформах суффикса нет.
+#
+# Проверка развёрнута в `if`, а не написана через `&&`: при `set -e` ложное
+# условие в конце такой строки завершает скрипт, и сборка на Linux падала бы
+# ровно там, где ничего делать не надо.
 SUFFIX=""
-[[ "${OS:-}" == "Windows_NT" ]] && SUFFIX=".exe"
+if [[ $WINDOWS -eq 1 ]]; then
+    SUFFIX=".exe"
+fi
 
 # Файл один. Кем ему быть — окном, службой или командой терминала — он решает
 # сам по своим аргументам, и человеку об этом знать не надо.
@@ -39,7 +55,9 @@ cp "target/release/penguin${SUFFIX}" "$DIST/"
 
 # Драйвер кладётся рядом с исполняемым файлом: `wintun::load()` ищет его по
 # обычному пути поиска библиотек, то есть в каталоге программы.
-cp assets/wintun/wintun.dll "$DIST/"
+if [[ $WINDOWS -eq 1 ]]; then
+    cp assets/wintun/wintun.dll "$DIST/"
+fi
 
 # Ни настроек, ни описания: настройки клиент заводит сам при первом запуске,
 # и человеку в них лезть незачем. Лишний файл рядом с программой — это

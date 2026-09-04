@@ -3621,6 +3621,7 @@ name = "penguin-platform"
 version = "0.1.0"
 dependencies = [
  "ipnet",
+ "libc",
  "nix",
  "parking_lot",
  "penguin-core",
@@ -3635,7 +3636,7 @@ name = "penguin-process"
 version = "0.1.0"
 dependencies = [
  "dashmap",
- "nix",
+ "libc",
  "parking_lot",
  "penguin-core",
  "serde",
@@ -3680,6 +3681,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "libc",
  "nix",
  "penguin-config",
  "penguin-core",

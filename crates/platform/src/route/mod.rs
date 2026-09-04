@@ -21,7 +21,7 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 use parking_lot::Mutex;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 use crate::error::PlatformError;
 use crate::error::PlatformResult;
 use crate::interface::DefaultRoute;
@@ -190,7 +190,15 @@ fn add_route(route: &Route) -> PlatformResult<()> {
     {
         windows::add(route)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::add(route)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::add(route)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = route;
         Err(PlatformError::Unsupported("постановка маршрута"))
@@ -202,7 +210,15 @@ fn remove_route(route: &Route) -> PlatformResult<()> {
     {
         windows::remove(route)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::remove(route)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::remove(route)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = route;
         Err(PlatformError::Unsupported("снятие маршрута"))

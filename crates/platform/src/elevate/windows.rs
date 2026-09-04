@@ -1,23 +1,19 @@
-//! Перезапуск самого себя с правами администратора.
+//! Windows: перезапуск себя через `ShellExecuteW` с глаголом `runas`.
 //!
-//! Права в Windows не выдаются процессу на ходу: их получает только новый
-//! процесс, запущенный через `ShellExecuteW` с глаголом `runas` — то самое
-//! окно UAC. Поэтому «получить права» здесь означает «запустить себя заново с
-//! нужной командой и дождаться».
-//!
-//! Просить их должно не всё подряд, а ровно то, чему они нужны: установка
-//! службы, её запуск и остановка. Окно и проверки работают без прав и
-//! спрашивать их не должны — лишний запрос UAC приучает нажимать «Да», не
-//! читая.
+//! Права здесь не выдаются процессу на ходу: их получает только новый
+//! процесс, запущенный с этим глаголом, — то самое окно UAC.
 
 use crate::error::{PlatformError, PlatformResult};
 
-/// Запускает себя же с правами администратора и ждёт завершения.
+/// Сколько ждать поднятый процесс.
 ///
-/// `Ok(false)` — пользователь отказался в окне UAC. Это не ошибка: он имел
-/// право отказаться, и ругаться на него незачем.
-#[cfg(windows)]
-pub fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
+/// Установка службы вместе с окном UAC укладывается в секунды; полминуты —
+/// с запасом на медленную машину и на человека, который отвлёкся. Дольше ждать
+/// незачем: окно всё это время не отвечает.
+const WAIT_TIMEOUT_MS: u32 = 30_000;
+
+/// Запускает себя же с правами администратора и ждёт завершения.
+pub(super) fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
@@ -38,7 +34,7 @@ pub fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
 
     let verb = wide("runas");
     let file = wide(&executable.to_string_lossy());
-    let parameters = wide(&args.join(" "));
+    let parameters = wide(&command_line(args));
 
     let mut info = SHELLEXECUTEINFOW {
         // Размер структуры — способ, которым Windows узнаёт её версию.
@@ -75,18 +71,43 @@ pub fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
     Ok(finished == WAIT_OBJECT_0)
 }
 
-/// Сколько ждать поднятый процесс.
+/// Собирает аргументы в одну строку командной строки.
 ///
-/// Установка службы вместе с окном UAC укладывается в секунды; полминуты —
-/// с запасом на медленную машину и на человека, который отвлёкся. Дольше ждать
-/// незачем: окно всё это время не отвечает.
-#[cfg(windows)]
-const WAIT_TIMEOUT_MS: u32 = 30_000;
+/// Windows передаёт их именно так — одной строкой, — и разбирает обратно уже
+/// поднятый процесс. Поэтому аргумент с пробелом обязан быть в кавычках:
+/// иначе путь пользователя, в котором пробел есть почти всегда, распадётся на
+/// два аргумента, и служба встанет не для того каталога настроек.
+fn command_line(args: &[&str]) -> String {
+    args.iter()
+        .map(|argument| {
+            if argument.contains(' ') && !argument.starts_with('"') {
+                format!("\"{argument}\"")
+            } else {
+                (*argument).to_owned()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
 
-/// На остальных системах повышение прав устроено иначе.
-#[cfg(not(windows))]
-pub fn run_elevated(_args: &[&str]) -> PlatformResult<bool> {
-    Err(PlatformError::Unsupported(
-        "повышение прав поддержано только на Windows",
-    ))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_with_spaces_stays_one_argument() {
+        // Путь пользователя почти всегда содержит пробел.
+        let line = command_line(&[
+            "service",
+            "ensure",
+            "--config-dir",
+            "C:/Program Files/Penguin",
+        ]);
+        assert!(line.ends_with("\"C:/Program Files/Penguin\""), "{line}");
+    }
+
+    #[test]
+    fn a_plain_argument_gets_no_quotes() {
+        assert_eq!(command_line(&["service", "install"]), "service install");
+    }
 }

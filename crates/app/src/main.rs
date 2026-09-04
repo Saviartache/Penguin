@@ -178,8 +178,11 @@ fn elevated_arguments(cli: &Cli) -> Vec<String> {
 
     if let Some(dir) = &cli.config_dir {
         arguments.push("--config-dir".to_owned());
-        // В кавычках: путь с пробелом иначе распался бы на два аргумента.
-        arguments.push(format!("\"{}\"", dir.display()));
+        // Без кавычек: заключить путь с пробелом в них — забота той системы,
+        // которая передаёт аргументы одной строкой
+        // ([`penguin_platform::run_elevated`]). Там, где программа
+        // запускается напрямую, кавычка стала бы частью имени каталога.
+        arguments.push(dir.display().to_string());
     }
     if cli.verbose {
         arguments.push("--verbose".to_owned());
@@ -230,7 +233,10 @@ mod tests {
 
     #[test]
     fn a_path_with_spaces_stays_one_argument() {
-        // Путь пользователя почти всегда содержит пробел.
+        // Путь пользователя почти всегда содержит пробел. Кавычки ему здесь
+        // не ставятся: их поставит та система, которая передаёт аргументы
+        // одной строкой, — а там, где программа запускается напрямую, кавычка
+        // стала бы частью имени каталога.
         let arguments = elevated_arguments(&cli(&[
             "penguin",
             "service",
@@ -240,10 +246,7 @@ mod tests {
         ]));
 
         let path = arguments.last().expect("путь есть");
-        assert!(
-            path.starts_with('"') && path.ends_with('"'),
-            "путь без кавычек: {path}"
-        );
+        assert_eq!(path, "C:/Program Files/Penguin");
     }
 
     #[test]

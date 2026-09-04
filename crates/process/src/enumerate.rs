@@ -59,7 +59,15 @@ pub fn system_enumerator() -> Box<dyn ProcessEnumerator> {
     {
         Box::new(crate::platform::windows::icon::WindowsEnumerator)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(crate::platform::linux::LinuxEnumerator)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(crate::platform::macos::MacosEnumerator)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Box::new(EmptyEnumerator)
     }

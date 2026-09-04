@@ -34,5 +34,7 @@ windows = { workspace = true, features = [
     "Win32_System_Diagnostics_ToolHelp",
 ] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-nix = { workspace = true, features = ["fs"] }
+[target.'cfg(target_os = "macos")'.dependencies]
+# `proc_pidfdinfo` и соседи: интерфейса «кому принадлежит порт» в macOS нет,
+# и ответ собирается перебором через libproc.
+libc.workspace = true

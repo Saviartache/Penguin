@@ -4,7 +4,17 @@
 #
 # Держим свежую: rust-analyzer работает только с 1.94 и новее, и на пине 1.88
 # редактор оставался без подсказок и без проверки типов.
+#
+# Цели перечислены все три, а не только своя. Платформенный слой у клиента
+# написан трижды (`crates/platform`, `crates/tun`, `crates/process`), и код
+# для чужой системы иначе не проверяется ничем: `cargo check --target` собирает
+# его без компоновки, то есть без чужого компилятора C, — и ошибка находится
+# сразу, а не у того, кто первым запустит сборку на той системе.
 [toolchain]
 channel = "1.98"
 components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
-targets = ["x86_64-pc-windows-msvc"]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]

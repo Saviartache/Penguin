@@ -92,10 +92,45 @@ pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
 }
 
 /// Находит интерфейс до адреса.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
+    crate::route::linux::route_to(destination)
+}
+
+/// Находит интерфейс до адреса.
+#[cfg(target_os = "macos")]
+pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
+    crate::route::macos::route_to(destination)
+}
+
+/// Находит интерфейс до адреса.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
     let _ = destination;
     Err(PlatformError::Unsupported("определение маршрута"))
+}
+
+/// Каким адресом машина выйдет к указанному узлу.
+///
+/// Спрашивается у сокета, а не у таблицы маршрутизации: `connect` на UDP не
+/// отправляет ни байта, но заставляет систему выбрать исходящий интерфейс —
+/// тот самый, которым она пошла бы на самом деле. Своя же копия этого выбора,
+/// собранная перебором интерфейсов, однажды разошлась бы с системой.
+///
+/// `None` — маршрута до узла нет вовсе.
+#[cfg(unix)]
+pub(crate) fn source_address_towards(destination: IpAddr) -> Option<IpAddr> {
+    let bind = if destination.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+
+    let socket = std::net::UdpSocket::bind(bind).ok()?;
+    // Порт любой: до отправки дело не дойдёт, а выбор интерфейса от него не
+    // зависит.
+    socket.connect((destination, 53)).ok()?;
+    Some(socket.local_addr().ok()?.ip())
 }
 
 #[cfg(test)]

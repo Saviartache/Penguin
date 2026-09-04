@@ -9,6 +9,8 @@
 [![Rust](https://img.shields.io/badge/Rust-1.98-000000?logo=rust&logoColor=white)](rust-toolchain.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#лицензия)
 [![Windows](https://img.shields.io/badge/Windows-x64-0078D6?logo=windows&logoColor=white)](crates/platform)
+[![macOS](https://img.shields.io/badge/macOS-arm64%20%7C%20x64-000000?logo=apple&logoColor=white)](crates/platform)
+[![Linux](https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&logoColor=black)](crates/platform)
 
 <br>
 
@@ -51,11 +53,11 @@
 | **Язык** | ![Rust](https://img.shields.io/badge/Rust-1.98-000000?logo=rust&logoColor=white) ![Edition](https://img.shields.io/badge/edition-2024-000000?logo=rust&logoColor=white) |
 | **Протокол** | ![Hysteria 2](https://img.shields.io/badge/Hysteria%202-6f42c1) |
 | **Транспорт** | ![quinn](https://img.shields.io/badge/quinn-1f6feb) ![rustls](https://img.shields.io/badge/rustls-1f6feb) ![h3](https://img.shields.io/badge/h3-1f6feb) |
-| **Сеть** | ![smoltcp](https://img.shields.io/badge/smoltcp-0a7c5a) ![wintun](https://img.shields.io/badge/wintun-0a7c5a) |
+| **Сеть** | ![smoltcp](https://img.shields.io/badge/smoltcp-0a7c5a) ![wintun](https://img.shields.io/badge/wintun-0a7c5a) ![utun](https://img.shields.io/badge/utun-0a7c5a) ![tun](https://img.shields.io/badge/%2Fdev%2Fnet%2Ftun-0a7c5a) |
 | **DNS** | ![hickory-proto](https://img.shields.io/badge/hickory--proto-0a7c5a) |
 | **Асинхронность** | ![tokio](https://img.shields.io/badge/tokio-c04b2f) |
 | **Интерфейс** | ![iced](https://img.shields.io/badge/iced%200.14-4b8bbe) ![clap](https://img.shields.io/badge/clap-4b8bbe) |
-| **Платформа** | ![Windows](https://img.shields.io/badge/Windows%20x64-0078D6?logo=windows&logoColor=white) |
+| **Платформа** | ![Windows](https://img.shields.io/badge/Windows%20x64-0078D6?logo=windows&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black) |
 
 <br>
 

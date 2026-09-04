@@ -65,7 +65,15 @@ pub fn install(executable: &Path) -> PlatformResult<()> {
     {
         windows::install(executable)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::install(executable)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::install(executable)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = executable;
         Err(crate::error::PlatformError::Unsupported("установка службы"))
@@ -78,7 +86,15 @@ pub fn uninstall() -> PlatformResult<()> {
     {
         windows::uninstall()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::uninstall()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::uninstall()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Err(crate::error::PlatformError::Unsupported("удаление службы"))
     }
@@ -90,7 +106,15 @@ pub fn start() -> PlatformResult<()> {
     {
         windows::start()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::start()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::start()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Err(crate::error::PlatformError::Unsupported("запуск службы"))
     }
@@ -102,7 +126,15 @@ pub fn stop() -> PlatformResult<()> {
     {
         windows::stop()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::stop()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::stop()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Err(crate::error::PlatformError::Unsupported("остановка службы"))
     }
@@ -114,7 +146,15 @@ pub fn status() -> PlatformResult<ServiceStatus> {
     {
         windows::status()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::status()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::status()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Ok(ServiceStatus::NotInstalled)
     }
@@ -146,7 +186,15 @@ pub fn registered_executable() -> PlatformResult<Option<std::path::PathBuf>> {
     {
         windows::registered_executable()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::registered_executable()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::registered_executable()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Ok(None)
     }

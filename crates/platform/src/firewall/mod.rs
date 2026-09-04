@@ -61,10 +61,42 @@ pub fn recover_leftovers() -> PlatformResult<()> {
     {
         windows::recover_leftovers()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::disengage()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::recover_leftovers()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Ok(())
     }
+}
+
+/// Подсети локальной сети, которые открывает `allow_lan`.
+///
+/// Без них исчезнут принтер и сетевые диски, и первое, что сделает
+/// пользователь, — выключит клиент целиком. Список общий для Linux и macOS:
+/// адреса эти заданы стандартом, а не операционной системой. Windows задаёт
+/// то же самое своими средствами — см. `policy`.
+#[cfg(not(windows))]
+pub(crate) fn lan_networks() -> &'static [&'static str] {
+    &[
+        // Частные сети (RFC 1918).
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        // Адреса, назначаемые без DHCP (RFC 3927), — там же живёт и часть
+        // обнаружения устройств в сети.
+        "169.254.0.0/16",
+        // Многоадресная рассылка: ею работает поиск принтеров и колонок.
+        "224.0.0.0/4",
+        // То же самое для IPv6: локальные адреса связи и рассылка.
+        "fe80::/10",
+        "ff00::/8",
+    ]
 }
 
 /// Kill switch с гарантированным снятием.
@@ -142,13 +174,35 @@ impl Drop for KillSwitch {
 
 #[cfg(not(windows))]
 fn engage_rules(rules: &FirewallRules) -> PlatformResult<()> {
-    let _ = rules;
-    Err(crate::error::PlatformError::Unsupported("kill switch"))
+    #[cfg(target_os = "linux")]
+    {
+        linux::engage(rules)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::engage(rules)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = rules;
+        Err(crate::error::PlatformError::Unsupported("kill switch"))
+    }
 }
 
 #[cfg(not(windows))]
 fn disengage_rules() -> PlatformResult<()> {
-    Err(crate::error::PlatformError::Unsupported("kill switch"))
+    #[cfg(target_os = "linux")]
+    {
+        linux::disengage()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::disengage()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(crate::error::PlatformError::Unsupported("kill switch"))
+    }
 }
 
 #[cfg(test)]

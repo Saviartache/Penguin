@@ -65,7 +65,11 @@ pub fn system_resolver() -> Box<dyn FlowOwnerResolver> {
     {
         Box::new(crate::platform::linux::LinuxResolver::new())
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(crate::platform::macos::MacosResolver::new())
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         tracing::warn!("правила по приложениям на этой платформе не поддерживаются");
         Box::new(NoResolver)

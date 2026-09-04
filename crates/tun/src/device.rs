@@ -63,11 +63,13 @@ pub async fn open(config: &TunConfig) -> TunResult<Box<dyn TunDevice>> {
     }
     #[cfg(target_os = "linux")]
     {
-        Ok(Box::new(
-            crate::platform::linux::LinuxTun::open(config).await?,
-        ))
+        Ok(Box::new(crate::platform::linux::open(config).await?))
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Box::new(crate::platform::macos::open(config).await?))
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = config;
         Err(crate::error::TunError::Unsupported)
@@ -98,7 +100,13 @@ pub fn driver_available() -> TunResult<()> {
             Err(crate::error::TunError::TunModuleMissing)
         }
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        // Своего драйвера у macOS нет: utun встроен в ядро. Проверять нечего
+        // — остаются только права, а их спрашивает `privilege`.
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Err(crate::error::TunError::Unsupported)
     }

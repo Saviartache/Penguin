@@ -31,4 +31,10 @@ wintun.workspace = true
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["ioctl", "net"] }
+nix = { workspace = true, features = ["ioctl", "net", "socket", "fs"] }
+libc.workspace = true
+# `AsyncFd` живёт за фичей `net`: адаптер здесь — обычный дескриптор, и ждать
+# его готовности нужно тем же реактором, что и сокеты. `macros` — ради
+# `select!`: закрытие адаптера обязано разбудить того, кто ждёт пакета, иначе
+# договор `TunDevice::close` не выполняется.
+tokio = { workspace = true, features = ["net", "macros"] }

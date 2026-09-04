@@ -2,7 +2,7 @@
 //! процесс.
 //!
 //! Основную работу делает не этот файл, а дескриптор безопасности канала
-//! ([`crate::transport::windows`]): он не даёт чужому процессу даже открыть
+//! (`transport::windows`): он не даёт чужому процессу даже открыть
 //! соединение. Проверка здесь — второй рубеж, и она нужна там, где первого
 //! нет или где он слабее.
 //!
@@ -27,8 +27,6 @@ pub fn check_peer(_stream: &LocalSocketStream) -> IpcResult<()> {
 /// Проверяет, вправе ли собеседник говорить с демоном.
 #[cfg(unix)]
 pub fn check_peer(stream: &LocalSocketStream) -> IpcResult<()> {
-    use interprocess::local_socket::traits::tokio::Stream as _;
-
     let Ok(creds) = stream.peer_creds() else {
         // Система не назвала владельца. Отказываем: неизвестный собеседник у
         // канала, через который выключается kill switch, — не тот случай,

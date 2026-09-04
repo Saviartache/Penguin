@@ -13,6 +13,11 @@
 
 pub mod autostart;
 pub mod build;
+// Часть работы делается системными программами — там, где своего интерфейса у
+// системы нет. Модуль внутренний: наружу видны только действия, а не то,
+// какой командой они сделаны.
+#[cfg(unix)]
+mod command;
 pub mod dns_settings;
 pub mod elevate;
 pub mod error;

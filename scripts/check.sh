@@ -31,6 +31,17 @@ if [[ $FAST -eq 0 ]]; then
     # Фичи не должны быть обязательными: движок обязан собираться без
     # единого протокола, иначе «опционально» на деле не проверено.
     run "build --no-default-features" cargo build -p penguin-engine --no-default-features
+
+    # Платформенный слой написан трижды, и код для чужой системы не проверяется
+    # ничем, кроме такой сборки: иначе ошибка находится у того, кто первым
+    # запустит сборку на той системе. Крейты перечислены поимённо, а не взят
+    # весь workspace: `ring` собирает свою часть на C и требует компилятора для
+    # чужой цели, которого на машине разработчика нет.
+    for TARGET in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu aarch64-apple-darwin; do
+        run "check $TARGET" cargo check --target "$TARGET" --all-targets \
+            -p penguin-platform -p penguin-tun -p penguin-process
+    done
+
     run "doc" env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 fi
 
