@@ -206,6 +206,17 @@ password = "secret"
 sni      = "interop.penguin.test"
 insecure = true'
 
+# UUID и пароль те же, что в `juicity/server.json`. В отличие от Trojan и
+# VLESS, неверный пароль здесь виден: сервер закрывает соединение QUIC с
+# отдельным кодом, и клиент обязан вернуть `AuthRejected`.
+check juicity juicity 'server   = "127.0.0.1:14435"
+uuid     = "b831381d-6324-4d53-ad4f-8cda48b30811"
+password = "secret"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
 # Метод — часть договора с сервером: он же стоит в `singbox/shadowsocks.json`,
 # и разойтись им нельзя, иначе соединение откроется и ничего не передаст.
 check shadowsocks shadowsocks 'server   = "127.0.0.1:18388"

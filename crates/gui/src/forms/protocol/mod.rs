@@ -27,6 +27,7 @@ pub mod anytls;
 pub mod catalog;
 pub mod http;
 pub mod hysteria2;
+pub mod juicity;
 pub mod shadowsocks;
 pub mod socks5;
 pub mod spec;

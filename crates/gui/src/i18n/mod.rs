@@ -203,6 +203,10 @@ pub struct Strings {
     pub bandwidth_down: &'static str,
     /// Не проверять сертификат.
     pub insecure: &'static str,
+    /// Отпечаток цепочки сертификатов.
+    pub chain_fingerprint: &'static str,
+    /// Что вписать в поле отпечатка цепочки.
+    pub chain_fingerprint_example: &'static str,
     /// Не задан адрес.
     pub need_server: &'static str,
     /// Не задан пароль.
@@ -443,6 +447,8 @@ mod tests {
                 table.bandwidth_up,
                 table.bandwidth_down,
                 table.insecure,
+                table.chain_fingerprint,
+                table.chain_fingerprint_example,
                 table.need_server,
                 table.need_password,
                 table.bad_server,

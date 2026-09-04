@@ -1,13 +1,14 @@
 //! TLS: SNI, ALPN, проверка сертификата, закрепление отпечатка, режим без
 //! проверки.
 //!
-//! Четыре способа решить, свой ли сервер на том конце, — по убыванию доверия:
+//! Пять способов решить, свой ли сервер на том конце, — по убыванию доверия:
 //!
 //! | Настройка | Как проверяется | Когда уместно |
 //! |---|---|---|
 //! | ничего | хранилищем сертификатов системы | обычный сервер с настоящим сертификатом |
 //! | `ca` | своим корневым сертификатом | своя инфраструктура |
 //! | `pin_sha256` | отпечатком листового сертификата | самоподписанный сертификат |
+//! | `pin_chain_sha256` | отпечатком всей цепочки | то же, но так считает Juicity |
 //! | `insecure` | никак | отладка, и только |
 //!
 //! `insecure` снимает единственную защиту от подмены сервера: с ним любой,
@@ -80,6 +81,24 @@ pub struct TlsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "pinSHA256")]
     pub pin_sha256: Option<String>,
 
+    /// Отпечаток SHA-256 всей цепочки сертификатов.
+    ///
+    /// Не то же, что [`TlsConfig::pin_sha256`]: там отпечаток одного листового
+    /// сертификата, здесь — свёртка по всей цепочке, какой её прислал сервер.
+    /// Считается так: отпечаток первого сертификата, потом для каждого
+    /// следующего `SHA-256(предыдущая свёртка + отпечаток следующего)`.
+    ///
+    /// Способ придуман Juicity, и других его пользователей нет. Поле лежит
+    /// здесь, а не у него, потому что таблица доверия в проекте одна: способ,
+    /// заведённый в крейте протокола, означал бы, что `insecure` в одном
+    /// месте выключает проверку целиком, а в другом — только цепочку.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "pinned_certchain_sha256"
+    )]
+    pub pin_chain_sha256: Option<String>,
+
     /// Путь к своему корневому сертификату.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ca: Option<String>,
@@ -94,6 +113,9 @@ impl TlsConfig {
         if let Some(pin) = &self.pin_sha256 {
             parse_fingerprint(pin)?;
         }
+        if let Some(pin) = &self.pin_chain_sha256 {
+            parse_fingerprint(pin)?;
+        }
         if let Some(sni) = &self.sni
             && sni.trim().is_empty()
         {
@@ -101,10 +123,16 @@ impl TlsConfig {
                 "SNI задан пустой строкой: либо имя, либо поля нет вовсе",
             ));
         }
-        if self.insecure && self.pin_sha256.is_some() {
+        if self.insecure && (self.pin_sha256.is_some() || self.pin_chain_sha256.is_some()) {
             return Err(TransportError::config(
                 "`insecure` и отпечаток вместе: отпечаток при этом не проверяется, \
                  и настройка обещает защиту, которой нет",
+            ));
+        }
+        if self.pin_sha256.is_some() && self.pin_chain_sha256.is_some() {
+            return Err(TransportError::config(
+                "два отпечатка сразу: проверен будет один, и угадывать какой \
+                 человеку не с чего — оставьте тот, что дал сервер",
             ));
         }
         Ok(())
@@ -199,6 +227,12 @@ pub fn client_config(
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(PinnedCertificate::new(expected, provider)))
             .with_no_client_auth()
+    } else if let Some(pin) = &tls.pin_chain_sha256 {
+        let expected = parse_fingerprint(pin)?;
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinnedChain::new(expected, provider)))
+            .with_no_client_auth()
     } else if let Some(path) = &tls.ca {
         let roots = load_roots(path)?;
         let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(roots)
@@ -252,32 +286,48 @@ pub fn server_name(tls: &TlsConfig, host: &Address) -> TransportResult<ServerNam
     }
 }
 
-/// Разбирает отпечаток: `AB:CD:...` или сплошной шестнадцатеричный ряд.
+/// Разбирает отпечаток: `AB:CD:...`, сплошной ряд или base64.
 ///
 /// Двоеточия принимаются, потому что именно так отпечаток выводят `openssl` и
-/// браузеры, — а человек его оттуда и копирует.
+/// браузеры, — а человек его оттуда и копирует. Base64 принимается потому, что
+/// в этом виде отпечаток цепочки печатает Juicity, и требовать от человека
+/// перевода в другую запись значит требовать сделать это без ошибки.
 fn parse_fingerprint(raw: &str) -> TransportResult<[u8; 32]> {
+    if let Some(bytes) = from_hex(raw) {
+        return Ok(bytes);
+    }
+
+    let decoded =
+        penguin_core::base64::decode_exact(raw.trim(), 32, "отпечаток").map_err(|_| {
+            TransportError::config(
+                "отпечаток SHA-256: нужны 64 шестнадцатеричные цифры или те же 32 байта в base64",
+            )
+        })?;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&decoded);
+    Ok(out)
+}
+
+/// Отпечаток шестнадцатеричным рядом. `None` — запись не эта.
+///
+/// Разделители выбрасываются все, включая `-`: в шестнадцатеричной записи его
+/// ставят вместо двоеточия. В base64 он значащий, поэтому та разбирается из
+/// исходной строки, а не из очищенной.
+fn from_hex(raw: &str) -> Option<[u8; 32]> {
     let cleaned: String = raw
         .chars()
         .filter(|c| !matches!(c, ':' | ' ' | '-'))
         .collect();
     if cleaned.len() != 64 {
-        return Err(TransportError::config(format!(
-            "отпечаток SHA-256 должен быть из 64 шестнадцатеричных цифр, получено {}",
-            cleaned.len()
-        )));
+        return None;
     }
 
     let mut out = [0u8; 32];
     for (index, byte) in out.iter_mut().enumerate() {
-        let pair = cleaned
-            .get(index * 2..index * 2 + 2)
-            .ok_or_else(|| TransportError::config("отпечаток оборван"))?;
-        *byte = u8::from_str_radix(pair, 16).map_err(|_| {
-            TransportError::config(format!("в отпечатке не шестнадцатеричное `{pair}`"))
-        })?;
+        let pair = cleaned.get(index * 2..index * 2 + 2)?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
     }
-    Ok(out)
+    Some(out)
 }
 
 /// Читает корневые сертификаты из PEM-файла.
@@ -334,6 +384,111 @@ impl ServerCertVerifier for PinnedCertificate {
                 "отпечаток сертификата не совпал: ожидался {}, получен {}",
                 hex(&self.expected),
                 hex(actual.as_ref())
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Проверка отпечатком всей цепочки, как её считает Juicity.
+///
+/// От [`PinnedCertificate`] отличается тем, что закрепляет не один сертификат,
+/// а весь ряд, который прислал сервер: замена любого промежуточного меняет
+/// свёртку. Дороже для того, кто перевыпускает сертификаты, и строже к тому,
+/// кто их подменяет.
+#[derive(Debug)]
+struct PinnedChain {
+    expected: [u8; 32],
+    provider: Arc<CryptoProvider>,
+}
+
+impl PinnedChain {
+    fn new(expected: [u8; 32], provider: Arc<CryptoProvider>) -> Self {
+        Self { expected, provider }
+    }
+}
+
+/// Свёртка цепочки: отпечаток первого, дальше отпечаток пары со следующим.
+///
+/// `None` — цепочка пуста. Считать такую нечем, и принимать её тем более.
+fn chain_hash<'a>(chain: impl Iterator<Item = &'a [u8]>) -> Option<[u8; 32]> {
+    let mut folded: Option<[u8; 32]> = None;
+    for cert in chain {
+        let one = digest::digest(&digest::SHA256, cert);
+        let one: [u8; 32] = one.as_ref().try_into().ok()?;
+        folded = Some(match folded {
+            None => one,
+            Some(previous) => {
+                let mut pair = [0u8; 64];
+                pair[..32].copy_from_slice(&previous);
+                pair[32..].copy_from_slice(&one);
+                digest::digest(&digest::SHA256, &pair)
+                    .as_ref()
+                    .try_into()
+                    .ok()?
+            }
+        });
+    }
+    folded
+}
+
+impl ServerCertVerifier for PinnedChain {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let chain =
+            std::iter::once(end_entity.as_ref()).chain(intermediates.iter().map(AsRef::as_ref));
+        let actual = chain_hash(chain).ok_or_else(|| {
+            rustls::Error::General("сервер не прислал ни одного сертификата".into())
+        })?;
+
+        // Сравнение обычное, а не постоянного времени: отпечаток — не секрет,
+        // он лежит в конфигурации открытым текстом.
+        if actual == self.expected {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(format!(
+                "отпечаток цепочки не совпал: ожидался {}, получен {}",
+                hex(&self.expected),
+                hex(&actual)
             )))
         }
     }
@@ -478,6 +633,10 @@ mod tests {
                 pin_sha256: Some("ab".repeat(32)),
                 ..TlsConfig::default()
             },
+            TlsConfig {
+                pin_chain_sha256: Some("cd".repeat(32)),
+                ..TlsConfig::default()
+            },
         ] {
             client_config(&tls, &[ALPN_HTTP11]).expect("собирается");
         }
@@ -529,6 +688,68 @@ mod tests {
         assert!(parse_fingerprint(&"z".repeat(64)).is_err());
         // 63 цифры — на одну меньше, чем нужно.
         assert!(parse_fingerprint(&"a".repeat(63)).is_err());
+    }
+
+    #[test]
+    fn a_fingerprint_in_base64_is_understood_too() {
+        // В этой записи отпечаток цепочки печатает Juicity: требовать от
+        // человека перевода в другую значит требовать сделать это без ошибки.
+        let bytes = [0x9a_u8; 32];
+        let hex_form = "9a".repeat(32);
+        for encoded in [
+            penguin_core::base64::encode(&bytes),
+            penguin_core::base64::encode_url(&bytes),
+        ] {
+            assert_eq!(
+                parse_fingerprint(&encoded).expect("разбирается"),
+                parse_fingerprint(&hex_form).expect("разбирается"),
+                "{encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chain_of_one_hashes_like_a_single_certificate() {
+        // Свёртка начинается с отпечатка первого сертификата: цепочка из
+        // одного и лист совпадают, и это не совпадение, а определение.
+        let cert = b"cert";
+        let folded = chain_hash(std::iter::once(cert.as_slice())).expect("считается");
+        let plain: [u8; 32] = ring::digest::digest(&ring::digest::SHA256, cert)
+            .as_ref()
+            .try_into()
+            .expect("32 байта");
+        assert_eq!(folded, plain);
+    }
+
+    #[test]
+    fn the_order_of_the_chain_is_part_of_the_fingerprint() {
+        // Свёртка складывается по порядку: цепочка, переставленная местами, —
+        // это другая цепочка, и принять её значит не проверить ничего.
+        let first = b"one".as_slice();
+        let second = b"two".as_slice();
+        let straight = chain_hash([first, second].into_iter()).expect("считается");
+        let reversed = chain_hash([second, first].into_iter()).expect("считается");
+        assert_ne!(straight, reversed);
+        assert_ne!(
+            straight,
+            chain_hash(std::iter::once(first)).expect("считается")
+        );
+    }
+
+    #[test]
+    fn an_empty_chain_has_no_fingerprint() {
+        assert!(chain_hash(std::iter::empty()).is_none());
+    }
+
+    #[test]
+    fn two_fingerprints_at_once_are_refused() {
+        // Проверен будет один, и угадывать какой человеку не с чего.
+        let tls = TlsConfig {
+            pin_sha256: Some("ab".repeat(32)),
+            pin_chain_sha256: Some("cd".repeat(32)),
+            ..TlsConfig::default()
+        };
+        assert!(tls.validate().is_err());
     }
 
     #[test]

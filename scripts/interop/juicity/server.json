@@ -1,0 +1,10 @@
+{
+  "listen": ":443",
+  "users": {
+    "b831381d-6324-4d53-ad4f-8cda48b30811": "secret"
+  },
+  "certificate": "/etc/juicity/tls/cert.pem",
+  "private_key": "/etc/juicity/tls/key.pem",
+  "congestion_control": "bbr",
+  "log_level": "info"
+}

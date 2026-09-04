@@ -91,6 +91,8 @@ pub static STRINGS: Strings = Strings {
     bandwidth_up: "Upload",
     bandwidth_down: "Download",
     insecure: "Skip certificate check",
+    chain_fingerprint: "Chain fingerprint",
+    chain_fingerprint_example: "given by the server; replaces chain checking",
     need_server: "Server address is empty",
     need_password: "Password is empty",
     bad_server: "The address must look like example.com:443",
