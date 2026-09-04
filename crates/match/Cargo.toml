@@ -21,7 +21,6 @@ ipnet.workspace = true
 aho-corasick.workspace = true
 regex.workspace = true
 globset.workspace = true
-serde.workspace = true
 maxminddb = { workspace = true, optional = true }
 
 [features]

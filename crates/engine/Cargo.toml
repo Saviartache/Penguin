@@ -25,14 +25,12 @@ penguin-platform.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tokio-util.workspace = true
-futures.workspace = true
 bytes.workspace = true
 # Снимки счётчиков и истории уезжают в интерфейс через канал управления.
 serde.workspace = true
 # Параметры профиля непрозрачны для движка и передаются протоколу как есть.
 serde_json.workspace = true
 arc-swap.workspace = true
-parking_lot.workspace = true
 dashmap.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

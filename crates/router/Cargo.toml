@@ -20,12 +20,10 @@ penguin-config.workspace = true
 penguin-process.workspace = true
 arc-swap.workspace = true
 dashmap.workspace = true
-parking_lot.workspace = true
 serde.workspace = true
 # Правила приходят из конфигурации; тесты собирают их из JSON-литералов.
 serde_json.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [features]
 default = []

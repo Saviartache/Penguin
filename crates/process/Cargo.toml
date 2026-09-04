@@ -15,7 +15,6 @@ workspace = true
 penguin-core.workspace = true
 dashmap.workspace = true
 parking_lot.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 

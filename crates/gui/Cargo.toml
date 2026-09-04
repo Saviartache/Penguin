@@ -51,12 +51,7 @@ iced = { workspace = true, features = [
     "advanced",
 ] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
-futures.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-tracing-appender.workspace = true
 # Разбор подсетей в правилах: `10.0.0.0/8` проверяется до сохранения.
 ipnet.workspace = true

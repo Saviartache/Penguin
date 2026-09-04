@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 penguin-core.workspace = true
-penguin-proto.workspace = true
 # Схема настроек DNS живёт в общем файле конфигурации.
 penguin-config.workspace = true
 async-trait.workspace = true
@@ -25,7 +24,6 @@ rand.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "sync", "time"] }
 parking_lot.workspace = true
 ipnet.workspace = true
-serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

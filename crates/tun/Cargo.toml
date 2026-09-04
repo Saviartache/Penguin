@@ -12,7 +12,6 @@ description = "Виртуальный сетевой интерфейс"
 workspace = true
 
 [dependencies]
-penguin-core.workspace = true
 # Параметры адаптера читаются из общего файла настроек.
 penguin-config.workspace = true
 async-trait.workspace = true

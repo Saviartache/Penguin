@@ -62,14 +62,12 @@ iced = { version = "0.14", default-features = false }
 # --- асинхронность ---
 tokio = { version = "1", default-features = false }
 tokio-util = "0.7"
-futures = "0.3"
 async-trait = "0.1"
 
 # --- транспорт ---
 quinn = { version = "0.11", default-features = false }
 quinn-proto = { version = "0.11", default-features = false }
 rustls = { version = "0.23", default-features = false }
-rustls-pki-types = "1"
 rustls-platform-verifier = "0.5"
 rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false }
@@ -109,7 +107,6 @@ parking_lot = "0.12"
 dashmap = "6"
 arc-swap = "1"
 clap = { version = "4", features = ["derive"] }
-directories = "5"
 interprocess = { version = "2", features = ["tokio"] }
 widestring = "1"
 

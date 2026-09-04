@@ -12,7 +12,6 @@ description = "Маршруты, брандмауэр и служба опера
 workspace = true
 
 [dependencies]
-penguin-core.workspace = true
 ipnet.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true

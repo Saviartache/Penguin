@@ -17,13 +17,13 @@
 
 use std::path::{Path, PathBuf};
 
-use directories::ProjectDirs;
-
 use crate::error::{ConfigError, ConfigResult};
 
-/// Имя каталога и файлов.
-const QUALIFIER: &str = "";
+/// Имя каталога и файлов. Только на Windows: на macOS и Linux у каталогов
+/// пользователя своя, принятая в системе форма имени.
+#[cfg(windows)]
 const ORGANIZATION: &str = "Saviartache";
+#[cfg(windows)]
 const APPLICATION: &str = "Penguin";
 
 /// Имя основного файла настроек.
@@ -53,13 +53,39 @@ impl Paths {
     }
 
     /// Пути в профиле текущего пользователя.
+    ///
+    /// Каталог у каждой системы свой: `%APPDATA%` на Windows,
+    /// `~/Library/Application Support` на macOS, XDG на Linux. `Err` — если
+    /// система не сказала, где профиль: без `HOME` (или `APPDATA`) гадать не
+    /// о чем.
     pub fn user() -> ConfigResult<Self> {
-        let dirs = ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
-            .ok_or(ConfigError::NoConfigDir)?;
-        Ok(Self {
-            config_dir: dirs.config_dir().to_path_buf(),
-            data_dir: dirs.data_dir().to_path_buf(),
-        })
+        #[cfg(windows)]
+        {
+            let root = PathBuf::from(std::env::var_os("APPDATA").ok_or(ConfigError::NoConfigDir)?)
+                .join(ORGANIZATION)
+                .join(APPLICATION);
+            Ok(Self {
+                config_dir: root.join("config"),
+                data_dir: root.join("data"),
+            })
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Настройки и данные в macOS лежат в одном каталоге — отдельного
+            // места под настройки система не заводит.
+            let root = home()?.join("Library/Application Support/Saviartache.Penguin");
+            Ok(Self {
+                config_dir: root.clone(),
+                data_dir: root,
+            })
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            Ok(Self {
+                config_dir: xdg_dir("XDG_CONFIG_HOME", ".config")?.join("penguin"),
+                data_dir: xdg_dir("XDG_DATA_HOME", ".local/share")?.join("penguin"),
+            })
+        }
     }
 
     /// Общий каталог, одинаковый для всех учётных записей.
@@ -134,6 +160,28 @@ impl Paths {
             std::fs::create_dir_all(dir).map_err(|e| ConfigError::io(dir, e))?;
         }
         Ok(())
+    }
+}
+
+/// Домашний каталог текущего пользователя.
+#[cfg(unix)]
+fn home() -> ConfigResult<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .ok_or(ConfigError::NoConfigDir)
+}
+
+/// Каталог XDG: переменная окружения, если она задана абсолютным путём, иначе
+/// умолчание внутри домашнего каталога.
+///
+/// Относительный путь в переменной спецификация велит игнорировать: он
+/// означал бы каталог, зависящий от того, откуда программу запустили.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn xdg_dir(variable: &str, fallback: &str) -> ConfigResult<PathBuf> {
+    match std::env::var_os(variable).map(PathBuf::from) {
+        Some(path) if path.is_absolute() => Ok(path),
+        _ => Ok(home()?.join(fallback)),
     }
 }
 
