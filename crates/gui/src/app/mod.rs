@@ -42,7 +42,7 @@ use iced::{Element, Length, Point, Size, Subscription, Task, Theme, window};
 use uikit::ThemeType;
 use uikit::layout::gap;
 use uikit::widgets::Tabs;
-use uikit::window::{Anchor, Morph, WindowChrome};
+use uikit::window::{Anchor, Frame, Morph, WindowChrome, frame};
 
 pub use self::message::{Message, Screen};
 pub use self::state::State;
@@ -52,9 +52,12 @@ use crate::screens;
 ///
 /// Квадрат с ладонь: панель, строка состояния и кнопка — больше в клиенте,
 /// открытом ради одного нажатия, ничего и не нужно.
+///
+/// Это размер содержимого. Само окно на поле тени рамки больше — размер для
+/// оконной системы и для `Morph` считается через [`frame::outer`].
 pub const COMPACT: Size = Size::new(360.0, 400.0);
 
-/// Размер с раскрытой панелью.
+/// Размер с раскрытой панелью. Как и [`COMPACT`] — без поля тени рамки.
 pub const EXPANDED: Size = Size::new(800.0, 600.0);
 
 /// Отступ от края окна до содержимого.
@@ -111,10 +114,14 @@ impl App {
 
         let app = Self {
             state,
-            chrome: WindowChrome::new(),
-            morph: Morph::new(COMPACT)
+            // Окно в рамке: полоса перетаскивания начинается не с края окна,
+            // а за полем тени.
+            chrome: WindowChrome::new().framed(),
+            // `Morph` двигает окно, а не содержимое, поэтому и размеры у него
+            // оконные — с полем тени.
+            morph: Morph::new(frame::outer(COMPACT))
                 .with_anchor(Anchor::Center)
-                .with_bounds(COMPACT, EXPANDED),
+                .with_bounds(frame::outer(COMPACT), frame::outer(EXPANDED)),
             theme,
             // Размер окна задаёт `window::Settings` при создании (см. [`crate`]
             // `run`), поэтому отдельная команда `resize` до первого кадра
@@ -146,6 +153,10 @@ impl App {
             // пустого места. Кнопки нет совсем — мёртвая зелёная обещала бы
             // действие, которого не будет.
             .without_maximize()
+            // Шапка залита до самого края окна и без своего скругления
+            // нарисовала бы острые верхние углы поверх углов рамки: `iced`
+            // режет только по прямоугольнику.
+            .rounded(frame::RADIUS)
             .extra(
                 // Два кружка одного вида: правая часть шапки — место для
                 // действий над самим окном, и разнокалиберные значки рядом со
@@ -172,11 +183,10 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        container(root)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(uikit::style::container::window_root_seamless as fn(&Theme) -> _)
-            .into()
+        // Рамка кита корнем окна: она же и заливает окно темой — своего
+        // фона содержимому больше не нужно. Окно не разворачивается на весь
+        // экран (`without_maximize`), поэтому углы у него есть всегда.
+        Frame::new(root).into()
     }
 
     /// Тема окна.
@@ -187,7 +197,6 @@ impl App {
     /// Подписки окна.
     pub fn subscription(&self) -> Subscription<Message> {
         let mut streams = vec![
-            crate::ipc::subscription::events(),
             // События окна нужны рамке: без них не работает перетаскивание.
             // Третий аргумент — идентификатор окна: в `iced 0.14` он приезжает
             // сюда, а не в самом `Event::Window`.
@@ -218,6 +227,15 @@ impl App {
                 _ => None,
             }),
         ];
+
+        // Поток событий демона — только когда окно само со службой не возится.
+        // Пока идёт установка или остановка, стучаться некуда: отвечать
+        // некому, а каждая неудачная попытка означает «Служба не отвечает» на
+        // экране — в тот самый момент, когда поверх окна открыт запрос пароля
+        // администратора и человек ещё ничего не успел ввести.
+        if !self.state.connection.is_busy_with_service() {
+            streams.push(crate::ipc::subscription::events());
+        }
 
         // Кадры нужны, только пока что-то движется: окно едет пружиной или
         // печатается заставка. На замершем окне таймер кадров — это разбуженный
@@ -273,11 +291,11 @@ impl App {
     /// Раскрывает или сворачивает панель.
     pub fn toggle_panel(&mut self) {
         self.state.expanded = !self.state.expanded;
-        self.morph.aim(if self.state.expanded {
+        self.morph.aim(frame::outer(if self.state.expanded {
             EXPANDED
         } else {
             COMPACT
-        });
+        }));
     }
 
     /// Переключает тему на следующую.

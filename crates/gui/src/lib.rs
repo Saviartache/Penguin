@@ -56,8 +56,17 @@ pub fn run() -> iced::Result {
     // шрифт называется: дальше его наследует каждый виджет, и ни один экран не
     // задаёт свой (см. [`ui::FONT`]).
     .default_font(ui::FONT)
+    // Корень окна прозрачен: заливку окна и её скруглённые углы рисует
+    // `uikit::window::Frame` в `view`, а не система.
+    .style(|_state, theme: &iced::Theme| iced::theme::Style {
+        background_color: iced::Color::TRANSPARENT,
+        text_color: theme.palette().text,
+    })
     .window(iced::window::Settings {
-        size: app::COMPACT,
+        // Размер — с полем тени рамки: на macOS оно нулевое (тень там
+        // системная), на Windows и Linux в нём лежит тень, которую кит
+        // рисует сам.
+        size: uikit::window::frame::outer(app::COMPACT),
         icon: window_icon(),
         // Размером владеет `Morph`, и владеет им один. Системное
         // растягивание завело бы второй источник размера, и они начали бы
@@ -66,6 +75,20 @@ pub fn run() -> iced::Result {
         // Рамку рисует кит: своя шапка и системная одновременно — это две
         // шапки одна над другой.
         decorations: false,
+        // Вместе с декорациями система забирает у окна и форму: без них оно
+        // прямоугольник с острыми углами. Скругление рисует `Frame`, и
+        // непрозрачное окно показало бы за ним прежний острый угол.
+        transparent: true,
+        // На Wayland оболочка связывает окно с его `.desktop` только по этому
+        // имени: пустое — и в доке вместо иконки безымянный прямоугольник, как
+        // бы окно себя ни рисовало. Строка совпадает с именем файла
+        // `penguin.desktop`, который кладёт `scripts/package.sh`, — иначе
+        // связывать будет нечего.
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "penguin".to_owned(),
+            ..Default::default()
+        },
         ..iced::window::Settings::default()
     })
     .run()
