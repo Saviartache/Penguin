@@ -188,6 +188,11 @@ fn complain(app: &mut App, outcome: &ServiceOutcome) {
         ServiceOutcome::Refused => crate::i18n::s().service_needs_rights.to_owned(),
         ServiceOutcome::Failed(reason) => reason.clone(),
     };
+
+    // И в файл тоже. Журнал в окне живёт до закрытия окна и виден только тому,
+    // кто раскрыл панель, — а причина, по которой служба не поднялась, нужна
+    // как раз потом и не всегда тому же человеку.
+    tracing::error!(%message, "служба не поднялась");
     app.state_mut()
         .connection
         .push_log(penguin_ipc::schema::LogLevel::Error, message);

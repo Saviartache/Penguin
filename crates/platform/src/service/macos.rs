@@ -65,11 +65,20 @@ pub fn start() -> PlatformResult<()> {
         return Err(PlatformError::Service("служба не установлена".to_owned()));
     }
 
-    // Незагруженную службу надо сперва загрузить; уже загруженная ответит
-    // отказом, и это не повод считать запуск неудавшимся.
-    if let Err(err) = command::run(LAUNCHCTL, &["bootstrap", DOMAIN, PLIST_PATH]) {
-        tracing::debug!(?err, "служба уже загружена");
+    // Незагруженную службу надо сперва загрузить. Отказ здесь означает одно из
+    // двух: служба уже загружена — тогда всё в порядке, — или загрузить её не
+    // вышло. Различить их можно только одним способом: посмотреть, загружена
+    // ли она теперь.
+    //
+    // Проверка не для порядка. Без неё настоящий отказ уходил в `debug`, а
+    // следом падал `kickstart` — с невнятным «Could not find service» вместо
+    // причины, по которой launchd не взял описание.
+    if let Err(err) = command::run(LAUNCHCTL, &["bootstrap", DOMAIN, PLIST_PATH])
+        && command::run(LAUNCHCTL, &["print", &target()]).is_err()
+    {
+        return Err(err.into_error(PlatformError::Service, "загрузка службы"));
     }
+
     run(&["kickstart", "-k", &target()])
 }
 

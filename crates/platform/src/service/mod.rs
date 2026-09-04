@@ -180,6 +180,26 @@ pub fn matches_current_executable() -> bool {
     same_file(&registered, &current)
 }
 
+/// Записан ли в описании службы ровно тот файл, который сейчас работает.
+///
+/// Строже, чем [`matches_current_executable`], и намеренно: тот отвечает на
+/// вопрос «та ли это программа» и к записи пути снисходит. Здесь вопрос
+/// другой — в порядке ли само описание.
+///
+/// Разница не умозрительная. Рядом с программой лежит ссылка на неё
+/// (`scripts/package.sh`), и служба, поставленная по ссылке, указывает на файл,
+/// которого после следующей пересборки может не быть. Диспетчер читает
+/// описание буквально, и починить такое можно только переписав его.
+pub fn registered_verbatim() -> bool {
+    let (Ok(Some(registered)), Ok(current)) = (registered_executable(), std::env::current_exe())
+    else {
+        return false;
+    };
+    current
+        .canonicalize()
+        .is_ok_and(|current| registered == current)
+}
+
 /// Путь к файлу, который зарегистрирован службой. `None` — службы нет.
 pub fn registered_executable() -> PlatformResult<Option<std::path::PathBuf>> {
     #[cfg(windows)]

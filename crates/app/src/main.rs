@@ -102,10 +102,12 @@ fn ensure() -> Result<()> {
     // не та программа, которую запустил человек, и рядом с ней может не
     // оказаться ни драйвера, ни настроек. Снаружи это выглядит как «поставил
     // новую версию, а ошибки те же».
-    if status != ServiceStatus::NotInstalled
-        && !penguin_platform::service::matches_current_executable()
-    {
-        println!("Служба указывает на другой файл — переустанавливаю.");
+    //
+    // Не «на ту же программу», а «ровно на этот файл»: диспетчер читает
+    // описание буквально, и ссылка в нём, оставшаяся от прошлой поставки,
+    // указывает на программу лишь до следующей пересборки.
+    if status != ServiceStatus::NotInstalled && !penguin_platform::service::registered_verbatim() {
+        println!("Описание службы устарело — переустанавливаю.");
         penguin_daemon::uninstall()?;
         status = ServiceStatus::NotInstalled;
     }

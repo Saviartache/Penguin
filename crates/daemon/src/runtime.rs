@@ -83,7 +83,15 @@ pub async fn run(config_dir: Option<PathBuf>, cancel: CancellationToken) -> Resu
 /// Ctrl+C.
 pub fn run_foreground(config_dir: Option<PathBuf>, verbose: bool) -> Result<()> {
     crate::logging::init_console(verbose);
+    run_blocking(config_dir)
+}
 
+/// Собирает среду выполнения и крутит демона, пока не придёт сигнал остановки.
+///
+/// Журнал настраивает вызывающий, и это не мелочь: у запуска на переднем плане
+/// есть терминал, а у службы нет — ей писать в файл (см.
+/// [`crate::service::unix`]).
+pub fn run_blocking(config_dir: Option<PathBuf>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
