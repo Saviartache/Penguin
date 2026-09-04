@@ -20,8 +20,10 @@ penguin-proto.workspace = true
 quinn = { workspace = true, features = ["rustls", "runtime-tokio"] }
 quinn-proto.workspace = true
 rustls = { workspace = true, features = ["ring", "std"] }
-rustls-platform-verifier.workspace = true
-rustls-pemfile.workspace = true
+# TLS, срок на рукопожатие и прочее общее для протоколов. Таблица доверия
+# (система, свой корень, отпечаток, никак) была здесь и уехала туда целиком:
+# трём копиям одного `insecure` незачем расходиться (AGENTS.md, правило 1.1.1).
+penguin-transport.workspace = true
 http.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true

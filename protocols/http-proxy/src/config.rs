@@ -2,6 +2,7 @@
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
+use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{HttpProxyError, HttpProxyResult};
@@ -30,33 +31,17 @@ pub struct HttpProxyConfig {
     pub tls: TlsConfig,
 }
 
-/// Настройки TLS.
+/// Настройки TLS кто-то трогал.
 ///
-/// Полей два, а не четыре, как у Hysteria 2: прокси под TLS — это обычный
-/// сервер с обычным сертификатом, и закрепление отпечатка с своим корневым
-/// сертификатом здесь пока никому не понадобилось. Место для них есть — но
-/// заводить поле, которого никто не просил, значит заводить поле, которое
-/// некому проверить.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TlsConfig {
-    /// Имя, подставляемое в TLS вместо адреса прокси.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sni: Option<String>,
-
-    /// Не проверять сертификат.
-    ///
-    /// Снимает единственную защиту от подмены прокси. Держится отдельным
-    /// полем именно затем, чтобы интерфейс мог сказать об этом вслух.
-    #[serde(default)]
-    pub insecure: bool,
-}
-
-impl TlsConfig {
-    /// Настройки TLS кто-то трогал.
-    pub fn is_set(&self) -> bool {
-        self.sni.is_some() || self.insecure
-    }
+/// Свободная функция, а не метод: [`TlsConfig`] общий на весь проект, а
+/// вопрос «выбран ли не тот протокол» — только здешний. У `hysteria2` блок
+/// TLS обязателен, и такая проверка там означала бы обратное.
+fn tls_is_set(tls: &TlsConfig) -> bool {
+    tls.sni.is_some()
+        || tls.insecure
+        || tls.pin_sha256.is_some()
+        || tls.ca.is_some()
+        || !tls.alpn.is_empty()
 }
 
 impl HttpProxyConfig {
@@ -119,13 +104,14 @@ impl HttpProxyConfig {
                 "задан пароль без имени пользователя: в заголовке они идут только парой",
             ));
         }
-        if !secure && self.tls.is_set() {
+        if !secure && tls_is_set(&self.tls) {
             return Err(HttpProxyError::config(
                 "настройки TLS заданы у протокола без TLS: выберите `https`",
             ));
         }
         if secure {
             self.server_name()?;
+            self.tls.validate()?;
         }
         Ok(())
     }

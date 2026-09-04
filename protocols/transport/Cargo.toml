@@ -1,0 +1,39 @@
+[package]
+name = "penguin-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Общий транспорт протоколов: TLS, WebSocket, адреса, сроки"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Крейт уровня протоколов: зависит ровно от того же, от чего они, и о клиенте
+# знает столько же — то есть ничего. Ни одного крейта из `crates/`, кроме
+# `core` и `proto` (AGENTS.md §1).
+penguin-core.workspace = true
+penguin-proto.workspace = true
+
+rustls = { workspace = true, features = ["ring", "std"] }
+rustls-platform-verifier.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+# `ring` уже собран в дереве — его тянет `rustls`. Здесь он нужен ради SHA-1
+# в рукопожатии WebSocket и ради шифров, которыми пользуются протоколы.
+ring.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time"] }
+serde_json.workspace = true

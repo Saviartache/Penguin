@@ -19,6 +19,7 @@ use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::outbound::Outbound;
 use penguin_proto::stream::ProxyStream;
+use penguin_transport::deadline;
 use tokio::net::TcpStream;
 
 use crate::config::Socks5Config;
@@ -68,9 +69,16 @@ impl Socks5Outbound {
     }
 
     /// Открывает соединение до прокси и проходит проверку подлинности.
+    ///
+    /// Срок здесь обязателен: прокси, принявший соединение и замолчавший,
+    /// иначе держал бы поток приложения вечно — а выглядит это как страница,
+    /// которая грузится и не загружается.
     async fn open(&self) -> Result<TcpStream, ProtocolError> {
         let mut io = connect::dial(&*self.dialer, &self.host, self.port).await?;
-        handshake::negotiate(&mut io, self.config.credentials()).await?;
+        deadline::handshake::<_, Socks5Error>("приветствие SOCKS5", async {
+            handshake::negotiate(&mut io, self.config.credentials()).await
+        })
+        .await?;
         Ok(io)
     }
 
@@ -113,7 +121,10 @@ impl Outbound for Socks5Outbound {
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
         let mut io = self.open().await?;
-        handshake::command(&mut io, CMD_CONNECT, target).await?;
+        deadline::handshake::<_, Socks5Error>("команда SOCKS5", async {
+            handshake::command(&mut io, CMD_CONNECT, target).await
+        })
+        .await?;
         Ok(Box::new(io))
     }
 
@@ -130,7 +141,10 @@ impl Outbound for Socks5Outbound {
         // означало бы привязать сокет до того, как выяснилось, что канал
         // вообще дадут. Нули здесь — обычная практика.
         let asked = SocketAddress::ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-        let bound = handshake::command(&mut control, CMD_UDP_ASSOCIATE, &asked).await?;
+        let bound = deadline::handshake::<_, Socks5Error>("команда SOCKS5", async {
+            handshake::command(&mut control, CMD_UDP_ASSOCIATE, &asked).await
+        })
+        .await?;
         let relay = relay_address(&bound, proxy);
 
         let local = SocketAddr::new(

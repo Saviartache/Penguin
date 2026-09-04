@@ -20,6 +20,7 @@ members = [
     "crates/gui",
     "crates/cli",
     "crates/app",
+    "protocols/transport",
     "protocols/hysteria2",
     "protocols/socks5",
     "protocols/http-proxy",
@@ -55,6 +56,7 @@ penguin-ipc      = { path = "crates/ipc" }
 penguin-daemon   = { path = "crates/daemon" }
 penguin-cli      = { path = "crates/cli" }
 penguin-gui      = { path = "crates/gui" }
+penguin-transport = { path = "protocols/transport" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-socks5 = { path = "protocols/socks5" }
 penguin-http-proxy = { path = "protocols/http-proxy" }
@@ -74,6 +76,10 @@ quinn-proto = { version = "0.11", default-features = false }
 rustls = { version = "0.23", default-features = false }
 rustls-platform-verifier = "0.5"
 rustls-pemfile = "2"
+# Уже в дереве: его тянет `rustls` с фичей `ring`. Протоколам он даёт
+# AES-GCM, ChaCha20-Poly1305, HKDF, HMAC и X25519 — то есть почти всю
+# криптографию плана, не добавляя к сборке ничего нового.
+ring = "0.17"
 tokio-rustls = { version = "0.26", default-features = false }
 http = "1"
 h3 = "0.0.8"

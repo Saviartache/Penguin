@@ -20,8 +20,9 @@
 use bytes::Bytes;
 use penguin_core::address::SocketAddress;
 
+use penguin_transport::addr::socks as address;
+
 use crate::error::Socks5Result;
-use crate::frame::address;
 
 /// Длина неизменной части заголовка: два байта резерва и байт дробления.
 const PREFIX: usize = 3;

@@ -50,7 +50,6 @@ pub mod error;
 pub mod factory;
 pub mod outbound;
 pub mod stream;
-pub mod tls;
 
 pub use config::HttpProxyConfig;
 pub use error::{HttpProxyError, HttpProxyResult};
