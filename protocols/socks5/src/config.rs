@@ -6,6 +6,7 @@
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
+use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Socks5Error, Socks5Result};
@@ -28,6 +29,14 @@ pub struct Socks5Config {
     /// В `Debug` не попадает: вывод пишется вручную ниже.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+
+    /// TLS до прокси. Относится только к протоколу `socks5-tls`.
+    ///
+    /// Заворачивается в него **только управляющее соединение**: датаграммы
+    /// `UDP ASSOCIATE` идут мимо, открытым текстом. Это свойство протокола, а
+    /// не недоделка (см. документ крейта), и окно обязано сказать о нём вслух.
+    #[serde(default)]
+    pub tls: TlsConfig,
 
     /// Пускать ли UDP через прокси.
     ///
@@ -72,9 +81,34 @@ impl Socks5Config {
         Some((username, self.password.as_deref().unwrap_or_default()))
     }
 
+    /// Настройки TLS кто-то трогал.
+    ///
+    /// Нужно, чтобы отличить «человек выбрал не тот протокол» от «поля просто
+    /// нет». Блок `tls` в профиле без TLS означает первое, и промолчать здесь
+    /// значило бы отдать пароль в открытую ровно тогда, когда просили обратного.
+    fn tls_is_set(&self) -> bool {
+        let tls = &self.tls;
+        tls.sni.is_some()
+            || tls.insecure
+            || tls.pin_sha256.is_some()
+            || tls.ca.is_some()
+            || !tls.alpn.is_empty()
+    }
+
     /// Проверяет настройки, не устанавливая соединения.
-    pub fn validate(&self) -> Socks5Result<()> {
+    ///
+    /// `secure` — под TLS ли разговор с прокси.
+    pub fn validate(&self, secure: bool) -> Socks5Result<()> {
         self.endpoint()?;
+
+        if !secure && self.tls_is_set() {
+            return Err(Socks5Error::config(
+                "настройки TLS заданы у протокола без TLS: выберите `socks5-tls`",
+            ));
+        }
+        if secure {
+            self.tls.validate()?;
+        }
 
         if self.username.as_deref().is_none_or(str::is_empty)
             && self.password.as_deref().is_some_and(|p| !p.is_empty())
@@ -105,6 +139,7 @@ impl std::fmt::Debug for Socks5Config {
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "<скрыт>"))
             .field("udp", &self.udp)
+            .field("tls", &self.tls)
             .finish()
     }
 }
@@ -120,6 +155,7 @@ mod tests {
             server: server.to_owned(),
             username: None,
             password: None,
+            tls: TlsConfig::default(),
             udp: true,
         }
     }
@@ -159,7 +195,7 @@ mod tests {
     fn a_proxy_without_a_password_needs_no_credentials() {
         assert!(config("127.0.0.1:1080").credentials().is_none());
         config("127.0.0.1:1080")
-            .validate()
+            .validate(false)
             .expect("настройки верны");
     }
 
@@ -172,7 +208,7 @@ mod tests {
             ..config("127.0.0.1:1080")
         };
         assert_eq!(config.credentials(), Some(("penguin", "")));
-        config.validate().expect("настройки верны");
+        config.validate(false).expect("настройки верны");
     }
 
     #[test]
@@ -183,7 +219,18 @@ mod tests {
             password: Some("секрет".to_owned()),
             ..config("127.0.0.1:1080")
         };
-        assert!(config.validate().is_err());
+        assert!(config.validate(false).is_err());
+    }
+
+    #[test]
+    fn tls_settings_in_a_plain_profile_are_refused() {
+        // Иначе человек ставит «не проверять сертификат», видит, что профиль
+        // сохранился, и уверен, что TLS есть, — а пароль и адрес назначения
+        // всё это время уходят открытым текстом.
+        let mut config = config("127.0.0.1:1080");
+        config.tls.insecure = true;
+        assert!(config.validate(false).is_err());
+        config.validate(true).expect("под TLS это законно");
     }
 
     #[test]

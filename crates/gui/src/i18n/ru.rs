@@ -72,6 +72,7 @@ pub static STRINGS: Strings = Strings {
     https_address_example: "proxy.example.com:8443",
     optional_hint: "можно не заполнять",
     proxy_udp: "Пускать UDP через прокси",
+    proxy_udp_plain: "Пускать UDP — мимо TLS, открытым текстом",
     sni: "Имя для TLS",
     obfs: "Обфускация",
     bandwidth_up: "Отдача",

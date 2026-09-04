@@ -253,11 +253,29 @@ mod tests {
     #[test]
     fn a_protocol_without_links_has_no_link_field() {
         // Поле, в которое нечего вставить, — это вопрос, на который нет
-        // ответа. Проверяется описанием: у SOCKS5 ссылки есть, у выдуманного
-        // протокола без схем поля быть не должно.
+        // ответа. Ссылки бывают не у всех: у `socks5-tls` договорённости о
+        // схеме не существует — такой прокси поднимают себе сами.
+        //
+        // Отрисовка обеих форм здесь и проверяется: столбец собирается по
+        // строке, и лишняя строка на месте ненужного поля — это видимая дыра.
         for spec in protocol::ALL {
-            assert!(spec.takes_links(), "`{}` остался без ссылок", spec.id);
+            let draft = Draft::new(spec);
+            assert_eq!(
+                draft.spec().is_some_and(|spec| spec.takes_links()),
+                spec.takes_links(),
+                "`{}`: форма и описание разошлись",
+                spec.id
+            );
+            let _ = view(&State::default(), &draft);
         }
+
+        let with_links = protocol::by_id("socks5").expect("есть");
+        assert!(with_links.takes_links());
+        let without = protocol::by_id("socks5-tls").expect("есть");
+        assert!(
+            !without.takes_links(),
+            "у `socks5-tls` завелась схема ссылок — тогда нужен и разбор"
+        );
     }
 
     #[test]

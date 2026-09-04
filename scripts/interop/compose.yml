@@ -33,6 +33,18 @@ services:
       - "127.0.0.1:11081:1080"
     networks: [interop]
 
+  # TLS перед обычным SOCKS5. Отдельного сервера у `socks5-tls` нет: это тот же
+  # SOCKS5, и обёртку снимает то, что стоит перед ним, — здесь nginx.
+  socks5-tls:
+    image: nginx:alpine
+    volumes:
+      - ./nginx/stream.conf:/etc/nginx/nginx.conf:ro
+      - ./tls:/etc/nginx/tls:ro
+    ports:
+      - "127.0.0.1:11443:1443"
+    depends_on: [socks5]
+    networks: [interop]
+
   http:
     image: vimagick/tinyproxy
     volumes:

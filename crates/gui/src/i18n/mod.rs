@@ -161,6 +161,12 @@ pub struct Strings {
     pub optional_hint: &'static str,
     /// Пускать ли UDP через прокси.
     pub proxy_udp: &'static str,
+    /// То же, но под TLS: датаграммы в него не заворачиваются.
+    ///
+    /// Отдельная подпись, а не примечание рядом: человек, выбравший «SOCKS5
+    /// под TLS», иначе будет считать защищённым то, что не защищено, — а
+    /// каждый запрос DNS уходит именно так.
+    pub proxy_udp_plain: &'static str,
     /// Имя для TLS.
     pub sni: &'static str,
     /// Пароль обфускации.
@@ -386,6 +392,7 @@ mod tests {
                 table.https_address_example,
                 table.optional_hint,
                 table.proxy_udp,
+                table.proxy_udp_plain,
                 table.link_no_port,
                 table.new_server,
                 table.edit_server,
