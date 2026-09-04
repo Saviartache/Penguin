@@ -26,6 +26,7 @@ pub mod elevate;
 pub mod error;
 pub mod firewall;
 pub mod interface;
+pub mod leftovers;
 pub mod privilege;
 pub mod route;
 pub mod service;

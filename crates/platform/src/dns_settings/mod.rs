@@ -82,6 +82,36 @@ impl Drop for DnsOverride {
     }
 }
 
+/// Возвращает настройки, подменённые прошлым запуском.
+///
+/// [`DnsOverride::restore`] здесь не поможет: она возвращает то, что подменила
+/// сама, а список подменённого живёт в памяти процесса, которого больше нет.
+/// Прежние значения при этом сохранены в файле — ровно на этот случай, — и
+/// вернуть их можно только отсюда.
+pub fn recover_leftovers() -> PlatformResult<()> {
+    #[cfg(windows)]
+    {
+        // Нечего возвращать: на Windows DNS подменяется у самого адаптера
+        // тоннеля, и вместе с адаптером подмена исчезает. Пережить процесс она
+        // не может.
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Номер интерфейса не нужен: возвращается `resolv.conf` целиком,
+        // из сохранённой копии.
+        linux::reset(0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::reset()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        Ok(())
+    }
+}
+
 fn set_dns(interface_index: u32, server: IpAddr) -> PlatformResult<()> {
     #[cfg(windows)]
     {
