@@ -125,16 +125,6 @@ pub struct Strings {
     pub add_server: &'static str,
     /// Заголовок окна выбора протокола.
     pub choose_protocol: &'static str,
-    /// Что это за окно — строкой под заголовком.
-    pub choose_protocol_hint: &'static str,
-    /// Чем Hysteria 2 отличается от соседей — строкой в списке выбора.
-    pub hysteria2_summary: &'static str,
-    /// То же про SOCKS5.
-    pub socks5_summary: &'static str,
-    /// То же про HTTP.
-    pub http_summary: &'static str,
-    /// То же про HTTPS.
-    pub https_summary: &'static str,
     /// Протокол профиля этой сборке неизвестен.
     pub protocol_unknown: &'static str,
     /// Новый сервер.
@@ -388,11 +378,6 @@ mod tests {
                 table.managed,
                 table.add_server,
                 table.choose_protocol,
-                table.choose_protocol_hint,
-                table.hysteria2_summary,
-                table.socks5_summary,
-                table.http_summary,
-                table.https_summary,
                 table.protocol_unknown,
                 table.username,
                 table.proxy_address,
