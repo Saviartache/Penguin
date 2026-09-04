@@ -17,8 +17,18 @@ penguin-core.workspace = true
 penguin-proto.workspace = true
 penguin-transport.workspace = true
 
+quinn = { workspace = true, features = ["rustls", "runtime-tokio"] }
+rustls = { workspace = true, features = ["ring", "std"] }
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
 bytes.workspace = true
+rand.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

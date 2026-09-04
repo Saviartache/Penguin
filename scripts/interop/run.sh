@@ -177,6 +177,16 @@ insecure = true'
 
 check http http 'server = "127.0.0.1:18888"'
 
+# UUID и пароль те же, что в `singbox/tuic.json`. Отпечаток по сети не идёт:
+# он выводится из ключевого материала самого рукопожатия TLS.
+check tuic tuic 'server   = "127.0.0.1:14433"
+uuid     = "b831381d-6324-4d53-ad4f-8cda48b30811"
+password = "secret"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
 # UUID тот же, что в `singbox/vless.json`. Проверить его сервер не даст:
 # не узнав, он молча закрывает соединение — как и Trojan.
 check vless vless 'server = "127.0.0.1:14432"

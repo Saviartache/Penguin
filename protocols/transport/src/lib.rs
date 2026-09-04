@@ -23,6 +23,7 @@
 //! ```text
 //!  addr      адрес назначения на проводе: две записи, SOCKS5 и v2ray
 //!  deadline  срок на рукопожатие — иначе молчащий сервер держит поток вечно
+//!  frag      сборка датаграмм, приехавших частями
 //!  error     общие ошибки транспорта и перевод их в язык `proto`
 //!  tls       SNI, ALPN и четыре способа решить, свой ли сервер на том конце
 //!  ws        WebSocket: поток байт, выглядящий обычной веб-страницей
@@ -32,6 +33,7 @@
 pub mod addr;
 pub mod deadline;
 pub mod error;
+pub mod frag;
 pub mod httpupgrade;
 pub mod tls;
 pub mod ws;
