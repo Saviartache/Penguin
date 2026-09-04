@@ -78,6 +78,8 @@ pub static STRINGS: Strings = Strings {
     method: "Encryption method",
     uuid: "UUID",
     security: "Encryption",
+    congestion: "Congestion control",
+    udp_mode: "How UDP travels",
     need_uuid: "Enter the UUID — the server tells its own by it",
     bad_uuid: "Not a UUID: it looks like b831381d-6324-4d53-ad4f-8cda48b30811",
     link_no_uuid: "The link has no UUID",

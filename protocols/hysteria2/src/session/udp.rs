@@ -27,9 +27,9 @@ use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::error::ProtocolError;
 use tokio::sync::{Mutex, mpsc};
 
-use super::reassembly::Reassembler;
 use crate::error::Hysteria2Error;
 use crate::frame::udp;
+use penguin_transport::frag::{Fragment, Reassembler};
 
 /// Сколько принятых датаграмм держать для сессии, которая их не забирает.
 ///
@@ -121,7 +121,18 @@ async fn read_loop(
         };
 
         let session_id = message.session_id;
-        let Some((payload, address)) = reassembler.accept(message) else {
+        let fragment = Fragment {
+            // Номер сессии у Hysteria 2 тридцатидвухбитный, у общего
+            // собирателя шире: тесниться некуда, и разговор о том, чей
+            // номер шире, не нужен.
+            session: u64::from(message.session_id),
+            packet: message.packet_id,
+            count: message.fragment_count,
+            index: message.fragment_id,
+            address: message.address,
+            payload: message.payload,
+        };
+        let Some((payload, address)) = reassembler.accept(fragment) else {
             continue;
         };
 

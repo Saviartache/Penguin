@@ -1,0 +1,25 @@
+{
+  "log": { "level": "warn" },
+  "inbounds": [
+    {
+      "type": "tuic",
+      "listen": "::",
+      "listen_port": 443,
+      "users": [
+        {
+          "name": "penguin",
+          "uuid": "b831381d-6324-4d53-ad4f-8cda48b30811",
+          "password": "secret"
+        }
+      ],
+      "congestion_control": "bbr",
+      "tls": {
+        "enabled": true,
+        "alpn": ["h3"],
+        "certificate_path": "/etc/sing-box/tls/cert.pem",
+        "key_path": "/etc/sing-box/tls/key.pem"
+      }
+    }
+  ],
+  "outbounds": [{ "type": "direct" }]
+}

@@ -177,6 +177,10 @@ pub struct Strings {
     pub uuid: &'static str,
     /// Чем шифруется соединение до сервера.
     pub security: &'static str,
+    /// Управление перегрузкой у QUIC.
+    pub congestion: &'static str,
+    /// Чем едут датаграммы.
+    pub udp_mode: &'static str,
     /// Не задан UUID.
     pub need_uuid: &'static str,
     /// Значение не разбирается как UUID.
@@ -426,6 +430,8 @@ mod tests {
                 table.method,
                 table.uuid,
                 table.security,
+                table.congestion,
+                table.udp_mode,
                 table.need_uuid,
                 table.bad_uuid,
                 table.link_no_uuid,

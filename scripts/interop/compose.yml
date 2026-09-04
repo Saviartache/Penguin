@@ -65,6 +65,16 @@ services:
       - "127.0.0.1:14431:443"
     networks: [interop]
 
+  tuic:
+    image: ghcr.io/sagernet/sing-box
+    command: run -c /etc/sing-box/config.json
+    volumes:
+      - ./singbox/tuic.json:/etc/sing-box/config.json:ro
+      - ./tls:/etc/sing-box/tls:ro
+    ports:
+      - "127.0.0.1:14433:443/udp"
+    networks: [interop]
+
   vless:
     image: ghcr.io/sagernet/sing-box
     command: run -c /etc/sing-box/config.json

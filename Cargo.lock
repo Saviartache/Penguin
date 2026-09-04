@@ -3470,6 +3470,7 @@ dependencies = [
  "penguin-shadowsocks",
  "penguin-socks5",
  "penguin-trojan",
+ "penguin-tuic",
  "penguin-tun",
  "penguin-vless",
  "serde",
@@ -3729,13 +3730,19 @@ dependencies = [
 name = "penguin-tuic"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
+ "parking_lot",
  "penguin-core",
  "penguin-proto",
  "penguin-transport",
+ "quinn",
+ "rand 0.8.8",
+ "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 
