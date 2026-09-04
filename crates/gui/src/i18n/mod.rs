@@ -173,6 +173,16 @@ pub struct Strings {
     pub transport: &'static str,
     /// Метод шифрования.
     pub method: &'static str,
+    /// UUID пользователя.
+    pub uuid: &'static str,
+    /// Чем шифруется соединение до сервера.
+    pub security: &'static str,
+    /// Не задан UUID.
+    pub need_uuid: &'static str,
+    /// Значение не разбирается как UUID.
+    pub bad_uuid: &'static str,
+    /// В ссылке нет UUID.
+    pub link_no_uuid: &'static str,
     /// Не задан метод шифрования.
     pub need_method: &'static str,
     /// Путь запроса у переносов поверх HTTP.
@@ -414,6 +424,11 @@ mod tests {
                 table.sni,
                 table.transport,
                 table.method,
+                table.uuid,
+                table.security,
+                table.need_uuid,
+                table.bad_uuid,
+                table.link_no_uuid,
                 table.need_method,
                 table.path,
                 table.path_example,

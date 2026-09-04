@@ -450,14 +450,44 @@ mod tests {
         );
     }
 
+    /// Годное значение для обязательного поля по его имени.
+    ///
+    /// Таблица, а не выдумка на месте: у поля бывает проверка, и случайная
+    /// строка её не пройдёт. Пустая строка означает «образца нет» — и тест
+    /// ниже на этом падает, чтобы новый протокол с новым обязательным полем
+    /// не проехал молча.
+    fn sample(key: &str) -> &'static str {
+        match key {
+            "server" => "example.com:443",
+            "password" => "секрет",
+            "uuid" => "b831381d-6324-4d53-ad4f-8cda48b30811",
+            _ => "",
+        }
+    }
+
     #[test]
     fn every_protocol_makes_a_profile_of_its_own_name() {
         // Иначе выбор протокола ничего не решает: сохранится всё равно первый.
         for spec in protocol::ALL {
             let mut draft = Draft::new(spec);
-            draft.set_text("server", "example.com:443".to_owned());
-            // Единственное обязательное поле сверх адреса — пароль Hysteria 2.
-            draft.set_text("password", "секрет".to_owned());
+
+            for field in spec.fields {
+                if field.required.is_none() || field.is_flag() {
+                    continue;
+                }
+                // Поле выбора заполнено умолчанием из описания.
+                if field.is_choice() {
+                    continue;
+                }
+                let value = sample(field.key);
+                assert!(
+                    !value.is_empty(),
+                    "`{}`: обязательное поле `{}` без образца — допишите его в `sample`",
+                    spec.id,
+                    field.key
+                );
+                draft.set_text(field.key, value.to_owned());
+            }
 
             let profile = draft.to_profile().expect("профиль собирается");
             assert_eq!(profile.outbound.protocol, spec.id);
@@ -690,7 +720,7 @@ mod tests {
         // Настройки мог написать человек или прислать новая версия. Правка
         // имени не должна стирать то, чего окно не понимает.
         let params = json!({ "server": "example.com:443", "reality": { "key": "x" } });
-        let profile = Profile::new("x", "Чужой", RawOutbound::new("vless", params.clone()));
+        let profile = Profile::new("x", "Чужой", RawOutbound::new("телепатия", params.clone()));
 
         let mut draft = Draft::from_profile(&profile);
         assert!(draft.spec().is_none(), "протокол не должен опознаться");
@@ -699,7 +729,7 @@ mod tests {
 
         let saved = draft.to_profile().expect("профиль собирается");
         assert_eq!(saved.name, "Переименован");
-        assert_eq!(saved.outbound.protocol, "vless");
+        assert_eq!(saved.outbound.protocol, "телепатия");
         assert_eq!(saved.outbound.params, params);
     }
 

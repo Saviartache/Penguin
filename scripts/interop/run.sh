@@ -177,6 +177,15 @@ insecure = true'
 
 check http http 'server = "127.0.0.1:18888"'
 
+# UUID тот же, что в `singbox/vless.json`. Проверить его сервер не даст:
+# не узнав, он молча закрывает соединение — как и Trojan.
+check vless vless 'server = "127.0.0.1:14432"
+uuid   = "b831381d-6324-4d53-ad4f-8cda48b30811"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
 # Метод — часть договора с сервером: он же стоит в `singbox/shadowsocks.json`,
 # и разойтись им нельзя, иначе соединение откроется и ничего не передаст.
 check shadowsocks shadowsocks 'server   = "127.0.0.1:18388"

@@ -54,6 +54,18 @@ impl Uuid {
     }
 }
 
+impl Default for Uuid {
+    /// Нули, то есть «не задан».
+    ///
+    /// Не «любой пользователь»: протоколы, у которых UUID — единственные
+    /// учётные данные, такое значение отвергают с объяснением. Умолчание
+    /// нужно затем, чтобы конфигурацию можно было собрать по частям, а не
+    /// затем, чтобы с ним подключаться.
+    fn default() -> Self {
+        Self::nil()
+    }
+}
+
 impl FromStr for Uuid {
     type Err = CoreError;
 
@@ -226,6 +238,13 @@ mod tests {
                 .parse::<Uuid>()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn the_default_is_the_nil_uuid() {
+        // Оно означает «не задан», и протоколы обязаны его отвергать.
+        assert_eq!(Uuid::default(), Uuid::nil());
+        assert!(Uuid::default().is_nil());
     }
 
     #[test]

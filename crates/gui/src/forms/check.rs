@@ -10,6 +10,7 @@
 //! опечатку в поле до того, как человек нажмёт «Сохранить», а не вместо него.
 
 use penguin_core::endpoint::ServerEndpoint;
+use penguin_core::uuid::Uuid;
 
 /// Адрес сервера: `example.com:443`, `[2001:db8::1]:443`, `host:20000-30000`.
 ///
@@ -20,6 +21,16 @@ pub fn server_address(raw: &str) -> Result<(), String> {
     raw.parse::<ServerEndpoint>()
         .map(|_| ())
         .map_err(|_| crate::i18n::s().bad_server.to_owned())
+}
+
+/// UUID: `b831381d-6324-4d53-ad4f-8cda48b30811`.
+///
+/// В это поле вставляют пароль — обычная ошибка, и ответ на неё должен быть
+/// «это не UUID», а не молчание до первой попытки подключиться.
+pub fn uuid(raw: &str) -> Result<(), String> {
+    raw.parse::<Uuid>()
+        .map(|_| ())
+        .map_err(|_| crate::i18n::s().bad_uuid.to_owned())
 }
 
 #[cfg(test)]
@@ -44,6 +55,25 @@ mod tests {
         assert!(server_address("example.com:абв").is_err());
         assert!(server_address("просто-текст").is_err());
         assert!(server_address("").is_err());
+    }
+
+    #[test]
+    fn a_uuid_is_checked_the_way_the_protocols_check_it() {
+        uuid("b831381d-6324-4d53-ad4f-8cda48b30811").expect("канонический вид");
+        uuid("b831381d63244d53ad4f8cda48b30811").expect("без дефисов");
+        uuid("{b831381d-6324-4d53-ad4f-8cda48b30811}").expect("в скобках");
+    }
+
+    #[test]
+    fn a_password_in_the_uuid_field_is_reported() {
+        // Самая частая ошибка: вставили не то. Молчание здесь означало бы
+        // профиль, который сохраняется и не подключается.
+        assert!(uuid("просто-пароль").is_err());
+        assert!(uuid("").is_err());
+        assert_eq!(
+            uuid("не то").expect_err("не разбирается"),
+            crate::i18n::s().bad_uuid
+        );
     }
 
     #[test]

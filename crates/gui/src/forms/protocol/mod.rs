@@ -30,6 +30,7 @@ pub mod shadowsocks;
 pub mod socks5;
 pub mod spec;
 pub mod trojan;
+pub mod vless;
 
 pub use catalog::{ALL, DEFAULT, by_id, by_scheme};
 pub use spec::{FieldSpec, ProtocolSpec};

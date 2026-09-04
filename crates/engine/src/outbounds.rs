@@ -180,6 +180,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "hysteria2" => &["hysteria2"],
         "trojan" => &["trojan"],
         "shadowsocks" => &["shadowsocks"],
+        "vless" => &["vless"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         // Одна фича, два имени в настройках.
@@ -201,6 +202,9 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     #[cfg(feature = "shadowsocks")]
     registry.register(Arc::new(penguin_shadowsocks::ShadowsocksFactory::new()));
+
+    #[cfg(feature = "vless")]
+    registry.register(Arc::new(penguin_vless::VlessFactory::new()));
 
     // Две записи из одного крейта: `socks5` и `socks5-tls`. Под TLS не видны
     // ни имя сервера назначения, ни пароль — а без TLS видно и то и другое.

@@ -331,7 +331,7 @@ mod tests {
         let profile = Profile::new(
             "чужой",
             "Чужой",
-            RawOutbound::new("vless", json!({ "server": "example.com:443" })),
+            RawOutbound::new("телепатия", json!({ "server": "example.com:443" })),
         );
         let draft = Draft::from_profile(&profile);
         assert!(draft.fields().is_empty());
