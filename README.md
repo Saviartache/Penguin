@@ -53,8 +53,15 @@
 | **Язык** | ![Rust](https://img.shields.io/badge/Rust-1.98-000000?logo=rust&logoColor=white) ![Edition](https://img.shields.io/badge/edition-2024-000000?logo=rust&logoColor=white) |
 | **Протокол** | ![Hysteria 2](https://img.shields.io/badge/Hysteria%202-6f42c1) |
 | **Транспорт** | ![quinn](https://img.shields.io/badge/quinn-1f6feb) ![rustls](https://img.shields.io/badge/rustls-1f6feb) ![h3](https://img.shields.io/badge/h3-1f6feb) |
-| **Сеть** | ![smoltcp](https://img.shields.io/badge/smoltcp-0a7c5a) ![wintun](https://img.shields.io/badge/wintun-0a7c5a) ![utun](https://img.shields.io/badge/utun-0a7c5a) ![tun](https://img.shields.io/badge/%2Fdev%2Fnet%2Ftun-0a7c5a) |
-| **DNS** | ![hickory-proto](https://img.shields.io/badge/hickory--proto-0a7c5a) |
+| **Стек TCP/IP** | ![smoltcp](https://img.shields.io/badge/smoltcp-0a7c5a) |
+| **Адаптер** | ![wintun](https://img.shields.io/badge/wintun-0a7c5a) ![utun](https://img.shields.io/badge/utun-0a7c5a) ![/dev/net/tun](https://img.shields.io/badge/%2Fdev%2Fnet%2Ftun-0a7c5a) |
+| **Маршруты** | ![IP Helper](https://img.shields.io/badge/IP%20Helper-0a7c5a) ![PF_ROUTE](https://img.shields.io/badge/PF__ROUTE-0a7c5a) ![netlink](https://img.shields.io/badge/netlink-0a7c5a) |
+| **Kill switch** | ![Брандмауэр Windows](https://img.shields.io/badge/%D0%B1%D1%80%D0%B0%D0%BD%D0%B4%D0%BC%D0%B0%D1%83%D1%8D%D1%80%20Windows-b3261e) ![pf](https://img.shields.io/badge/pf-b3261e) ![nftables](https://img.shields.io/badge/nftables-b3261e) |
+| **DNS** | ![hickory-proto](https://img.shields.io/badge/hickory--proto-0a7c5a) ![netsh](https://img.shields.io/badge/netsh-0a7c5a) ![networksetup](https://img.shields.io/badge/networksetup-0a7c5a) ![resolvectl](https://img.shields.io/badge/resolvectl-0a7c5a) |
+| **Служба** | ![SCM](https://img.shields.io/badge/SCM-6f42c1) ![launchd](https://img.shields.io/badge/launchd-6f42c1) ![systemd](https://img.shields.io/badge/systemd-6f42c1) |
+| **Права** | ![UAC](https://img.shields.io/badge/UAC-6f42c1) ![Authorization Services](https://img.shields.io/badge/Authorization%20Services-6f42c1) ![polkit](https://img.shields.io/badge/polkit-6f42c1) |
+| **Канал управления** | ![именованный канал](https://img.shields.io/badge/%D0%B8%D0%BC%D0%B5%D0%BD%D0%BE%D0%B2%D0%B0%D0%BD%D0%BD%D1%8B%D0%B9%20%D0%BA%D0%B0%D0%BD%D0%B0%D0%BB-1f6feb) ![unix socket](https://img.shields.io/badge/unix%20socket-1f6feb) ![interprocess](https://img.shields.io/badge/interprocess-1f6feb) |
+| **Системный слой** | ![windows-rs](https://img.shields.io/badge/windows--rs-0078D6) ![nix](https://img.shields.io/badge/nix-4b8bbe) ![libc](https://img.shields.io/badge/libc-4b8bbe) |
 | **Асинхронность** | ![tokio](https://img.shields.io/badge/tokio-c04b2f) |
 | **Интерфейс** | ![iced](https://img.shields.io/badge/iced%200.14-4b8bbe) ![clap](https://img.shields.io/badge/clap-4b8bbe) |
 | **Платформа** | ![Windows](https://img.shields.io/badge/Windows%20x64-0078D6?logo=windows&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black) |
