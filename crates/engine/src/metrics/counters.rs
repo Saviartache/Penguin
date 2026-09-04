@@ -85,7 +85,7 @@ impl Metrics {
                 traffic: entry.value().snapshot(),
             })
             .collect();
-        rows.sort_by(|a, b| b.traffic.total().cmp(&a.traffic.total()));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.traffic.total()));
         rows
     }
 

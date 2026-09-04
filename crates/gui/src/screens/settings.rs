@@ -66,13 +66,13 @@ fn panel(state: &State) -> Element<'_, Message> {
                 state,
                 strings.autostart,
                 state.config.app.autostart,
-                SettingsMessage::AutostartToggled,
+                SettingsMessage::Autostart,
             ),
             switch(
                 state,
                 strings.autoconnect,
                 state.config.app.autoconnect,
-                SettingsMessage::AutoconnectToggled,
+                SettingsMessage::Autoconnect,
             ),
         ],
     );
@@ -85,13 +85,13 @@ fn panel(state: &State) -> Element<'_, Message> {
                 state,
                 strings.kill_switch,
                 state.config.network.kill_switch,
-                SettingsMessage::KillSwitchToggled,
+                SettingsMessage::KillSwitch,
             ),
             switch(
                 state,
                 strings.allow_lan,
                 state.config.network.allow_lan,
-                SettingsMessage::AllowLanToggled,
+                SettingsMessage::AllowLan,
             ),
         ],
     );
@@ -256,8 +256,10 @@ mod tests {
     fn nothing_here_waits_for_saving() {
         // Переключатели уезжают демону сразу, и «Сохранить» на этой вкладке
         // означала бы, что щелчок сам по себе ничего не сделал.
-        let mut state = State::default();
-        state.dirty = true;
+        let state = State {
+            dirty: true,
+            ..State::default()
+        };
         let _ = view(&state);
     }
 

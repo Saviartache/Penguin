@@ -33,6 +33,10 @@ pub enum PlatformError {
     #[error("настройки DNS: {0}")]
     DnsSettings(String),
 
+    /// Не удалось показать окно выбора файла.
+    #[error("окно выбора файла: {0}")]
+    Dialog(String),
+
     /// Не удалось управлять службой.
     #[error("служба: {0}")]
     Service(String),

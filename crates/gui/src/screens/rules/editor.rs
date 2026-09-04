@@ -14,12 +14,19 @@
 //! Приложения приходят от службы: у окна нет прав, чтобы узнать путь чужого
 //! процесса, а без пути правило не написать — по имени файла его писать можно,
 //! но небезопасно.
+//!
+//! Список от службы — только про **запущенное**, и этого мало: правило пишут и
+//! для игры, в которую сегодня не играли, и для обновлятора, который
+//! просыпается сам раз в неделю. Их показывают файлом, через системное окно
+//! выбора, и выбранное встаёт в тот же список первой строкой: отметка, которой
+//! не видно, читается как «не сработало».
 
 use iced::Element;
+use iced::theme::Palette;
 use penguin_ipc::schema::AppInfo;
 use uikit::layout::{Flex, gap, grow};
 use uikit::style::tokens::type_scale;
-use uikit::widgets::{Checkbox, Modal, Select, TextInput};
+use uikit::widgets::{ButtonVariant, Checkbox, Modal, Select, TextInput};
 
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
@@ -102,16 +109,36 @@ pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     modal.build().into()
 }
 
-/// Список запущенных приложений с отметками.
+/// Список приложений с отметками и кнопкой выбора файла.
 fn apps<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     let palette = &state.palette;
     let split = &state.split_tunnel;
 
-    let search = TextInput::new(crate::i18n::s().app_search, &split.app_search)
-        .on_input(|value| Message::SplitTunnel(SplitTunnelMessage::AppSearchChanged(value)))
+    // Кнопка рядом с поиском, а не под списком: нажимают её ровно тогда, когда
+    // поиск ничего не нашёл, — и рука уже здесь. Пока системное окно открыто,
+    // нажимать нечего: второе такое же означало бы два ответа на один вопрос.
+    let mut pick = ui::button(ButtonVariant::Secondary, crate::i18n::s().pick_app);
+    if !split.picking {
+        pick = pick.on_press(Message::SplitTunnel(SplitTunnelMessage::AppPickRequested));
+    }
+
+    let search = Flex::row()
+        .push(
+            TextInput::new(crate::i18n::s().app_search, &split.app_search)
+                .on_input(|value| Message::SplitTunnel(SplitTunnelMessage::AppSearchChanged(value)))
+                .build(),
+        )
+        .push_auto(pick)
+        .gap(gap::SM)
+        .align(iced::Alignment::Center)
         .build();
 
-    let shown = filter(&split.running_apps, &split.app_search);
+    // Выбранное файлом собирается здесь и живёт только эту отрисовку: списка,
+    // в котором оно лежало бы вместе с запущенным, нет — правило и есть такой
+    // список.
+    let picked = picked_apps(&split.running_apps, &draft.processes);
+    let mut shown = filter(&picked, &split.app_search);
+    shown.extend(filter(&split.running_apps, &split.app_search));
 
     let list: Element<'_, Message> = if shown.is_empty() {
         // Пустой список без объяснения читается как «сломалось». Причин ровно
@@ -125,7 +152,7 @@ fn apps<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     } else {
         let rows = shown
             .into_iter()
-            .map(|app| row(state, app, draft.has_process(&app.path)))
+            .map(|app| row(palette, app, draft.has_process(&app.path)))
             .collect::<Vec<_>>();
 
         ui::scroll_box(Flex::col().extend(rows).gap(gap::XS).build(), LIST_HEIGHT)
@@ -139,7 +166,11 @@ fn apps<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
 }
 
 /// Одна строка списка приложений.
-fn row<'a>(state: &'a State, app: &'a AppInfo, checked: bool) -> Element<'a, Message> {
+///
+/// У приложения ничего не занимает: строка переживает список, из которого её
+/// собрали, — а список выбранного файлом собирается на каждой отрисовке
+/// заново.
+fn row<'a>(palette: &Palette, app: &AppInfo, checked: bool) -> Element<'a, Message> {
     let path = app.path.clone();
 
     Flex::row()
@@ -151,7 +182,7 @@ fn row<'a>(state: &'a State, app: &'a AppInfo, checked: bool) -> Element<'a, Mes
         // серединой: у путей внутри пакетов она из машинных
         // идентификаторов, а концы — как раз то, по чему приложение и узнают.
         .push_auto(ui::faint(
-            &state.palette,
+            palette,
             shorten(&app.path, PATH_WIDTH),
             type_scale::MICRO,
         ))
@@ -160,26 +191,57 @@ fn row<'a>(state: &'a State, app: &'a AppInfo, checked: bool) -> Element<'a, Mes
         .build()
 }
 
-/// Что из вписанного не удалось опознать.
+/// Что пошло не так — строкой под формой.
 ///
-/// Показывается сразу, а не по нажатию: молча выбросить непонятое нельзя —
-/// правило соберётся, но не тем, чего ждали, и разбираться человек будет уже
-/// по последствиям.
+/// Бед две, и обе показываются сразу, а не по нажатию. Молча выбросить
+/// непонятое нельзя: правило соберётся, но не тем, чего ждали, и разбираться
+/// человек будет уже по последствиям. Не открывшееся окно выбора — то же
+/// самое: без строки о нём кнопка выглядит сломанной.
 fn problem<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
+    let palette = &state.palette;
+    let mut lines: Vec<Element<'a, Message>> = Vec::new();
+
+    if let Some(reason) = state.split_tunnel.pick_error.as_ref() {
+        lines.push(ui::muted(palette, reason, type_scale::MICRO));
+    }
+
     let unknown = draft.unknown();
-    if unknown.is_empty() {
+    if !unknown.is_empty() {
+        lines.push(ui::muted(
+            palette,
+            format!(
+                "{}: {}",
+                crate::i18n::s().not_recognised,
+                unknown.join(", ")
+            ),
+            type_scale::MICRO,
+        ));
+    }
+
+    if lines.is_empty() {
         return ui::spring();
     }
 
-    ui::muted(
-        &state.palette,
-        format!(
-            "{}: {}",
-            crate::i18n::s().not_recognised,
-            unknown.join(", ")
-        ),
-        type_scale::MICRO,
-    )
+    Flex::col().extend(lines).gap(gap::XS).build()
+}
+
+/// Отмеченные приложения, которых нет среди запущенных.
+///
+/// Показанная файлом программа обычно не запущена, и в списке от службы её
+/// нет. Отметка, которой не видно, читается как «не сработало», и человек
+/// показывает файл второй раз; поэтому выбранное встаёт в тот же список,
+/// снимается тем же флажком и стоит первым — чтобы его было видно сразу.
+pub fn picked_apps(running: &[AppInfo], chosen: &[String]) -> Vec<AppInfo> {
+    chosen
+        .iter()
+        .filter(|path| !running.iter().any(|app| &app.path == *path))
+        .map(|path| AppInfo {
+            name: penguin_core::path::file_name(path).to_owned(),
+            path: path.clone(),
+            // Ни одной запущенной копии — про это и говорит ноль.
+            instances: 0,
+        })
+        .collect()
 }
 
 /// Выбрасывает середину пути, оставляя начало и конец.
@@ -334,6 +396,65 @@ mod tests {
         };
         assert_eq!(draft.unknown(), ["???"]);
         let _ = view(&State::default(), &draft);
+    }
+
+    #[test]
+    fn a_program_chosen_by_file_joins_the_list() {
+        // Она не запущена, и в списке от службы её нет. Отметка, которой не
+        // видно, читается как «не сработало».
+        let running = apps_list();
+        let chosen = ["c:/games/doom/doom.exe".to_owned()];
+
+        let picked = picked_apps(&running, &chosen);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].path, chosen[0]);
+        assert_eq!(picked[0].name, "doom.exe", "имя файла взято не из пути");
+        assert_eq!(picked[0].instances, 0, "не запущено ни одной копии");
+    }
+
+    #[test]
+    fn a_running_program_is_not_listed_twice() {
+        // Тот же файл можно и отметить в списке, и показать через окно
+        // выбора: две одинаковые строки означали бы, что одна из них лишняя.
+        let running = apps_list();
+        let chosen = [running[1].path.clone()];
+
+        assert!(picked_apps(&running, &chosen).is_empty());
+    }
+
+    #[test]
+    fn the_chosen_program_comes_first() {
+        // Ради этого список и собирается заново: только что выбранное должно
+        // быть видно без прокрутки полутора сотен строк.
+        let mut state = State::default();
+        state.split_tunnel.running_apps = apps_list();
+
+        let mut draft = Draft::default();
+        draft.toggle_process("c:/games/doom/doom.exe", true);
+
+        let picked = picked_apps(&state.split_tunnel.running_apps, &draft.processes);
+        let mut shown = filter(&picked, "");
+        shown.extend(filter(&state.split_tunnel.running_apps, ""));
+
+        assert_eq!(shown[0].path, "c:/games/doom/doom.exe");
+        assert_eq!(shown.len(), 3);
+        let _ = view(&state, &draft);
+    }
+
+    #[test]
+    fn the_button_goes_quiet_while_the_window_is_open() {
+        // Второе системное окно поверх первого — два ответа на один вопрос.
+        let mut state = State::default();
+        state.split_tunnel.picking = true;
+        let _ = view(&state, &Draft::default());
+    }
+
+    #[test]
+    fn a_window_that_did_not_open_says_so() {
+        // Без строки о беде кнопка выглядит сломанной.
+        let mut state = State::default();
+        state.split_tunnel.pick_error = Some("Не удалось открыть окно выбора".to_owned());
+        let _ = view(&state, &Draft::default());
     }
 
     #[test]

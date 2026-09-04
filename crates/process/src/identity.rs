@@ -4,6 +4,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+// Приведение пути живёт в `core`: тот же путь приходит и от системы, и из
+// файла настроек, и из окна выбора файла в интерфейсе, — а тот про процессы
+// ничего не знает и знать не должен.
+pub use penguin_core::path::{file_name, normalize as normalize_path};
+
 /// Кто владеет соединением.
 ///
 /// Поля в `Arc`, потому что личность одного процесса раздаётся сотням
@@ -45,61 +50,17 @@ impl ProcessIdentity {
     }
 }
 
-/// Приводит путь к виду, в котором его сравнивают правила.
-///
-/// На Windows — нижний регистр и прямые слэши. Без этого один и тот же файл
-/// не совпадает сам с собой: система выдаёт `C:\Program Files\...` из одного
-/// вызова и `c:/program files/...` из другого, а правило пользователь
-/// записывает третьим способом.
-///
-/// На остальных системах путь чувствителен к регистру и не трогается: два
-/// файла с именами, различающимися регистром, — это два разных файла.
-pub fn normalize_path(path: &str) -> String {
-    #[cfg(windows)]
-    {
-        path.trim().replace('\\', "/").to_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        path.trim().to_owned()
-    }
-}
-
-/// Имя файла из нормализованного пути.
-pub fn file_name(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn extracts_the_file_name() {
-        assert_eq!(file_name("c:/program files/app/app.exe"), "app.exe");
-        assert_eq!(file_name("/usr/bin/curl"), "curl");
-        assert_eq!(file_name("app.exe"), "app.exe");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_paths_are_case_and_separator_insensitive() {
-        // Система выдаёт путь то так, то эдак, а пользователь пишет третьим
-        // способом. Все три обязаны совпасть.
-        let from_api = normalize_path(r"C:\Program Files\App\App.exe");
-        let from_config = normalize_path("c:/program files/app/app.exe");
-        assert_eq!(from_api, from_config);
-        assert_eq!(from_api, "c:/program files/app/app.exe");
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn unix_paths_keep_their_case() {
-        // Два файла, различающихся регистром, — это два разных файла.
-        assert_ne!(
-            normalize_path("/usr/bin/App"),
-            normalize_path("/usr/bin/app")
-        );
+    fn the_name_comes_from_the_path_the_rules_compare() {
+        // Приведение пути живёт в `core`, но личность обязана собираться из
+        // приведённого: имя, взятое из сырого пути, разошлось бы с ним
+        // регистром.
+        let identity = ProcessIdentity::new(1, r"C:\Program Files\App\App.exe");
+        assert_eq!(&*identity.name, file_name(&identity.path));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Контракт протокола. Всё, что должен уметь протокол, чтобы стать подключаемым.
 
 pub mod capabilities;
+pub mod connect;
 pub mod datagram;
 pub mod dialer;
 pub mod error;

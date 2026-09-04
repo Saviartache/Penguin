@@ -162,6 +162,19 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
     #[cfg(feature = "hysteria2")]
     registry.register(Arc::new(penguin_hysteria2::Hysteria2Factory::new()));
 
+    #[cfg(feature = "socks5")]
+    registry.register(Arc::new(penguin_socks5::Socks5Factory::new()));
+
+    // Две записи из одного крейта: `http` и `https` отличаются одной строкой
+    // настройки, но именами в конфигурации — двумя. Разница между ними —
+    // это разница между «пароль уходит открытым текстом» и «не уходит», и
+    // прятать её в поле внутри профиля значит прятать не то.
+    #[cfg(feature = "http-proxy")]
+    {
+        registry.register(Arc::new(penguin_http_proxy::HttpProxyFactory::http()));
+        registry.register(Arc::new(penguin_http_proxy::HttpProxyFactory::https()));
+    }
+
     let _ = registry;
 }
 
@@ -193,6 +206,37 @@ mod tests {
     #[test]
     fn hysteria2_is_registered() {
         assert!(pool().protocols().contains(&"hysteria2"));
+    }
+
+    #[cfg(feature = "socks5")]
+    #[test]
+    fn socks5_is_registered() {
+        assert!(pool().protocols().contains(&"socks5"));
+    }
+
+    #[cfg(feature = "http-proxy")]
+    #[test]
+    fn both_http_proxies_are_registered() {
+        // Имена разные, крейт один: реестр обязан знать оба, иначе профиль
+        // `https` в файле настроек окажется профилем неизвестного протокола.
+        let protocols = pool().protocols();
+        assert!(protocols.contains(&"http"));
+        assert!(protocols.contains(&"https"));
+    }
+
+    #[cfg(feature = "socks5")]
+    #[test]
+    fn a_proxy_profile_is_checked_without_network() {
+        // Ошибку в поле интерфейс обязан показать сразу, а не через минуту
+        // неудачного подключения.
+        let pool = pool();
+        assert!(
+            pool.validate(&profile("socks5", json!({ "server": "127.0.0.1" })))
+                .is_err(),
+            "адрес без порта обязан быть отвергнут"
+        );
+        pool.validate(&profile("socks5", json!({ "server": "127.0.0.1:1080" })))
+            .expect("настройки верны");
     }
 
     #[test]

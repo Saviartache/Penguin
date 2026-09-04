@@ -18,3 +18,7 @@ tokio = { workspace = true, features = ["io-util", "net", "time"] }
 serde_json.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
+
+[dev-dependencies]
+# Тестам контракта нужен исполнитель: сам контракт задач не запускает.
+tokio = { workspace = true, features = ["rt", "macros"] }

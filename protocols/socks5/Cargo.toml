@@ -1,0 +1,28 @@
+[package]
+name = "penguin-socks5"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Исходящее направление через прокси SOCKS5 (RFC 1928, RFC 1929)"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта и общих типов. Ни TUN, ни правил,
+# ни GUI он не видит — это и делает его заменяемым.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
+# разбирает их только этот крейт.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
