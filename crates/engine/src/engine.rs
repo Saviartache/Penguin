@@ -26,7 +26,6 @@ use penguin_config::RootConfig;
 use penguin_config::schema::profile::Profile;
 use penguin_core::id::{OutboundId, ProfileId};
 use penguin_core::state::TunnelState;
-use penguin_dns::resolver::{Resolver, SystemResolver};
 use penguin_process::resolver::FlowOwnerResolver;
 use penguin_proto::dialer::Dialer;
 use penguin_router::engine::Router;
@@ -86,9 +85,15 @@ impl Engine {
     pub fn new(config: RootConfig) -> EngineResult<Arc<Self>> {
         let events = EventBus::new();
 
-        // Разрешатель системный, пока тоннель не поднят: TUN не перехватывает
-        // трафик, и обычное разрешение имён работает как надо.
-        let resolver: Arc<dyn Resolver> = Arc::new(SystemResolver);
+        // Загрузочный, а не системный. Имя своего сервера клиент обязан
+        // спрашивать мимо системы: системный резолвер он сам же и подменяет —
+        // и на вопрос об имени сервера отвечает подставным адресом из подсети
+        // тоннеля, которого ещё нет. Клиент звонит сам себе, и это выглядит как
+        // «рукопожатие не завершилось» (см. [`penguin_dns::bootstrap`]).
+        //
+        // Системный остаётся запасным: без загрузочных апстримов в настройках
+        // разрешать имена лучше плохо, чем никак.
+        let resolver = penguin_dns::bootstrap::resolver_for(&config.dns);
         let dialer = Arc::new(SystemDialer::new(resolver));
         let outbounds = Arc::new(OutboundPool::new(Arc::clone(&dialer) as Arc<dyn Dialer>));
 

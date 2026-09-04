@@ -89,6 +89,37 @@ pub fn build_answer(
         .map_err(|e| DnsError::Malformed(format!("ответ не собирается: {e}")))
 }
 
+/// Собирает запрос об адресах имени.
+///
+/// Нужен загрузочному разрешению. Апстримы работают с готовыми сообщениями, а
+/// не с именами, — и это правильно для перехвата, где запрос приложения уходит
+/// как есть. Но имя своего сервера клиент спрашивает сам, и собрать вопрос
+/// приходится тоже самому.
+pub fn build_query(host: &str, record_type: RecordType, id: u16) -> DnsResult<Vec<u8>> {
+    let name =
+        Name::from_utf8(host).map_err(|e| DnsError::Malformed(format!("имя `{host}`: {e}")))?;
+
+    let mut message = Message::new();
+    message
+        .set_id(id)
+        .set_message_type(MessageType::Query)
+        .set_op_code(OpCode::Query)
+        // Рекурсия обязательна: спрашивают публичный резолвер, а не корневой
+        // сервер, и без неё он ответит отсылкой вместо адреса.
+        .set_recursion_desired(true);
+
+    let mut query = hickory_proto::op::Query::new();
+    query
+        .set_name(name)
+        .set_query_type(record_type)
+        .set_query_class(DNSClass::IN);
+    message.add_query(query);
+
+    message
+        .to_vec()
+        .map_err(|e| DnsError::Malformed(format!("запрос не собирается: {e}")))
+}
+
 /// Собирает ответ «такого имени нет».
 pub fn build_nxdomain(question: &Question) -> DnsResult<Vec<u8>> {
     let name = Name::from_utf8(&question.name)
