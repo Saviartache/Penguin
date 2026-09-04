@@ -45,3 +45,8 @@ default = ["hysteria2", "socks5", "http-proxy"]
 hysteria2 = ["penguin-engine/hysteria2"]
 socks5 = ["penguin-engine/socks5"]
 http-proxy = ["penguin-engine/http-proxy"]
+
+[dev-dependencies]
+# Только ради сверки манифестов: набор протоколов у демона обязан совпадать с
+# набором у движка, а расходятся они молча.
+toml.workspace = true
