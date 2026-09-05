@@ -222,6 +222,28 @@ insecure = true'
 check brook brook 'server   = "127.0.0.1:19999"
 password = "secret"'
 
+# Отпечаток хоста заранее неизвестен: ключ рождается при сборке образа,
+# точно так же, как у настоящего сервера при первом запуске. Читаем его тем
+# же способом, каким его читает человек, — строкой `ssh-keyscan`: её клиент
+# принимает как есть, вместе с именем хоста в начале.
+if [[ -z "$ONLY" || "$ONLY" == ssh ]]; then
+    if command -v ssh-keyscan >/dev/null 2>&1; then
+        SSH_HOST_KEY="$(ssh-keyscan -t ed25519 -p 18446 127.0.0.1 2>/dev/null | grep -m1 ssh-ed25519)"
+    else
+        SSH_HOST_KEY=""
+    fi
+
+    if [[ -z "$SSH_HOST_KEY" ]]; then
+        bad "ssh: ключ хоста не прочитан (нужен ssh-keyscan)"
+        FAILED+=(ssh)
+    else
+        check ssh ssh "server           = \"127.0.0.1:18446\"
+username         = \"penguin\"
+password         = \"secret\"
+host_fingerprint = \"$SSH_HOST_KEY\""
+    fi
+fi
+
 # Без имени и пароля: сервер запущен без настроенных пользователей, и признак
 # опознания в запросе тогда не посылается вовсе.
 check gost-relay gost-relay 'server = "127.0.0.1:18445"'

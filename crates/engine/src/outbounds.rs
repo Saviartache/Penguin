@@ -188,6 +188,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "gost-relay" => &["gost-relay"],
         "brook" => &["brook"],
         "mieru" => &["mieru"],
+        "ssh" => &["ssh"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         // Одна фича, два имени в настройках.
@@ -233,6 +234,9 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     #[cfg(feature = "mieru")]
     registry.register(Arc::new(penguin_mieru::MieruFactory::new()));
+
+    #[cfg(feature = "ssh")]
+    registry.register(Arc::new(penguin_ssh::SshFactory::new()));
 
     // Две записи из одного крейта: `socks5` и `socks5-tls`. Под TLS не видны
     // ни имя сервера назначения, ни пароль — а без TLS видно и то и другое.

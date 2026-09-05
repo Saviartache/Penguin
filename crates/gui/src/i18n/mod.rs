@@ -219,6 +219,12 @@ pub struct Strings {
     pub chain_fingerprint: &'static str,
     /// Что вписать в поле отпечатка цепочки.
     pub chain_fingerprint_example: &'static str,
+    /// Ключ хоста SSH.
+    pub host_fingerprint: &'static str,
+    /// Что вписать в поле ключа хоста.
+    pub host_fingerprint_example: &'static str,
+    /// Не задан ключ хоста.
+    pub need_host_fingerprint: &'static str,
     /// Не задан адрес.
     pub need_server: &'static str,
     /// Не задан пароль.
@@ -467,6 +473,9 @@ mod tests {
                 table.insecure,
                 table.chain_fingerprint,
                 table.chain_fingerprint_example,
+                table.host_fingerprint,
+                table.host_fingerprint_example,
+                table.need_host_fingerprint,
                 table.need_server,
                 table.need_password,
                 table.bad_server,

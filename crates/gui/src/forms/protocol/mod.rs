@@ -35,6 +35,7 @@ pub mod shadowsocks;
 pub mod snell;
 pub mod socks5;
 pub mod spec;
+pub mod ssh;
 pub mod trojan;
 pub mod tuic;
 pub mod vless;

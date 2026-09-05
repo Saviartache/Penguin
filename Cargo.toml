@@ -28,6 +28,7 @@ members = [
     "protocols/gost-relay",
     "protocols/brook",
     "protocols/mieru",
+    "protocols/ssh",
     "protocols/tuic",
     "protocols/vless",
     "protocols/shadowsocks",
@@ -73,6 +74,7 @@ penguin-snell = { path = "protocols/snell" }
 penguin-gost-relay = { path = "protocols/gost-relay" }
 penguin-brook = { path = "protocols/brook" }
 penguin-mieru = { path = "protocols/mieru" }
+penguin-ssh = { path = "protocols/ssh" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-tuic = { path = "protocols/tuic" }
 penguin-vless = { path = "protocols/vless" }
@@ -105,6 +107,10 @@ http = "1"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 smoltcp = { version = "0.12", default-features = false }
+# Своей реализации SSH не будет — обмен ключами, шифры, опознание и каналы
+# отдельный проект. Бэкенд и алгоритмы выбираются в `protocols/ssh`, чтобы не
+# тащить сюда второй криптографический бэкенд по умолчанию.
+russh = { version = "0.63", default-features = false }
 
 # --- данные ---
 serde = { version = "1", features = ["derive", "rc"] }
