@@ -229,6 +229,10 @@ pub struct Strings {
     pub obfs_param: &'static str,
     /// Что вписать в параметр обфускации.
     pub obfs_param_example: &'static str,
+    /// Учётные данные для заголовка `Authorization`.
+    pub authorization: &'static str,
+    /// Предупреждение: через MASQUE ходит только UDP.
+    pub masque_udp_only: &'static str,
     /// Надстройка кадра у ShadowsocksR.
     pub ssr_protocol: &'static str,
     /// Предупреждение: шифры ShadowsocksR не заверяют данные.
@@ -486,6 +490,8 @@ mod tests {
                 table.need_host_fingerprint,
                 table.obfs_param,
                 table.obfs_param_example,
+                table.authorization,
+                table.masque_udp_only,
                 table.ssr_protocol,
                 table.ssr_no_authentication,
                 table.need_server,

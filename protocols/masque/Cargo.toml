@@ -1,0 +1,42 @@
+[package]
+name = "penguin-masque"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "MASQUE: CONNECT-UDP поверх HTTP/3 (RFC 9298)"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# QUIC: сокет берётся у `Dialer`, рукопожатие TLS — у `penguin-transport`.
+quinn = { workspace = true, features = ["rustls", "runtime-tokio"] }
+rustls = { workspace = true, features = ["ring", "std"] }
+# HTTP/3: рукопожатие `CONNECT-UDP` — это расширенный CONNECT (RFC 9220) и
+# ответ `capsule-protocol: ?1` (RFC 9297) поверх потока `h3`. Уже в дереве
+# ради naive; здесь у него первый живой потребитель среди тех, кому нужны
+# именно датаграммы, а не просто туннель байт.
+h3.workspace = true
+h3-quinn.workspace = true
+http.workspace = true
+
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
+# разбирает их только этот крейт.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

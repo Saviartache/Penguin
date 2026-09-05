@@ -204,6 +204,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "ssh" => &["ssh"],
         // Одна фича, два имени: по HTTP/2 и по HTTP/3.
         "naive" => &["http2", "http3"],
+        "masque" => &["masque"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         // Одна фича, два имени в настройках.
@@ -258,6 +259,9 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     // Две записи из одного крейта: тот же `CONNECT` и та же схема
     // дополнения, но поверх разных переносов.
+    #[cfg(feature = "masque")]
+    registry.register(Arc::new(penguin_masque::MasqueFactory::new()));
+
     #[cfg(feature = "naive")]
     {
         registry.register(Arc::new(penguin_naive::NaiveFactory::http2()));

@@ -4290,6 +4290,7 @@ dependencies = [
  "penguin-hysteria2",
  "penguin-inbound",
  "penguin-juicity",
+ "penguin-masque",
  "penguin-mieru",
  "penguin-naive",
  "penguin-netstack",
@@ -4428,6 +4429,27 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "quinn",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "penguin-masque"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "h3",
+ "h3-quinn",
+ "http",
  "penguin-core",
  "penguin-proto",
  "penguin-transport",

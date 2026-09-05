@@ -104,6 +104,8 @@ pub static STRINGS: Strings = Strings {
     need_host_fingerprint: "Не задан ключ хоста — без него сервер подменит кто угодно",
     obfs_param: "Параметр обфускации",
     obfs_param_example: "имена узлов через запятую; только для http_simple",
+    authorization: "Учётные данные",
+    masque_udp_only: "Через это направление ходит только UDP. Сайты через него не откроются: TCP пойдёт мимо",
     ssr_protocol: "Надстройка кадра",
     ssr_no_authentication: "Шифры здесь потоковые и данные не заверяют: подмену по дороге не заметит ни клиент, ни сервер. У Shadowsocks это не так",
     need_server: "Не задан адрес сервера",

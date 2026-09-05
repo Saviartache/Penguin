@@ -28,6 +28,7 @@ members = [
     "protocols/gost-relay",
     "protocols/brook",
     "protocols/mieru",
+    "protocols/masque",
     "protocols/naive",
     "protocols/shadowsocksr",
     "protocols/ssh",
@@ -81,6 +82,7 @@ penguin-snell = { path = "protocols/snell" }
 penguin-gost-relay = { path = "protocols/gost-relay" }
 penguin-brook = { path = "protocols/brook" }
 penguin-mieru = { path = "protocols/mieru" }
+penguin-masque = { path = "protocols/masque" }
 penguin-naive = { path = "protocols/naive" }
 penguin-shadowsocksr = { path = "protocols/shadowsocksr" }
 penguin-ssh = { path = "protocols/ssh" }

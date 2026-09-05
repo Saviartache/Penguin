@@ -104,6 +104,8 @@ pub static STRINGS: Strings = Strings {
     need_host_fingerprint: "No host key: without it anyone can pose as the server",
     obfs_param: "Obfuscation parameter",
     obfs_param_example: "host names, comma separated; http_simple only",
+    authorization: "Credentials",
+    masque_udp_only: "Only UDP goes through this direction. Websites will not open: TCP goes around it",
     ssr_protocol: "Frame layer",
     ssr_no_authentication: "The ciphers here are stream ciphers and do not authenticate data: neither side notices tampering. Shadowsocks is not like this",
     need_server: "Server address is empty",
