@@ -51,8 +51,6 @@ pub struct Entry {
     ///
     /// Не `to_app`: со стороны тоннеля за сокетом не приложение, а сервер.
     pub to_socket: Option<Bytes>,
-    /// Приложение закрыло свою сторону.
-    pub app_closed: bool,
     /// Движок закрыл свою.
     pub engine_closed: bool,
 }
@@ -62,7 +60,6 @@ impl std::fmt::Debug for Entry {
         f.debug_struct("Entry")
             .field("key", &self.key)
             .field("pending", &self.pending.is_some())
-            .field("app_closed", &self.app_closed)
             .field("engine_closed", &self.engine_closed)
             .finish()
     }
@@ -99,7 +96,6 @@ impl ConnectionTable {
                 pending: Some(connection),
                 to_engine: None,
                 to_socket: None,
-                app_closed: false,
                 engine_closed: false,
             },
         );
