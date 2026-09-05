@@ -27,6 +27,7 @@ pub mod error;
 pub mod events;
 pub mod metrics;
 pub mod outbounds;
+pub mod packet;
 pub mod pipeline;
 pub mod sniff;
 pub mod state;

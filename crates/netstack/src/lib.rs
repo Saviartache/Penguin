@@ -23,12 +23,15 @@
 //! ```
 
 pub mod config;
+pub mod device;
 pub mod ip;
+pub mod outgoing;
 pub mod poll;
 pub mod stack;
 pub mod tcp;
 pub mod udp;
 
 pub use config::StackConfig;
+pub use outgoing::{ConnectError, Connector, OutgoingHandles};
 pub use stack::{Datagram, StackHandles, spawn};
 pub use tcp::{Accepted, TcpConnection, TcpListener};

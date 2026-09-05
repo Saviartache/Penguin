@@ -62,11 +62,12 @@ impl Session {
     }
 }
 
-/// Собирает IP-пакет с датаграммой для приложения.
+/// Собирает IP-пакет с датаграммой от `from` к `to`.
 ///
-/// Отправитель и получатель здесь «наоборот» относительно исходного пакета:
-/// это ответ, идущий обратно приложению.
-pub fn build_response(from: SocketAddr, to: SocketAddr, payload: &[u8]) -> Option<BytesMut> {
+/// Обе стороны собирают пакеты им: входящая — ответ приложению,
+/// исходящая — запрос наружу. Порядок аргументов здесь единственное, что
+/// их различает, — перепутать его значит отправить ответ самому себе.
+pub fn build_datagram(from: SocketAddr, to: SocketAddr, payload: &[u8]) -> Option<BytesMut> {
     match (from, to) {
         (SocketAddr::V4(from), SocketAddr::V4(to)) => Some(build_v4(from, to, payload)),
         (SocketAddr::V6(from), SocketAddr::V6(to)) => Some(build_v6(from, to, payload)),
@@ -153,7 +154,7 @@ mod tests {
     fn built_packet_parses_back() {
         // Собранный нами пакет обязан разбираться нашим же разбором:
         // расхождение здесь означало бы, что система его молча выбросит.
-        let packet = build_response(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"answer")
+        let packet = build_datagram(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"answer")
             .expect("собирается");
 
         let parsed = parse::parse(&packet).expect("разбирается");
@@ -165,7 +166,7 @@ mod tests {
     #[test]
     fn ipv4_header_checksum_is_valid() {
         let packet =
-            build_response(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"x").expect("собирается");
+            build_datagram(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"x").expect("собирается");
         // Сумма по заголовку вместе с её собственным полем сворачивается в
         // ноль — так её и проверяет система.
         assert_eq!(checksum::finish(checksum::sum(&packet[..20])), 0);
@@ -173,7 +174,7 @@ mod tests {
 
     #[test]
     fn udp_checksum_is_valid() {
-        let packet = build_response(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"payload")
+        let packet = build_datagram(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"payload")
             .expect("собирается");
 
         let total = checksum::pseudo_v4(
@@ -187,7 +188,7 @@ mod tests {
 
     #[test]
     fn builds_ipv6_too() {
-        let packet = build_response(addr("[2001:db8::1]:53"), addr("[fd00::2]:50000"), b"answer")
+        let packet = build_datagram(addr("[2001:db8::1]:53"), addr("[fd00::2]:50000"), b"answer")
             .expect("собирается");
         let parsed = parse::parse(&packet).expect("разбирается");
         assert!(parsed.source.is_ipv6());
@@ -197,13 +198,13 @@ mod tests {
     #[test]
     fn mixed_families_are_refused() {
         // Пакет, у которого отправитель IPv4, а получатель IPv6, невыразим.
-        assert!(build_response(addr("8.8.8.8:53"), addr("[fd00::2]:50000"), b"x").is_none());
+        assert!(build_datagram(addr("8.8.8.8:53"), addr("[fd00::2]:50000"), b"x").is_none());
     }
 
     #[test]
     fn empty_payload_is_valid() {
         let packet =
-            build_response(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"").expect("собирается");
+            build_datagram(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"").expect("собирается");
         assert_eq!(parse::parse(&packet).expect("разбирается").payload, b"");
     }
 

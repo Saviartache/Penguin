@@ -4451,10 +4451,12 @@ dependencies = [
 name = "penguin-netstack"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "penguin-core",
  "penguin-tun",
  "smoltcp",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",

@@ -7,5 +7,5 @@
 pub mod session;
 pub mod table;
 
-pub use session::{SESSION_TIMEOUT, Session, SessionKey, build_response};
+pub use session::{SESSION_TIMEOUT, Session, SessionKey, build_datagram};
 pub use table::SessionTable;

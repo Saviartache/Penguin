@@ -17,5 +17,10 @@ penguin-tun.workspace = true
 smoltcp = { workspace = true, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 tokio = { workspace = true, features = ["rt", "sync", "time", "io-util", "macros"] }
 bytes.workspace = true
+thiserror.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time"] }

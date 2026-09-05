@@ -19,25 +19,25 @@
 //! UDP — мимо: состояния у него нет, и разобрать восьмибайтовый заголовок
 //! дешевле, чем держать сокет на каждую пару адресов.
 
-use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 
 use bytes::{Bytes, BytesMut};
 use penguin_tun::TunDevice;
 use smoltcp::iface::{Config, Interface, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, IpListenEndpoint};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::StackConfig;
+use crate::device::VirtualDevice;
 use crate::ip::parse;
 use crate::poll::{Clock, clamp_delay};
 use crate::tcp::conn::TcpConnection;
 use crate::tcp::listener::{Accepted, TcpListener};
+use crate::tcp::pump::pump_data;
 use crate::tcp::table::{ConnectionTable, FlowKey};
-use crate::udp::session::{SessionKey, build_response};
+use crate::udp::session::{SessionKey, build_datagram};
 use crate::udp::table::SessionTable;
 
 /// Датаграмма, идущая через стек.
@@ -142,7 +142,7 @@ async fn run(
             datagram = udp_outgoing.recv() => match datagram {
                 // Ответ приложению собирается вручную: через smoltcp он не шёл.
                 Some(datagram) => {
-                    if let Some(packet) = build_response(
+                    if let Some(packet) = build_datagram(
                         datagram.destination,
                         datagram.source,
                         &datagram.payload,
@@ -230,7 +230,7 @@ fn build_interface(
 ///
 /// Нужно, чтобы номера последовательностей TCP не совпадали между запусками:
 /// совпадение означает, что старое соединение может быть принято за новое.
-fn rand_seed() -> u64 {
+pub(crate) fn rand_seed() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -382,79 +382,7 @@ fn pump_sockets(
             }
         }
 
-        // --- от приложения к движку ---
-        //
-        // Задержанный блок идёт первым, и пока он не ушёл, из сокета не
-        // берётся ничего нового: вынутое из сокета для TCP уже отправлено и
-        // подтверждено, и выбросить его значит проделать в потоке дыру.
-        loop {
-            let chunk = match entry.to_engine.take() {
-                Some(chunk) => chunk,
-                None if socket.can_recv() => {
-                    let Ok(chunk) = socket.recv(|buffer| {
-                        let taken = Bytes::copy_from_slice(buffer);
-                        (buffer.len(), taken)
-                    }) else {
-                        break;
-                    };
-                    if chunk.is_empty() {
-                        break;
-                    }
-                    chunk
-                }
-                None => break,
-            };
-
-            match entry.ends.to_engine.try_send(chunk) {
-                Ok(()) => {}
-                // Движок не успевает. Держим блок у себя: сокет перестанет
-                // читаться, окно TCP закроется, и приложение притормозит само
-                // — это и есть обратное давление.
-                Err(mpsc::error::TrySendError::Full(chunk)) => {
-                    entry.to_engine = Some(chunk);
-                    break;
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => break,
-            }
-        }
-
-        // --- от движка к приложению ---
-        loop {
-            let chunk = match entry.to_app.take() {
-                Some(chunk) => chunk,
-                None => match entry.ends.from_engine.try_recv() {
-                    Ok(chunk) => chunk,
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        // Движок закрыл свою сторону — закрываем сокет на
-                        // запись.
-                        entry.engine_closed = true;
-                        socket.close();
-                        break;
-                    }
-                },
-            };
-
-            if !socket.can_send() {
-                entry.to_app = Some(chunk);
-                break;
-            }
-
-            match socket.send_slice(&chunk) {
-                // Записалось столько, сколько поместилось. Хвост остаётся до
-                // следующего оборота: считать частичную запись полной значит
-                // потерять середину потока.
-                Ok(sent) if sent < chunk.len() => {
-                    entry.to_app = Some(chunk.slice(sent..));
-                    break;
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    entry.to_app = Some(chunk);
-                    break;
-                }
-            }
-        }
+        pump_data(socket, entry);
 
         if !socket.is_open() {
             connections.remove(handle);
@@ -468,91 +396,6 @@ fn to_smoltcp(address: IpAddr) -> IpAddress {
     match address {
         IpAddr::V4(v4) => IpAddress::from(v4),
         IpAddr::V6(v6) => IpAddress::from(v6),
-    }
-}
-
-/// Устройство smoltcp поверх очередей.
-///
-/// Своё, а не готовое: пакеты приходят из асинхронного адаптера, а `Device`
-/// синхронен. Очереди и есть тот шов, где одно превращается в другое.
-struct VirtualDevice {
-    rx: VecDeque<BytesMut>,
-    tx: VecDeque<BytesMut>,
-    mtu: usize,
-}
-
-impl VirtualDevice {
-    fn new(mtu: u16) -> Self {
-        Self {
-            rx: VecDeque::new(),
-            tx: VecDeque::new(),
-            mtu: mtu as usize,
-        }
-    }
-
-    fn queue_rx(&mut self, packet: BytesMut) {
-        self.rx.push_back(packet);
-    }
-
-    fn queue_tx(&mut self, packet: BytesMut) {
-        self.tx.push_back(packet);
-    }
-
-    fn take_tx(&mut self) -> Option<BytesMut> {
-        self.tx.pop_front()
-    }
-}
-
-impl Device for VirtualDevice {
-    type RxToken<'a> = RxTokenImpl;
-    type TxToken<'a> = TxTokenImpl<'a>;
-
-    fn receive(
-        &mut self,
-        _timestamp: smoltcp::time::Instant,
-    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let packet = self.rx.pop_front()?;
-        // Пара токенов: стеку может понадобиться ответить на тот же пакет, и
-        // передатчик выдаётся вместе с приёмником.
-        Some((RxTokenImpl { packet }, TxTokenImpl { tx: &mut self.tx }))
-    }
-
-    fn transmit(&mut self, _timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
-        Some(TxTokenImpl { tx: &mut self.tx })
-    }
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut caps = DeviceCapabilities::default();
-        // `Ip`, а не `Ethernet`: у TUN нет канального заголовка, и ARP ему
-        // не нужен.
-        caps.medium = Medium::Ip;
-        caps.max_transmission_unit = self.mtu;
-        caps
-    }
-}
-
-/// Токен приёма: отдаёт пакет стеку.
-struct RxTokenImpl {
-    packet: BytesMut,
-}
-
-impl RxToken for RxTokenImpl {
-    fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
-        f(&self.packet)
-    }
-}
-
-/// Токен передачи: принимает пакет от стека.
-struct TxTokenImpl<'a> {
-    tx: &'a mut VecDeque<BytesMut>,
-}
-
-impl TxToken for TxTokenImpl<'_> {
-    fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut packet = BytesMut::zeroed(len);
-        let result = f(&mut packet);
-        self.tx.push_back(packet);
-        result
     }
 }
 
@@ -570,42 +413,6 @@ pub fn endpoint_of(address: SocketAddr) -> IpEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn device_carries_packets_both_ways() {
-        let mut device = VirtualDevice::new(1280);
-        device.queue_rx(BytesMut::from(&b"incoming"[..]));
-
-        let now = smoltcp::time::Instant::from_micros(0);
-        let (rx, _tx) = device.receive(now).expect("пакет есть");
-        let got = rx.consume(|packet| packet.to_vec());
-        assert_eq!(got, b"incoming");
-
-        let tx = device.transmit(now).expect("передатчик есть");
-        tx.consume(4, |buffer| buffer.copy_from_slice(b"out!"));
-        assert_eq!(&device.take_tx().expect("пакет есть")[..], b"out!");
-    }
-
-    #[test]
-    fn empty_device_yields_nothing() {
-        let mut device = VirtualDevice::new(1280);
-        assert!(
-            device
-                .receive(smoltcp::time::Instant::from_micros(0))
-                .is_none()
-        );
-        assert!(device.take_tx().is_none());
-    }
-
-    #[test]
-    fn capabilities_describe_a_tun() {
-        // Канального уровня у TUN нет; объявить `Ethernet` значило бы
-        // заставить стек искать MAC-адреса, которых не существует.
-        let device = VirtualDevice::new(1400);
-        let caps = device.capabilities();
-        assert_eq!(caps.medium, Medium::Ip);
-        assert_eq!(caps.max_transmission_unit, 1400);
-    }
 
     #[test]
     fn endpoint_keeps_address_and_port_apart() {
@@ -819,7 +626,7 @@ mod tests {
             .expect("сокет");
         let entry = harness.inner.connections.get_mut(handle).expect("запись");
         assert!(
-            entry.to_app.is_some(),
+            entry.to_socket.is_some(),
             "хвост блока выброшен — в потоке появилась дыра"
         );
     }
