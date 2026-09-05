@@ -799,6 +799,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
 
 [[package]]
+name = "cfb-mode"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac64b0984be8510caae81455ea2c8c23e5af6be61c36129df62f3380d5d64e1f"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4263,6 +4272,7 @@ dependencies = [
  "penguin-proto",
  "penguin-router",
  "penguin-shadowsocks",
+ "penguin-shadowsocksr",
  "penguin-snell",
  "penguin-socks5",
  "penguin-ssh",
@@ -4518,6 +4528,30 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "penguin-shadowsocksr"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "async-trait",
+ "bytes",
+ "cfb-mode",
+ "ctr",
+ "hmac 0.12.1",
+ "md-5",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "rand 0.8.8",
+ "rc4",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5257,6 +5291,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rc4"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "840038b674daa9f7a7957440d937951d15c0143c056e631e529141fd780e0c92"
+dependencies = [
+ "cipher 0.5.2",
+]
+
+[[package]]
 name = "read-fonts"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5463,7 +5506,7 @@ dependencies = [
  "salsa20",
  "scrypt",
  "sec1",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.0",
  "sha3 0.12.0",
  "signature",
@@ -5835,6 +5878,17 @@ dependencies = [
 
 [[package]]
 name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
@@ -6197,7 +6251,7 @@ dependencies = [
  "rand_core 0.10.1",
  "rsa",
  "sec1",
- "sha1",
+ "sha1 0.11.0",
  "sha2 0.11.0",
  "signature",
  "ssh-cipher",

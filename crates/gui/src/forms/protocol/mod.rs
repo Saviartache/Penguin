@@ -32,6 +32,7 @@ pub mod hysteria2;
 pub mod juicity;
 pub mod mieru;
 pub mod shadowsocks;
+pub mod shadowsocksr;
 pub mod snell;
 pub mod socks5;
 pub mod spec;

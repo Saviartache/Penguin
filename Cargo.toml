@@ -28,6 +28,7 @@ members = [
     "protocols/gost-relay",
     "protocols/brook",
     "protocols/mieru",
+    "protocols/shadowsocksr",
     "protocols/ssh",
     "protocols/tuic",
     "protocols/vless",
@@ -74,6 +75,7 @@ penguin-snell = { path = "protocols/snell" }
 penguin-gost-relay = { path = "protocols/gost-relay" }
 penguin-brook = { path = "protocols/brook" }
 penguin-mieru = { path = "protocols/mieru" }
+penguin-shadowsocksr = { path = "protocols/shadowsocksr" }
 penguin-ssh = { path = "protocols/ssh" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-tuic = { path = "protocols/tuic" }
@@ -137,6 +139,18 @@ md-5 = "0.10"
 # это примитив, который либо берут готовым, либо ошибаются в нём молча.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 rand = "0.8"
+# Только ради ShadowsocksR: там все шифры потоковые, а в `ring` (AEAD) их
+# нет. Данные ими не заверяются — это свойство протокола, не наше решение
+# (см. документ крейта `penguin-shadowsocksr`).
+aes = "0.9"
+cfb-mode = "0.9"
+ctr = "0.10"
+rc4 = "0.2"
+sha1 = "0.10"
+# Версия закреплена на `0.10.x` в дереве `digest`, чтобы совпасть с `md-5` и
+# `sha1`, которые уже в этой версии, — иначе `Hmac<Md5>` не собрать: более
+# новый `hmac` требует `digest 0.11` и другого типажа (`EagerHash`).
+hmac = "0.12"
 # Только ради Mieru: нонс XChaCha20-Poly1305 — 24 байта, вдвое длиннее того,
 # что умеет общий `aead` (у `ring` XChaCha20 нет вовсе).
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }

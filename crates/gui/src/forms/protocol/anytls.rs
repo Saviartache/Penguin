@@ -30,6 +30,7 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["anytls://"],
     from_link: Some(from_link),
+    note: None,
 };
 
 /// Как ссылка ложится в поля.

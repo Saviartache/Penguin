@@ -48,6 +48,7 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &[],
     from_link: None,
+    note: None,
 };
 
 #[cfg(test)]

@@ -58,6 +58,7 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     // и так всегда отдаём имя прокси, иначе правила по доменам теряют смысл.
     schemes: &["socks5://", "socks://", "socks5h://"],
     from_link: Some(from_link),
+    note: None,
 };
 
 /// Прокси под TLS.
@@ -71,6 +72,7 @@ pub static TLS: ProtocolSpec = ProtocolSpec {
     fields: SECURE,
     schemes: &[],
     from_link: None,
+    note: None,
 };
 
 /// Как ссылка ложится в поля.

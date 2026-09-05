@@ -42,6 +42,7 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["vless://"],
     from_link: Some(from_link),
+    note: None,
 };
 
 /// Как ссылка ложится в поля.

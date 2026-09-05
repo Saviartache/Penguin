@@ -7,8 +7,8 @@
 
 use crate::forms::protocol::spec::ProtocolSpec;
 use crate::forms::protocol::{
-    anytls, brook, gost_relay, http, hysteria2, juicity, mieru, shadowsocks, snell, socks5, ssh,
-    trojan, tuic, vless,
+    anytls, brook, gost_relay, http, hysteria2, juicity, mieru, shadowsocks, shadowsocksr, snell,
+    socks5, ssh, trojan, tuic, vless,
 };
 
 /// Протоколы в порядке показа.
@@ -23,6 +23,7 @@ pub static ALL: &[&ProtocolSpec] = &[
     &vless::SPEC,
     &trojan::SPEC,
     &shadowsocks::SPEC,
+    &shadowsocksr::SPEC,
     &snell::SPEC,
     &gost_relay::SPEC,
     &brook::SPEC,
@@ -148,6 +149,25 @@ mod tests {
         for spec in ALL {
             let keys: HashSet<&str> = spec.fields.iter().map(|field| field.key).collect();
             assert_eq!(keys.len(), spec.fields.len(), "`{}`", spec.id);
+        }
+    }
+
+    #[test]
+    fn no_field_is_called_protocol() {
+        // Этим именем в настройках выбирается сам протокол: `RawOutbound`
+        // вынимает его до того, как остальное попадёт протоколу. Поле формы с
+        // тем же именем было бы недостижимо, а записанное в него читалось бы
+        // как имя протокола — и профиль открылся бы не тем, чем сохранён.
+        for spec in ALL {
+            for field in spec.fields {
+                assert_ne!(
+                    field.path.first(),
+                    Some(&"protocol"),
+                    "`{}`: поле `{}` заняло бы имя выбора протокола",
+                    spec.id,
+                    field.key
+                );
+            }
         }
     }
 
