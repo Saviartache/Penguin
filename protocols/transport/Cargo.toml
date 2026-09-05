@@ -25,6 +25,9 @@ rustls-pemfile.workspace = true
 # `ring` уже собран в дереве — его тянет `rustls`. Здесь он нужен ради SHA-1
 # в рукопожатии WebSocket и ради шифров, которыми пользуются протоколы.
 ring.workspace = true
+# Не через `ring`: MD5 там нет нарочно, а `EVP_BytesToKey` без него не
+# повторить — так выводит ключ сервер (см. `kdf`).
+md-5.workspace = true
 
 tokio = { workspace = true, features = ["rt", "io-util", "time", "macros"] }
 async-trait.workspace = true

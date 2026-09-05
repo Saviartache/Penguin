@@ -4613,6 +4613,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "md-5",
  "penguin-core",
  "penguin-proto",
  "rand 0.8.8",

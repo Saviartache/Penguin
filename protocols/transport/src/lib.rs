@@ -38,6 +38,7 @@ pub mod deadline;
 pub mod error;
 pub mod frag;
 pub mod httpupgrade;
+pub mod kdf;
 pub mod obfs;
 pub mod tls;
 pub mod ws;
