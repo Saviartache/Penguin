@@ -117,6 +117,19 @@ services:
       - "127.0.0.1:19999:9999/udp"
     networks: [interop]
 
+  # Своя сборка: сервер NaiveProxy — это Caddy с форком плагина, готового
+  # образа нет. Один и тот же порт по TCP и по UDP: под HTTP/2 лежит TLS,
+  # под HTTP/3 — QUIC, и проверять надо оба.
+  naive:
+    build: ./naive
+    volumes:
+      - ./naive/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls:/etc/caddy/tls:ro
+    ports:
+      - "127.0.0.1:14436:443"
+      - "127.0.0.1:14436:443/udp"
+    networks: [interop]
+
   # Своя сборка, а не готовый образ: у готовых `AllowTcpForwarding` то включён,
   # то выключен от версии к версии, а отказ в канале выглядел бы ошибкой нашего
   # протокола. Ключ хоста рождается при сборке образа, и `run.sh` читает его

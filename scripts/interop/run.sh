@@ -222,6 +222,25 @@ insecure = true'
 check brook brook 'server   = "127.0.0.1:19999"
 password = "secret"'
 
+# Имя и пароль те же, что в `naive/Caddyfile`. Сертификат самоподписанный —
+# отсюда `insecure`. Проверяются оба переноса: схема дополнения у них
+# общая, а вот то, что под ней, — разное целиком.
+check naive-h2 http2 'server   = "127.0.0.1:14436"
+username = "penguin"
+password = "secret"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
+check naive-h3 http3 'server   = "127.0.0.1:14436"
+username = "penguin"
+password = "secret"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
 # Отпечаток хоста заранее неизвестен: ключ рождается при сборке образа,
 # точно так же, как у настоящего сервера при первом запуске. Читаем его тем
 # же способом, каким его читает человек, — строкой `ssh-keyscan`: её клиент

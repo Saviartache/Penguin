@@ -1,0 +1,25 @@
+# Настройки сервера для проверки. Списаны с примера в README эталона; отличий
+# два, и оба нарочные.
+#
+# 1. Сертификат свой, а не от ACME: в проверке нет ни доменного имени, ни
+#    выхода наружу, а `tls` с почтой полез бы за настоящим сертификатом.
+# 2. Нет `probe_resistance`. Он меняет поведение при неверном пароле — сервер
+#    начинает притворяться обычным сайтом, — а проверке нужно увидеть отказ.
+{
+	order forward_proxy before file_server
+	auto_https off
+}
+
+:443 {
+	tls /etc/caddy/tls/cert.pem /etc/caddy/tls/key.pem
+
+	forward_proxy {
+		basic_auth penguin secret
+		hide_ip
+		hide_via
+	}
+
+	file_server {
+		root /var/www/html
+	}
+}
