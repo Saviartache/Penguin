@@ -17,16 +17,37 @@ use crate::handlers::DaemonHandler;
 
 /// Собирает и запускает демона, пока не отменят.
 pub async fn run(config_dir: Option<PathBuf>, cancel: CancellationToken) -> Result<()> {
-    let store = open_store(config_dir)?;
+    run_with_paths(config_dir.map(Paths::rooted), cancel).await
+}
+
+async fn run_with_paths(paths: Option<Paths>, cancel: CancellationToken) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    let result = run_inner(paths, cancel).await;
+    if let Err(err) = &result {
+        // Service callers still own their logging guard here.
+        tracing::error!(error = %format_args!("{err:#}"), "daemon startup or runtime failed");
+    }
+    result
+}
+
+async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()> {
+    // Claim singleton ownership before configuration writes or network recovery.
+    let listener = penguin_ipc::transport::listen().context("could not bind control transport")?;
+    let paths = paths
+        .map_or_else(Paths::discover, Ok)
+        .context("could not determine configuration paths")?;
+    let store = ConfigStore::new(paths);
     let config = match store.load() {
         Ok(config) => config,
         // Опечатка в настройках не должна оставлять пользователя без службы:
         // починить её нечем — интерфейс тоже не работает без демона. Прежнее
         // содержимое при этом не пропадёт: первая же запись настроек кладёт
         // его рядом в `.bak` (см. `ConfigStore::save`).
-        Err(err) => {
+        Err(_) => {
+            // Parse errors may quote configuration secrets.
             tracing::error!(
-                %err,
                 path = %store.paths().config_file().display(),
                 "настройки не читаются, работаем на умолчаниях"
             );
@@ -67,7 +88,7 @@ pub async fn run(config_dir: Option<PathBuf>, cancel: CancellationToken) -> Resu
     }
 
     let server = Server::new(handler);
-    let result = server.serve(cancel.clone()).await;
+    let result = server.serve_with_listener(listener, cancel.clone()).await;
 
     // Тоннель опускается в любом случае, включая аварийный выход: маршруты и
     // правила брандмауэра, оставшиеся от упавшего демона, — это машина без
@@ -94,6 +115,10 @@ pub fn run_foreground(config_dir: Option<PathBuf>, verbose: bool) -> Result<()> 
 /// есть терминал, а у службы нет — ей писать в файл (см. `crate::service`;
 /// модуль там свой на каждую систему, поэтому ссылкой сюда не сошлёшься).
 pub fn run_blocking(config_dir: Option<PathBuf>) -> Result<()> {
+    run_blocking_paths(config_dir.map(Paths::rooted))
+}
+
+pub(crate) fn run_blocking_paths(paths: Option<Paths>) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -112,7 +137,7 @@ pub fn run_blocking(config_dir: Option<PathBuf>) -> Result<()> {
             })
         };
 
-        let result = run(config_dir, cancel).await;
+        let result = run_with_paths(paths, cancel).await;
         signal.abort();
         result
     })
@@ -190,9 +215,16 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let directory = std::env::temp_dir().join("penguin-daemon-test");
-        // Канал управления может быть занят настоящей службой — тогда демон
-        // и не должен подниматься.
-        let _ = run(Some(directory), cancel).await;
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let directory = temp.path().join("must-not-be-created");
+        run(Some(directory.clone()), cancel)
+            .await
+            .expect("cancelled startup is a no-op");
+        assert!(!directory.exists());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        run(None, cancel)
+            .await
+            .expect("no discovery or IPC on cancellation");
     }
 }

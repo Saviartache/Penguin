@@ -17,6 +17,11 @@ pub mod macos;
 #[cfg(windows)]
 pub mod windows;
 
+#[cfg(any(target_os = "macos", test))]
+mod launchd;
+#[cfg(any(target_os = "linux", test))]
+mod systemd;
+
 use std::path::Path;
 
 use crate::error::PlatformResult;

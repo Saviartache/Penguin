@@ -16,14 +16,6 @@ const PKEXEC: &str = "pkexec";
 
 /// Запускает себя же с правами администратора и ждёт завершения.
 pub(super) fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
-    if !command::exists(PKEXEC) {
-        return Err(PlatformError::PermissionDenied(format!(
-            "не найдена программа `{PKEXEC}`: установите polkit \
-             или запустите команду через `sudo penguin {}`",
-            args.join(" ")
-        )));
-    }
-
     let executable = std::env::current_exe()
         .map_err(|err| PlatformError::Service(format!("не удалось узнать свой путь: {err}")))?;
 
@@ -33,6 +25,11 @@ pub(super) fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
 
     match command::run(PKEXEC, &arguments) {
         Ok(_) => Ok(true),
+        Err(err) if err.is_not_found() => Err(PlatformError::PermissionDenied(format!(
+            "не найдена программа `{PKEXEC}`: установите polkit \
+             или запустите команду через `sudo penguin {}`",
+            args.join(" ")
+        ))),
         Err(err) if matches!(err.code(), Some(DISMISSED | NOT_AUTHORISED)) => {
             tracing::info!("человек отказался дать права");
             Ok(false)

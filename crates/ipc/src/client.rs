@@ -27,11 +27,24 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
-    /// Подключается к демону.
+    /// Connects to the daemon, allowing a Unix foreground fallback.
+    ///
+    /// GUI and service-management callers should use [`Self::connect_service`].
     pub async fn connect() -> IpcResult<Self> {
-        let stream = transport::connect().await?;
+        Ok(Self::from_stream(transport::connect().await?))
+    }
+
+    /// Connects only to the system service endpoint.
+    ///
+    /// Unix never falls back to a per-user endpoint, even when called as root.
+    /// Windows uses the same named pipe as [`Self::connect`].
+    pub async fn connect_service() -> IpcResult<Self> {
+        Ok(Self::from_stream(transport::connect_service().await?))
+    }
+
+    fn from_stream(stream: LocalSocketStream) -> Self {
         let (reader, writer) = tokio::io::split(stream);
-        Ok(Self { reader, writer })
+        Self { reader, writer }
     }
 
     /// Отправляет запрос и ждёт ответ.
@@ -98,7 +111,10 @@ impl Client {
 /// запросом пароля.
 pub const ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// Отпечаток сборки работающей службы. `None` — служба не отвечает.
+/// Отпечаток сборки работающего демона. `None` — демон не отвечает.
+///
+/// Allows the same Unix foreground fallback as [`Client::connect`]. For GUI
+/// startup and service readiness, use [`greet_service`] instead.
 ///
 /// Открытого соединения для этого вопроса мало, и это не осторожность, а
 /// опыт: демон, зависший с поднятым тоннелем, соединение всё равно принимает —
@@ -106,8 +122,22 @@ pub const ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 /// встаёт на первом же запросе навсегда: окно не открывается, а человек видит
 /// «Запускаю службу» и больше ничего.
 pub async fn greet() -> Option<String> {
+    greet_with(Client::connect()).await
+}
+
+/// Returns the system service's build fingerprint, or `None` if it does not answer.
+///
+/// Bounds both connection and greeting by [`ANSWER_TIMEOUT`]. Uses only
+/// [`Client::connect_service`], never a Unix per-user foreground endpoint.
+pub async fn greet_service() -> Option<String> {
+    greet_with(Client::connect_service()).await
+}
+
+async fn greet_with(
+    connect: impl std::future::Future<Output = IpcResult<Client>>,
+) -> Option<String> {
     let greeting = tokio::time::timeout(ANSWER_TIMEOUT, async {
-        let mut client = Client::connect().await.ok()?;
+        let mut client = connect.await.ok()?;
         let (_, build) = client.hello().await.ok()?;
         Some(build)
     })
@@ -116,9 +146,16 @@ pub async fn greet() -> Option<String> {
     greeting.ok().flatten()
 }
 
-/// Отвечает ли служба.
+/// Whether a daemon answers, allowing the foreground fallback of [`greet`].
 pub async fn answers() -> bool {
     greet().await.is_some()
+}
+
+/// Whether the system service answers within [`ANSWER_TIMEOUT`].
+///
+/// Use for service readiness; a Unix per-user daemon cannot satisfy this probe.
+pub async fn answers_service() -> bool {
+    greet_service().await.is_some()
 }
 
 /// Поток событий от демона.

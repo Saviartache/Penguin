@@ -35,6 +35,10 @@ pub enum IpcError {
     #[error("нет доступа к каналу управления: запустите интерфейс от того же пользователя")]
     AccessDenied,
 
+    /// The Unix controller approval is invalid or stored unsafely.
+    #[error("invalid controller authorization: {0}")]
+    InvalidController(&'static str),
+
     /// Сообщение не помещается в отведённый предел.
     #[error("сообщение длиной {size} байт превышает предел {limit}")]
     TooLarge {
@@ -73,7 +77,10 @@ impl IpcError {
     pub fn needs_user_action(&self) -> bool {
         matches!(
             self,
-            Self::DaemonNotRunning | Self::AccessDenied | Self::AlreadyRunning
+            Self::DaemonNotRunning
+                | Self::AccessDenied
+                | Self::AlreadyRunning
+                | Self::InvalidController(_)
         )
     }
 }

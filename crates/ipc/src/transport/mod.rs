@@ -9,6 +9,11 @@ pub mod unix;
 #[cfg(windows)]
 pub mod windows;
 
+#[cfg(unix)]
+pub use unix::connect_service;
+#[cfg(windows)]
+pub use windows::connect_service;
+
 use interprocess::local_socket::tokio::prelude::*;
 
 use crate::error::{IpcError, IpcResult};
@@ -66,6 +71,7 @@ pub fn listen_at(path: &std::path::Path) -> IpcResult<LocalSocketListener> {
     // Сокет, оставшийся от упавшего демона, файловую систему переживает, а
     // привязку к себе не отдаёт: без уборки служба больше не поднимется.
     unix::clear_stale(path)?;
+    unix::restrict(path)?;
 
     let name = path
         .to_fs_name::<GenericFilePath>()
@@ -84,7 +90,9 @@ pub fn listen_at(path: &std::path::Path) -> IpcResult<LocalSocketListener> {
     Ok(listener)
 }
 
-/// Подключается к каналу.
+/// Connects to the channel, allowing a per-user foreground fallback on Unix.
+///
+/// Use [`connect_service`] for GUI connections and service readiness.
 pub async fn connect() -> IpcResult<LocalSocketStream> {
     #[cfg(windows)]
     {
@@ -97,20 +105,23 @@ pub async fn connect() -> IpcResult<LocalSocketStream> {
     }
     #[cfg(unix)]
     {
-        // Путей два: общий у службы и свой у отладочного запуска. Первая
-        // ошибка сохраняется — по ней и отвечаем, если не подошёл ни один.
-        let mut first = None;
+        // Foreground fallback is only for an absent service, never for a
+        // denied or untrusted system endpoint.
         for path in unix::connect_paths() {
             match connect_at(&path).await {
                 Ok(stream) => return Ok(stream),
-                Err(err) => first.get_or_insert(err),
+                Err(IpcError::DaemonNotRunning) => continue,
+                Err(err) => return Err(err),
             };
         }
-        Err(first.unwrap_or(IpcError::DaemonNotRunning))
+        Err(IpcError::DaemonNotRunning)
     }
 }
 
-/// Подключается к каналу по указанному пути.
+/// Connects to a Unix endpoint and verifies its server's effective UID.
+///
+/// The system endpoint requires root; explicit/foreground paths require the
+/// current effective UID. Socket-file ownership is not server authentication.
 #[cfg(unix)]
 pub async fn connect_at(path: &std::path::Path) -> IpcResult<LocalSocketStream> {
     use interprocess::local_socket::{GenericFilePath, ToFsName};
@@ -119,7 +130,14 @@ pub async fn connect_at(path: &std::path::Path) -> IpcResult<LocalSocketStream> 
         .to_fs_name::<GenericFilePath>()
         .map_err(|e| IpcError::Transport(format!("имя канала: {e}")))?;
 
-    LocalSocketStream::connect(name).await.map_err(classify)
+    let stream = LocalSocketStream::connect(name).await.map_err(classify)?;
+    let expected = if unix::is_system_path(path) {
+        0
+    } else {
+        nix::unistd::geteuid().as_raw()
+    };
+    crate::auth::check_server(&stream, expected)?;
+    Ok(stream)
 }
 
 /// Переводит отказ подключения в понятную ошибку.
@@ -146,18 +164,16 @@ mod tests {
         assert_eq!(CHANNEL_NAME, "penguin-control.sock");
     }
 
-    #[tokio::test]
-    async fn connecting_without_a_daemon_says_so() {
-        // Самая частая ошибка у пользователя: служба не запущена. Сообщение
-        // должно говорить именно это, а не «файл не найден».
-        match connect().await {
-            // Демон и правда работает — тоже законный исход.
-            Ok(_) => {}
-            Err(err) => assert!(
-                matches!(err, IpcError::DaemonNotRunning | IpcError::AccessDenied),
-                "невнятная ошибка: {err}"
-            ),
+    #[test]
+    fn connection_errors_are_classified_without_contacting_a_service() {
+        use std::io::ErrorKind;
+        for kind in [ErrorKind::NotFound, ErrorKind::ConnectionRefused] {
+            assert!(matches!(classify(kind.into()), IpcError::DaemonNotRunning));
         }
+        assert!(matches!(
+            classify(ErrorKind::PermissionDenied.into()),
+            IpcError::AccessDenied
+        ));
     }
 
     #[cfg(unix)]
@@ -174,14 +190,24 @@ mod tests {
         // работает», а не «отказано в доступе».
         assert!(matches!(listen_at(&path), Err(IpcError::AlreadyRunning)));
 
-        let connecting = connect_at(&path);
-        let accepted = listener.accept().await;
-
-        assert!(accepted.is_ok(), "соединение не принято");
-        assert!(connecting.await.is_ok(), "клиент не подключился");
+        // Drain the live-listener probe, then accept the actual client.
+        drop(listener.accept().await.expect("probe"));
+        let (connected, accepted) = tokio::join!(connect_at(&path), listener.accept());
+        let connected = connected.expect("client connected");
+        let accepted = accepted.expect("client accepted");
+        let uid = nix::unistd::geteuid().as_raw();
+        assert_eq!(connected.peer_creds().unwrap().euid(), Some(uid));
+        assert_eq!(accepted.peer_creds().unwrap().euid(), Some(uid));
+        assert!(crate::auth::check_peer(&accepted).is_ok());
+        assert!(crate::auth::check_server(&connected, uid).is_ok());
+        assert!(matches!(
+            crate::auth::check_server(&connected, uid ^ 1),
+            Err(IpcError::AccessDenied)
+        ));
 
         drop(listener);
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(path.parent().expect("directory"));
     }
 
     #[cfg(unix)]
@@ -208,25 +234,16 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn listen_and_connect_meet() {
-        // Канал один на систему, поэтому тест и на приём, и на подключение
-        // здесь один: два теста, открывающих канал, мешали бы друг другу так
-        // же, как мешают два демона.
-        let listener = match listen() {
-            Ok(listener) => listener,
-            // Демон уже занял канал — законный исход на рабочей машине.
-            Err(IpcError::AlreadyRunning) => return,
-            Err(err) => panic!("канал не открылся: {err}"),
-        };
-
-        assert!(matches!(listen(), Err(IpcError::AlreadyRunning)));
-
-        let client = tokio::spawn(async { connect().await });
-        let accepted = listener.accept().await;
-
-        assert!(accepted.is_ok(), "соединение не принято");
-        assert!(
-            client.await.expect("задача").is_ok(),
-            "клиент не подключился"
-        );
+        use interprocess::TryClone;
+        use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
+        let label = format!("penguin-transport-test-{}", std::process::id());
+        let name = label.to_ns_name::<GenericNamespaced>().unwrap();
+        let options = windows::secure(ListenerOptions::new().name(name.clone())).unwrap();
+        let listener = options.try_clone().unwrap().create_tokio().unwrap();
+        assert!(options.create_tokio().is_err());
+        let (connected, accepted) =
+            tokio::join!(LocalSocketStream::connect(name), listener.accept());
+        assert!(connected.is_ok());
+        assert!(accepted.is_ok());
     }
 }

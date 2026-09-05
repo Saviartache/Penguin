@@ -48,6 +48,18 @@ impl Server {
     /// работает» должна прийти тому, кто её запускал.
     pub async fn serve(&self, cancel: CancellationToken) -> IpcResult<()> {
         let listener = transport::listen()?;
+        self.serve_with_listener(listener, cancel).await
+    }
+
+    /// Serves an already-bound listener until cancellation.
+    ///
+    /// Bind with [`transport::listen`] before recovery or autoconnect, so a
+    /// second daemon cannot modify networking before discovering the first.
+    pub async fn serve_with_listener(
+        &self,
+        listener: LocalSocketListener,
+        cancel: CancellationToken,
+    ) -> IpcResult<()> {
         tracing::info!(channel = transport::CHANNEL_NAME, "канал управления открыт");
 
         loop {
@@ -185,6 +197,41 @@ mod tests {
             }),
             events,
         )
+    }
+
+    #[tokio::test]
+    async fn a_prebound_listener_serves_requests_and_cancels() {
+        use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
+
+        // A test-only endpoint, never the installed service's channel.
+        let label = format!("penguin-prebound-test-{}", std::process::id());
+        let name = label.to_ns_name::<GenericNamespaced>().unwrap();
+        let options = ListenerOptions::new().name(name.clone());
+        #[cfg(windows)]
+        let options = transport::windows::secure(options).unwrap();
+        let listener = options.create_tokio().unwrap();
+        let (handler, _events) = handler();
+        let server = Server::new(handler);
+        let cancel = CancellationToken::new();
+        let serving = server.serve_with_listener(listener, cancel.clone());
+        let client = async {
+            let stream = LocalSocketStream::connect(name).await.unwrap();
+            #[cfg(unix)]
+            auth::check_server(&stream, nix::unistd::geteuid().as_raw()).unwrap();
+            let (mut reader, mut writer) = stream.split();
+            codec::write(&mut writer, &Request::Ping).await.unwrap();
+            assert!(matches!(
+                codec::read::<_, Response>(&mut reader).await.unwrap(),
+                Response::Pong { .. }
+            ));
+            cancel.cancel();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (result, ()) = tokio::join!(serving, client);
+            result.unwrap();
+        })
+        .await
+        .expect("prebound server responded and stopped");
     }
 
     #[tokio::test]

@@ -20,7 +20,7 @@ pub async fn send(request: Request) -> IpcResult<Response> {
     let limit = limit_for(&request);
 
     tokio::time::timeout(limit, async {
-        let mut client = Client::connect().await?;
+        let mut client = Client::connect_service().await?;
         client.request(request).await
     })
     .await

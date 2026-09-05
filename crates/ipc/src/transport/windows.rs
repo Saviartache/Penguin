@@ -34,6 +34,11 @@ use crate::error::{IpcError, IpcResult};
 /// `GA` — полный доступ, `GRGW` — чтение и запись.
 const CHANNEL_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
 
+/// Connects to the system service using the same named pipe as [`super::connect`].
+pub async fn connect_service() -> IpcResult<interprocess::local_socket::tokio::Stream> {
+    super::connect().await
+}
+
 /// Добавляет к настройкам слушателя дескриптор безопасности.
 pub fn secure(options: ListenerOptions<'_>) -> IpcResult<ListenerOptions<'_>> {
     let sddl = widestring::U16CString::from_str(CHANNEL_SDDL)

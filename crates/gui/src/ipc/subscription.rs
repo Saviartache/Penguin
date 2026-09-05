@@ -57,14 +57,16 @@ enum Stage {
 
 /// Подключается к демону и переходит к прослушиванию.
 async fn connect() -> (Message, Stage) {
-    match Client::connect().await {
-        Ok(client) => match client.subscribe().await {
-            Ok(stream) => (
-                Message::Ipc(IpcMessage::Disconnected(String::new())),
-                Stage::Listening(stream),
-            ),
-            Err(err) => fail(err.to_string()).await,
-        },
+    let result = tokio::time::timeout(penguin_ipc::client::ANSWER_TIMEOUT, async {
+        Client::connect_service().await?.subscribe().await
+    })
+    .await
+    .unwrap_or(Err(penguin_ipc::IpcError::NoAnswer));
+    match result {
+        Ok(stream) => (
+            Message::Ipc(IpcMessage::Disconnected(String::new())),
+            Stage::Listening(stream),
+        ),
         Err(err) => fail(err.to_string()).await,
     }
 }

@@ -10,10 +10,8 @@
 //! права можно изменить снаружи. Поэтому там дополнительно сверяется
 //! владелец процесса.
 //!
-//! Список тот же, что и в дескрипторе на Windows: суперпользователь,
-//! администраторы машины и тот, кто демона запустил. Окно работает под
-//! человеком, а служба — под системой, и без администраторов в этом списке
-//! человек не смог бы даже нажать «Подключить».
+//! Unix admits root, administrators, the daemon's own UID, and the one desktop
+//! UID explicitly approved by an elevated helper for the root service.
 
 use interprocess::local_socket::tokio::prelude::*;
 
@@ -48,7 +46,26 @@ pub fn check_peer(stream: &LocalSocketStream) -> IpcResult<()> {
     // человеком, и без этого человек не смог бы нажать даже «Подключить».
     // Нового доступа это не даёт: администратор и так может стать
     // суперпользователем.
-    if peer == ours || peer == 0 || crate::transport::unix::is_administrator(peer) {
+    let administrator = crate::transport::unix::is_administrator(peer);
+    let approved = if ours == 0 && peer != 0 && !administrator {
+        crate::controller::approved()?
+    } else {
+        None
+    };
+    if crate::policy::permits(peer, ours, approved, administrator) {
+        Ok(())
+    } else {
+        Err(crate::error::IpcError::AccessDenied)
+    }
+}
+
+/// Verifies the Unix server UID before any request or secret is sent.
+#[cfg(unix)]
+pub(crate) fn check_server(stream: &LocalSocketStream, expected: u32) -> IpcResult<()> {
+    // interprocess exposes SO_PEERCRED.uid on Linux and LOCAL_PEERCRED.cr_uid
+    // on macOS. A missing EUID is a denial, never a reason to trust the path.
+    let peer = stream.peer_creds().ok().and_then(|creds| creds.euid());
+    if crate::policy::trusts_server(peer, expected) {
         Ok(())
     } else {
         Err(crate::error::IpcError::AccessDenied)
