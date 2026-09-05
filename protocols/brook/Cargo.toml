@@ -1,0 +1,35 @@
+[package]
+name = "penguin-brook"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Протокол Brook: AES-256-GCM с меткой времени в нонсе"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# Свой AEAD, а не `penguin_transport::aead`: у Brook нонс не считается от
+# нуля, а начинается с той же случайной соли, что идёт на вывод ключа, и
+# наращивается по-своему (см. документ `frame`). Общий кадр этого не умеет.
+ring.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros", "net"] }
+async-trait.workspace = true
+bytes.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

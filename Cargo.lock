@@ -3410,6 +3410,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "penguin-brook"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "rand 0.8.8",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "penguin-cli"
 version = "0.1.0"
 dependencies = [
@@ -3507,6 +3525,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "penguin-anytls",
+ "penguin-brook",
  "penguin-config",
  "penguin-core",
  "penguin-dns",
