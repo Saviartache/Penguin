@@ -4734,6 +4734,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "penguin-utls"
+version = "0.1.0"
+dependencies = [
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "rand 0.8.8",
+ "ring",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "penguin-vless"
 version = "0.1.0"
 dependencies = [

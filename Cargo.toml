@@ -31,6 +31,7 @@ members = [
     "protocols/naive",
     "protocols/shadowsocksr",
     "protocols/ssh",
+    "protocols/utls",
     "protocols/tuic",
     "protocols/vless",
     "protocols/shadowsocks",
@@ -79,6 +80,7 @@ penguin-mieru = { path = "protocols/mieru" }
 penguin-naive = { path = "protocols/naive" }
 penguin-shadowsocksr = { path = "protocols/shadowsocksr" }
 penguin-ssh = { path = "protocols/ssh" }
+penguin-utls = { path = "protocols/utls" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-tuic = { path = "protocols/tuic" }
 penguin-vless = { path = "protocols/vless" }
