@@ -43,6 +43,7 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["trojan://"],
     from_link: Some(from_link),
+    note: None,
 };
 
 /// Как ссылка ложится в поля.

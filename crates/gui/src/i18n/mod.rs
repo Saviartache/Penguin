@@ -225,6 +225,14 @@ pub struct Strings {
     pub host_fingerprint_example: &'static str,
     /// Не задан ключ хоста.
     pub need_host_fingerprint: &'static str,
+    /// Параметр обфускации.
+    pub obfs_param: &'static str,
+    /// Что вписать в параметр обфускации.
+    pub obfs_param_example: &'static str,
+    /// Надстройка кадра у ShadowsocksR.
+    pub ssr_protocol: &'static str,
+    /// Предупреждение: шифры ShadowsocksR не заверяют данные.
+    pub ssr_no_authentication: &'static str,
     /// Не задан адрес.
     pub need_server: &'static str,
     /// Не задан пароль.
@@ -476,6 +484,10 @@ mod tests {
                 table.host_fingerprint,
                 table.host_fingerprint_example,
                 table.need_host_fingerprint,
+                table.obfs_param,
+                table.obfs_param_example,
+                table.ssr_protocol,
+                table.ssr_no_authentication,
                 table.need_server,
                 table.need_password,
                 table.bad_server,

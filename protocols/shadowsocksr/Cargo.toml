@@ -1,0 +1,44 @@
+[package]
+name = "penguin-shadowsocksr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Протокол ShadowsocksR: потоковые шифры и надстройки obfs/protocol"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# Вывод ключа из пароля: тот же EVP_BytesToKey, что у Shadowsocks, — так
+# делает сервер, и заменить это нельзя, не сломав совместимость.
+md-5.workspace = true
+sha1.workspace = true
+hmac.workspace = true
+
+# Потоковые шифры SSR. В `ring` их нет — там только AEAD.
+aes.workspace = true
+cfb-mode.workspace = true
+ctr.workspace = true
+rc4.workspace = true
+
+rand.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

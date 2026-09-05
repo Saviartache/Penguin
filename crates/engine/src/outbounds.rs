@@ -188,6 +188,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "gost-relay" => &["gost-relay"],
         "brook" => &["brook"],
         "mieru" => &["mieru"],
+        "shadowsocksr" => &["shadowsocksr"],
         "ssh" => &["ssh"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
@@ -234,6 +235,9 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     #[cfg(feature = "mieru")]
     registry.register(Arc::new(penguin_mieru::MieruFactory::new()));
+
+    #[cfg(feature = "shadowsocksr")]
+    registry.register(Arc::new(penguin_shadowsocksr::ShadowsocksrFactory::new()));
 
     #[cfg(feature = "ssh")]
     registry.register(Arc::new(penguin_ssh::SshFactory::new()));

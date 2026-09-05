@@ -39,6 +39,7 @@ pub static HTTP: ProtocolSpec = ProtocolSpec {
     fields: PLAIN,
     schemes: &["http://"],
     from_link: Some(from_link),
+    note: None,
 };
 
 /// Прокси под TLS.
@@ -48,6 +49,7 @@ pub static HTTPS: ProtocolSpec = ProtocolSpec {
     fields: SECURE,
     schemes: &["https://"],
     from_link: Some(from_link),
+    note: None,
 };
 
 /// Как ссылка ложится в поля.
