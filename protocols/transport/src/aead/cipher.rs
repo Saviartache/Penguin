@@ -20,11 +20,8 @@
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey};
 
-use crate::crypto::method::{Method, TAG_LEN};
-use crate::error::{ShadowsocksError, ShadowsocksResult};
-
-/// Длина нонса у всех трёх методов.
-pub const NONCE_LEN: usize = 12;
+use crate::aead::algorithm::{Algorithm, NONCE_LEN, TAG_LEN};
+use crate::error::{TransportError, TransportResult};
 
 /// Шифр одного направления: ключ и его счётчик.
 pub struct Cipher {
@@ -41,9 +38,9 @@ impl std::fmt::Debug for Cipher {
 
 impl Cipher {
     /// Собирает шифр вокруг сеансового ключа.
-    pub fn new(method: Method, key: &[u8]) -> ShadowsocksResult<Self> {
-        let key = UnboundKey::new(method.algorithm(), key)
-            .map_err(|_| ShadowsocksError::crypto("ключ не той длины"))?;
+    pub fn new(algorithm: Algorithm, key: &[u8]) -> TransportResult<Self> {
+        let key = UnboundKey::new(algorithm.ring(), key)
+            .map_err(|_| TransportError::config("ключ не той длины"))?;
         Ok(Self {
             key: LessSafeKey::new(key),
             nonce: [0u8; NONCE_LEN],
@@ -51,12 +48,12 @@ impl Cipher {
     }
 
     /// Зашифровывает кусок и дописывает метку подлинности.
-    pub fn seal(&mut self, plain: &[u8]) -> ShadowsocksResult<Vec<u8>> {
+    pub fn seal(&mut self, plain: &[u8]) -> TransportResult<Vec<u8>> {
         let mut buffer = plain.to_vec();
         let nonce = self.take_nonce();
         self.key
             .seal_in_place_append_tag(nonce, Aad::empty(), &mut buffer)
-            .map_err(|_| ShadowsocksError::crypto("не зашифровалось"))?;
+            .map_err(|_| TransportError::malformed("не зашифровалось"))?;
         Ok(buffer)
     }
 
@@ -65,12 +62,12 @@ impl Cipher {
     /// `Err` — метка не сошлась. Это не «шум на линии»: AEAD заверяет данные,
     /// и не сошедшаяся метка означает либо неверный пароль, либо правку по
     /// дороге. Продолжать после неё нельзя ни в каком случае.
-    pub fn open(&mut self, buffer: &mut [u8]) -> ShadowsocksResult<usize> {
+    pub fn open(&mut self, buffer: &mut [u8]) -> TransportResult<usize> {
         let nonce = self.take_nonce();
         let plain = self
             .key
             .open_in_place(nonce, Aad::empty(), buffer)
-            .map_err(|_| ShadowsocksError::Rejected)?;
+            .map_err(|_| TransportError::Rejected)?;
         Ok(plain.len())
     }
 
@@ -105,119 +102,86 @@ pub fn sealed_len(plain: usize) -> usize {
 mod tests {
     use super::*;
 
-    fn cipher(method: Method) -> Cipher {
-        Cipher::new(method, &vec![7u8; method.key_len()]).expect("ключ подходит")
+    const ALL: [Algorithm; 3] = [
+        Algorithm::Aes128Gcm,
+        Algorithm::Aes256Gcm,
+        Algorithm::ChaCha20Poly1305,
+    ];
+
+    fn cipher(algorithm: Algorithm) -> Cipher {
+        Cipher::new(algorithm, &vec![7u8; algorithm.key_len()]).expect("ключ подходит")
     }
 
     #[test]
     fn what_is_sealed_can_be_opened() {
-        for method in [
-            Method::Aes128Gcm,
-            Method::Aes256Gcm,
-            Method::Chacha20Poly1305,
-        ] {
-            let mut send = cipher(method);
-            let mut recv = cipher(method);
+        for algorithm in ALL {
+            let mut send = cipher(algorithm);
+            let mut recv = cipher(algorithm);
 
             let mut wire = send.seal(b"payload").expect("шифруется");
             assert_eq!(wire.len(), sealed_len(b"payload".len()));
 
             let len = recv.open(&mut wire).expect("расшифровывается");
-            assert_eq!(&wire[..len], b"payload", "{}", method.name());
+            assert_eq!(&wire[..len], b"payload", "{}", algorithm.name());
         }
     }
 
     #[test]
-    fn the_counter_moves_after_every_piece() {
-        // Два одинаковых куска обязаны дать разные байты: иначе счётчик стоит
-        // на месте, и пара «ключ, счётчик» повторяется.
-        let mut send = cipher(Method::Aes256Gcm);
-        let first = send.seal(b"same").expect("шифруется");
-        let second = send.seal(b"same").expect("шифруется");
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn the_pieces_are_read_in_the_order_they_were_written() {
-        let mut send = cipher(Method::Aes256Gcm);
-        let mut recv = cipher(Method::Aes256Gcm);
-
+    fn the_counter_moves_and_the_order_of_the_pieces_matters() {
+        // Второй кусок под тем же ключом шифруется другим нонсом; поменять
+        // куски местами при расшифровке нельзя.
+        let mut send = cipher(Algorithm::Aes128Gcm);
         let mut first = send.seal(b"one").expect("шифруется");
         let mut second = send.seal(b"two").expect("шифруется");
 
-        let len = recv.open(&mut first).expect("расшифровывается");
-        assert_eq!(&first[..len], b"one");
-        let len = recv.open(&mut second).expect("расшифровывается");
-        assert_eq!(&second[..len], b"two");
-    }
+        // Второму куску достался следующий шаг счётчика: первым его не
+        // открыть, сколько бы правильным ни был ключ.
+        let mut ahead = cipher(Algorithm::Aes128Gcm);
+        assert!(ahead.open(&mut second.clone()).is_err(), "порядок не важен");
 
-    #[test]
-    fn a_piece_read_out_of_order_is_refused() {
-        // Счётчик у приёма свой, и пропущенный кусок означает не «потерю», а
-        // разъехавшийся поток: дальше всё будет мусором.
-        let mut send = cipher(Method::Aes256Gcm);
-        let mut recv = cipher(Method::Aes256Gcm);
-
-        let _skipped = send.seal(b"one").expect("шифруется");
-        let mut second = send.seal(b"two").expect("шифруется");
-
-        assert!(recv.open(&mut second).is_err());
+        let mut recv = cipher(Algorithm::Aes128Gcm);
+        recv.open(&mut first).expect("первый");
+        recv.open(&mut second).expect("второй");
     }
 
     #[test]
     fn a_changed_byte_is_noticed() {
-        // В этом весь смысл AEAD: правку по дороге видно. У потоковых шифров
-        // прежних версий её не видно вовсе.
-        let mut send = cipher(Method::Aes256Gcm);
-        let mut recv = cipher(Method::Aes256Gcm);
+        let mut send = cipher(Algorithm::Aes256Gcm);
+        let mut recv = cipher(Algorithm::Aes256Gcm);
 
         let mut wire = send.seal(b"payload").expect("шифруется");
-        wire[0] ^= 1;
-        assert!(recv.open(&mut wire).is_err());
-    }
-
-    #[test]
-    fn a_wrong_key_is_told_apart_from_a_broken_link() {
-        // Не сошедшаяся метка на первом же куске — это почти всегда неверный
-        // пароль, и повторять попытку с ним бессмысленно.
-        let mut send = cipher(Method::Aes256Gcm);
-        let mut recv = Cipher::new(Method::Aes256Gcm, &[9u8; 32]).expect("ключ подходит");
-
-        let mut wire = send.seal(b"payload").expect("шифруется");
+        wire[0] ^= 0x01;
         assert!(matches!(
             recv.open(&mut wire),
-            Err(ShadowsocksError::Rejected)
+            Err(TransportError::Rejected)
         ));
     }
 
     #[test]
-    fn the_counter_counts_from_the_low_byte() {
-        // Обратный порядок дал бы совпадение на первых 65535 кусках и разрыв
-        // дальше: соединение, которое работает час и потом рвётся.
+    fn the_counter_counts_from_the_low_byte_up() {
+        // При обратном порядке первые 65535 кусков совпали бы с правильными,
+        // а дальше разошлись бы: соединение работает час и рвётся.
         let mut nonce = [0u8; NONCE_LEN];
         increment(&mut nonce);
         assert_eq!(nonce[0], 1, "единица легла не в младший байт");
-        assert_eq!(nonce[1..], [0u8; NONCE_LEN - 1]);
+
+        let mut nonce = [0xff, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        increment(&mut nonce);
+        assert_eq!(nonce[..2], [0x00, 0x01], "перенос ушёл не туда");
     }
 
     #[test]
-    fn the_counter_carries_over() {
-        let mut nonce = [0u8; NONCE_LEN];
-        nonce[0] = 0xFF;
+    fn the_counter_wraps_without_panicking() {
+        // Столько кусков в одном соединении не бывает, но паника здесь
+        // оборвала бы тоннель, а не соединение.
+        let mut nonce = [0xff; NONCE_LEN];
         increment(&mut nonce);
-        assert_eq!(nonce[0], 0);
-        assert_eq!(nonce[1], 1);
-
-        // И через несколько байт тоже.
-        let mut nonce = [0xFFu8; NONCE_LEN];
-        nonce[NONCE_LEN - 1] = 0;
-        increment(&mut nonce);
-        assert_eq!(nonce[..NONCE_LEN - 1], [0u8; NONCE_LEN - 1]);
-        assert_eq!(nonce[NONCE_LEN - 1], 1);
+        assert_eq!(nonce, [0u8; NONCE_LEN]);
     }
 
     #[test]
     fn a_key_of_the_wrong_length_is_refused() {
-        assert!(Cipher::new(Method::Aes256Gcm, &[0u8; 16]).is_err());
+        assert!(Cipher::new(Algorithm::Aes128Gcm, &[0u8; 15]).is_err());
+        assert!(Cipher::new(Algorithm::Aes256Gcm, &[0u8; 16]).is_err());
     }
 }

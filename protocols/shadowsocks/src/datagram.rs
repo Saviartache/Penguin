@@ -33,7 +33,7 @@ use penguin_transport::addr::socks;
 use rand::Rng;
 use tokio::net::UdpSocket;
 
-use crate::crypto::cipher::sealed_len;
+use crate::crypto::sealed_len;
 use crate::crypto::{Cipher, Method, kdf};
 use crate::error::{ShadowsocksError, ShadowsocksResult};
 
@@ -114,7 +114,7 @@ pub fn seal(
     rand::thread_rng().fill(&mut salt[..]);
 
     let key = kdf::session_key(master, &salt, method)?;
-    let mut cipher = Cipher::new(method, &key)?;
+    let mut cipher = Cipher::new(method.algorithm(), &key)?;
 
     let mut plain = Vec::with_capacity(socks::encoded_len(target) + payload.len());
     socks::encode(target, &mut plain)?;
@@ -138,7 +138,7 @@ pub fn open(
 
     let (salt, body) = datagram.split_at_mut(salt_len);
     let key = kdf::session_key(master, salt, method)?;
-    let mut cipher = Cipher::new(method, &key)?;
+    let mut cipher = Cipher::new(method.algorithm(), &key)?;
     let plain = cipher.open(body)?;
 
     let Some((source, used)) = socks::decode(&body[..plain])? else {

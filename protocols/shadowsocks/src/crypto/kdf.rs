@@ -26,7 +26,11 @@
 //! Поэтому на каждое соединение бросается случайная соль, она уходит первой,
 //! открытым текстом, и вместе с главным ключом даёт сеансовый.
 
+use std::sync::Arc;
+
 use md5::{Digest, Md5};
+use penguin_transport::aead::Keying;
+use penguin_transport::error::TransportError;
 use ring::hkdf;
 
 use crate::crypto::method::Method;
@@ -83,6 +87,21 @@ impl hkdf::KeyType for KeyLen {
     fn len(&self) -> usize {
         self.0
     }
+}
+
+/// Всё, что общему кадру нужно знать про ключи Shadowsocks.
+///
+/// Собирается один раз при подъёме направления: главный ключ выводится из
+/// пароля дорого, а сеансовый — на каждое соединение из соли.
+pub fn keying(master: Vec<u8>, method: Method) -> Keying {
+    Keying::new(
+        method.algorithm(),
+        method.salt_len(),
+        Arc::new(move |salt: &[u8]| {
+            session_key(&master, salt, method)
+                .map_err(|err| TransportError::config(err.to_string()))
+        }),
+    )
 }
 
 #[cfg(test)]

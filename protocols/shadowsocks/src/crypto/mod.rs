@@ -3,16 +3,18 @@
 //! ```text
 //!  method  какой шифр и какой длины у него ключ
 //!  kdf     пароль -> главный ключ -> сеансовый ключ
-//!  cipher  кусок под ключом и счётчиком
 //! ```
+//!
+//! Шифрование куска здесь больше не живёт: кадр у Shadowsocks общий с Snell,
+//! и лежит он в [`penguin_transport::aead`]. Своим у протокола остался только
+//! вывод ключа — тем они и различаются.
 //!
 //! Здесь нет ни сокетов, ни `tokio`: чистые вычисления, которые проверяются
 //! без сети. Сами шифры считает `ring` — своей реализации AEAD в проекте нет
 //! и не будет.
 
-pub mod cipher;
 pub mod kdf;
 pub mod method;
 
-pub use cipher::Cipher;
 pub use method::Method;
+pub use penguin_transport::aead::{Cipher, sealed_len};
