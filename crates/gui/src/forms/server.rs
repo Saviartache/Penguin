@@ -463,6 +463,7 @@ mod tests {
             "uuid" => "b831381d-6324-4d53-ad4f-8cda48b30811",
             "psk" => "общий ключ",
             "username" => "penguin",
+            "host_fingerprint" => "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
             _ => "",
         }
     }

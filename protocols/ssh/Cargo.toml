@@ -1,0 +1,37 @@
+[package]
+name = "penguin-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Протокол SSH: клиент, каналы direct-tcpip вместо своего шифрования"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# Своей реализации SSH в проекте нет и не будет: обмен ключами, шифры,
+# опознание, каналы — это отдельный проект. `ring` — тот же криптографический
+# бэкенд, что уже в дереве через `rustls`; `aws-lc-rs` из умолчания выключен,
+# чтобы не тащить второй бэкенд со своей сборкой C. `rsa` нужен: без него
+# клиент не прочитает ключ RSA, а это до сих пор частый формат на серверах.
+# `flate2` (сжатие) и `des`/`dsa` (устаревшие и небезопасные алгоритмы) не
+# включены за ненадобностью.
+russh = { workspace = true, default-features = false, features = ["ring", "rsa"] }
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
