@@ -24,6 +24,7 @@
 //! всех их тестов разом.
 
 pub mod anytls;
+pub mod brook;
 pub mod catalog;
 pub mod gost_relay;
 pub mod http;

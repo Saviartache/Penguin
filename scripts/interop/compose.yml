@@ -108,6 +108,15 @@ services:
       - "127.0.0.1:18388:8388/udp"
     networks: [interop]
 
+  # Brook. Настраивается строкой запуска: у этого проекта так принято.
+  brook:
+    image: txthinking/brook
+    command: server --listen :9999 --password secret
+    ports:
+      - "127.0.0.1:19999:9999"
+      - "127.0.0.1:19999:9999/udp"
+    networks: [interop]
+
   # Ретранслятор gost. Настраивается строкой запуска, а не файлом: у этого
   # проекта так принято, и файл настроек здесь был бы лишней сущностью.
   gost-relay:
