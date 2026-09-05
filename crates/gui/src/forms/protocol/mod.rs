@@ -31,6 +31,7 @@ pub mod http;
 pub mod hysteria2;
 pub mod juicity;
 pub mod mieru;
+pub mod naive;
 pub mod shadowsocks;
 pub mod shadowsocksr;
 pub mod snell;

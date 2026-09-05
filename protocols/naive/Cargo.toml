@@ -1,0 +1,43 @@
+[package]
+name = "penguin-naive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "NaiveProxy: CONNECT поверх HTTP/2 и HTTP/3 с дополнением трафика"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# HTTP/2: CONNECT-туннель поверх TLS-соединения с прокси.
+h2.workspace = true
+# HTTP/3: тот же CONNECT, но поверх QUIC. Из-за одного этого крейт и не
+# расширяет `http-proxy` — `quinn` не должен платиться тем, кто ходит только
+# по TCP.
+quinn = { workspace = true, features = ["rustls", "runtime-tokio"] }
+rustls = { workspace = true, features = ["ring", "std"] }
+h3.workspace = true
+h3-quinn.workspace = true
+http.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+rand.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
+# разбирает их только этот крейт.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
