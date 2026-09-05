@@ -22,6 +22,7 @@ use penguin_proto::registry::ProtocolRegistry;
 use tokio::sync::Mutex;
 
 use crate::direct::DirectOutbound;
+use crate::packet_tunnel::PacketTunnel;
 
 /// Пул исходящих направлений.
 pub struct OutboundPool {
@@ -99,12 +100,23 @@ impl OutboundPool {
             return Ok(Arc::clone(&existing));
         }
 
-        let factory = self.registry.get(&profile.outbound.protocol)?;
         let ctx = BuildContext {
             id: id.clone(),
             dialer: Arc::clone(&self.dialer),
         };
-        let outbound = factory.build(ctx, &profile.outbound.params).await?;
+
+        // Два реестра, одно направление наружу. Протокол уровня пакетов
+        // (WireGuard и его родня) приезжает сюда обёрнутым в мост
+        // ([`crate::packet_tunnel`]), и для всего, что выше, он неотличим от
+        // обычного: ни `router`, ни конвейер про пакеты не знают.
+        let outbound: Arc<dyn Outbound> =
+            if let Some(packets) = self.registry.get_packet(&profile.outbound.protocol) {
+                let tunnel = packets.build(ctx, &profile.outbound.params).await?;
+                Arc::new(PacketTunnel::new(tunnel))
+            } else {
+                let factory = self.registry.get(&profile.outbound.protocol)?;
+                factory.build(ctx, &profile.outbound.params).await?
+            };
 
         tracing::info!(
             profile = %profile.id,
