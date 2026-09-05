@@ -4826,7 +4826,9 @@ dependencies = [
  "penguin-transport",
  "rand 0.8.8",
  "ring",
+ "serde",
  "thiserror 2.0.20",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -4838,6 +4840,8 @@ dependencies = [
  "penguin-core",
  "penguin-proto",
  "penguin-transport",
+ "penguin-utls",
+ "ring",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

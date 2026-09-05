@@ -73,8 +73,7 @@ pub(crate) fn build(
     host: &str,
 ) -> UtlsResult<(Vec<ExtensionSlot>, Vec<KeyExchange>)> {
     let grease = GreaseValues::from_rng(rng);
-    let system_rng = ring::rand::SystemRandom::new();
-    let x25519 = key_exchange::generate_x25519(&system_rng)?;
+    let x25519 = key_exchange::generate_x25519();
 
     // Порядок не перемешивается, но два GREASE-расширения всё равно якоря:
     // это тот самый смысл, что и у Chrome — сборка не должна пытаться

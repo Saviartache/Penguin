@@ -12,10 +12,13 @@ description = "Протокол VLESS: опознание по UUID, шифру�
 workspace = true
 
 [dependencies]
-# Протокол зависит только от контракта, общих типов и общего транспорта.
+# Протокол зависит только от контракта, общих типов и общего транспорта, плюс
+# `penguin-utls` — крейт того же уровня (AGENTS.md §1.1.1), собирающий
+# ClientHello для Reality.
 penguin-core.workspace = true
 penguin-proto.workspace = true
 penguin-transport.workspace = true
+penguin-utls.workspace = true
 
 tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
 async-trait.workspace = true
@@ -25,6 +28,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Ключевое расписание TLS 1.3, AEAD записи рукопожатия и HMAC-проверка
+# сертификата Reality (`src/reality/`) — тот же провайдер, которым уже
+# пользуется `penguin-transport` и сам `penguin-utls`.
+ring.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

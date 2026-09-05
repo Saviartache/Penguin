@@ -7,6 +7,7 @@ use penguin_transport::tls::{ALPN_H2, ALPN_HTTP11, TlsConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{VlessError, VlessResult};
+use crate::reality::RealityConfig;
 
 /// Чем шифруется соединение до сервера.
 ///
@@ -25,6 +26,15 @@ pub enum Security {
     /// доставки перед сервером или соседний тоннель. Само по себе это значит,
     /// что UUID и адрес назначения идут по сети открытым текстом.
     None,
+    /// Reality: свой `ClientHello` с отпечатком браузера вместо обычного
+    /// TLS. Настройки — в [`VlessConfig::reality`].
+    ///
+    /// Проверяемо (сервер либо подтверждает себя, либо нет,
+    /// [`crate::reality::handshake::verify`]), но не готово нести байты
+    /// VLESS — рукопожатие останавливается на сертификате сервера
+    /// (см. [`crate::reality`]). `connector.rs` отвечает понятной ошибкой на
+    /// попытку открыть поток, а не притворяется работающим каналом.
+    Reality,
 }
 
 /// Чем поток переносится.
@@ -83,6 +93,10 @@ pub struct VlessConfig {
     /// TLS. Значим при `security = "tls"`.
     #[serde(default)]
     pub tls: TlsConfig,
+
+    /// Reality. Значимо при `security = "reality"`, и только тогда.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reality: Option<RealityConfig>,
 
     /// Чем переносится поток.
     #[serde(default)]
@@ -172,6 +186,12 @@ impl VlessConfig {
                  и требует разбора записей TLS на лету. Оставьте поле пустым"
             )));
         }
+        if self.security != Security::Reality && self.reality.is_some() {
+            return Err(VlessError::config(
+                "настройки `reality` заданы не при `security = \"reality\"`: \
+                 либо включите Reality, либо уберите их",
+            ));
+        }
         match self.security {
             Security::Tls => self.tls.validate()?,
             Security::None => {
@@ -186,6 +206,21 @@ impl VlessConfig {
                      открытым текстом — это законно, только если TLS снимает \
                      кто-то перед сервером"
                 );
+            }
+            Security::Reality => {
+                let reality = self.reality.as_ref().ok_or_else(|| {
+                    VlessError::config(
+                        "`security = \"reality\"` требует блок `reality` с ключом сервера",
+                    )
+                })?;
+                reality.validate()?;
+                if tls_is_set(&self.tls) {
+                    return Err(VlessError::config(
+                        "настройки TLS заданы при `security = \"reality\"`: Reality не \
+                         использует обычный TLS вовсе — либо уберите их, либо выберите \
+                         `security = \"tls\"`",
+                    ));
+                }
             }
         }
         if !self.transport.is_http() && (self.path.is_some() || self.host.is_some()) {
@@ -283,6 +318,61 @@ mod tests {
             ..config()
         };
         config.validate().expect("это законно");
+    }
+
+    fn reality() -> crate::reality::RealityConfig {
+        crate::reality::RealityConfig {
+            public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+            short_id: String::new(),
+            server_name: "www.example.com".to_owned(),
+            fingerprint: penguin_utls::Fingerprint::Chrome,
+        }
+    }
+
+    #[test]
+    fn reality_requires_its_own_settings_block() {
+        let config = VlessConfig {
+            security: Security::Reality,
+            ..config()
+        };
+        let err = config
+            .validate()
+            .expect_err("без ключа сервера не поднять Reality");
+        assert!(err.to_string().contains("reality"), "{err}");
+    }
+
+    #[test]
+    fn reality_settings_without_reality_security_are_refused() {
+        // Иначе человек заполняет блок `reality`, ничего не включив, и
+        // считает, что он уже действует.
+        let config = VlessConfig {
+            reality: Some(reality()),
+            ..config()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn tls_settings_together_with_reality_are_refused() {
+        // Reality не использует обычный TLS вовсе — заданный SNI молча
+        // ничего не изменил бы.
+        let mut config = VlessConfig {
+            security: Security::Reality,
+            reality: Some(reality()),
+            ..config()
+        };
+        config.tls.sni = Some("cdn.example.com".to_owned());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn a_good_reality_config_passes() {
+        let config = VlessConfig {
+            security: Security::Reality,
+            reality: Some(reality()),
+            ..config()
+        };
+        config.validate().expect("настройки Reality верны");
     }
 
     #[test]

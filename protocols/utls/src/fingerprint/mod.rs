@@ -21,6 +21,7 @@ use std::str::FromStr;
 
 use penguin_core::address::Address;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 
 use crate::client_hello;
 use crate::error::{UtlsError, UtlsResult};
@@ -32,7 +33,12 @@ use crate::record;
 /// Версии зафиксированы намеренно (`AGENTS.md`, задача фазы 19): отпечаток
 /// Chrome 120 и отпечаток Chrome 131 — разные наборы байт, и «просто chrome»
 /// не значит ничего. Подробности и сверка — в документе каждого модуля.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` даны сразу, а не только `FromStr`: отпечаток —
+/// поле настроек не только у Reality (`penguin-vless`), а у любого протокола,
+/// которому однажды понадобится этот крейт (см. `lib.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Fingerprint {
     /// Chrome 120 (ноябрь 2023).
     Chrome,
@@ -175,6 +181,37 @@ impl std::fmt::Debug for ClientHello {
 }
 
 impl ClientHello {
+    /// Смещение `SessionID` в [`Self::handshake_bytes`]: 4 байта заголовка
+    /// рукопожатия (тип и трёхбайтная длина, см. [`crate::record`]) + 2 байта
+    /// `legacy_version` + 32 байта `random` + 1 байт длины `SessionID` = 39.
+    ///
+    /// Не зависит ни от отпечатка, ни от перемешивания расширений: `random` и
+    /// то, что перед ним, — фиксированная по длине голова сообщения, а
+    /// расширения идут дальше, за шифрами и методами сжатия. У uTLS то же
+    /// самое названо явным числом с тем же комментарием: `hello.Raw[39:]
+    /// // the fixed location of \`Session ID\`` (`Xray-core`,
+    /// `transport/internet/reality/reality.go`, ревизия `cd4ce97`, строка 157
+    /// в функции `UClient`).
+    pub const SESSION_ID_OFFSET: usize = 39;
+
+    /// Заменяет `SessionID` в уже собранном сообщении на зашифрованные данные
+    /// опознания Reality.
+    ///
+    /// Существует только ради Reality: обычный клиент получает готовый
+    /// `SessionID` через [`Fingerprint::build`] и вызывать это незачем.
+    /// Reality не может сделать наоборот (передать готовые байты в `build`
+    /// сразу) — шифрование данных опознания использует в качестве
+    /// дополнительных данных (AAD) весь `ClientHello` целиком, а он неизвестен
+    /// до сборки. Поэтому порядок такой: собрать `ClientHello` с нулевым
+    /// `SessionID`, зашифровать данные опознания с этим `ClientHello` в
+    /// качестве AAD, подменить нули результатом — длина не меняется, и
+    /// `padding`, посчитанный на первом шаге, остаётся верным.
+    pub fn patch_session_id(&mut self, session_id: [u8; 32]) {
+        let start = Self::SESSION_ID_OFFSET;
+        self.handshake[start..start + 32].copy_from_slice(&session_id);
+        self.session_id = session_id;
+    }
+
     /// Сообщение рукопожатия целиком: заголовок (тип и длина) и тело.
     pub fn handshake_bytes(&self) -> &[u8] {
         &self.handshake
@@ -269,5 +306,43 @@ mod tests {
             .expect("собирается");
         let printed = format!("{hello:?}");
         assert!(!printed.contains("171")); // 0xAB как десятичное число
+    }
+
+    #[test]
+    fn patching_the_session_id_only_touches_those_32_bytes() {
+        for fingerprint in [
+            Fingerprint::Chrome,
+            Fingerprint::Firefox,
+            Fingerprint::Safari,
+        ] {
+            let (mut hello, _) = fingerprint.build(&host(), [0; 32]).expect("собирается");
+            let before = hello.handshake_bytes().to_vec();
+
+            hello.patch_session_id([0xEE; 32]);
+
+            let after = hello.handshake_bytes();
+            assert_eq!(after.len(), before.len(), "длина не меняется");
+            assert_eq!(hello.session_id, [0xEE; 32]);
+            let start = ClientHello::SESSION_ID_OFFSET;
+            assert_eq!(&after[start..start + 32], &[0xEE; 32]);
+            // Всё вокруг SessionID — то же самое, что было.
+            assert_eq!(&after[..start], &before[..start]);
+            assert_eq!(&after[start + 32..], &before[start + 32..]);
+        }
+    }
+
+    #[test]
+    fn the_session_id_offset_points_at_the_length_prefixed_session_id() {
+        // Байт перед данными — их длина (32), значит смещение верно указывает
+        // не куда-то ещё, а на них самих.
+        let (hello, _) = Fingerprint::Chrome
+            .build(&host(), [0x11; 32])
+            .expect("собирается");
+        let bytes = hello.handshake_bytes();
+        assert_eq!(bytes[ClientHello::SESSION_ID_OFFSET - 1], 32);
+        assert_eq!(
+            &bytes[ClientHello::SESSION_ID_OFFSET..ClientHello::SESSION_ID_OFFSET + 32],
+            &[0x11; 32]
+        );
     }
 }

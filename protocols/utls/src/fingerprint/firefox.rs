@@ -99,7 +99,7 @@ pub(crate) fn build(
     host: &str,
 ) -> UtlsResult<(Vec<ExtensionSlot>, Vec<KeyExchange>)> {
     let system_rng = ring::rand::SystemRandom::new();
-    let x25519 = key_exchange::generate_x25519(&system_rng)?;
+    let x25519 = key_exchange::generate_x25519();
     let p256 = key_exchange::generate_p256(&system_rng)?;
 
     // Ни одно расширение здесь не якорь: Firefox не перемешивает порядок,

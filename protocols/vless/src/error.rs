@@ -42,6 +42,10 @@ pub enum VlessError {
     #[error(transparent)]
     Transport(#[from] penguin_transport::TransportError),
 
+    /// Ошибка рукопожатия Reality.
+    #[error(transparent)]
+    Reality(#[from] crate::reality::RealityError),
+
     /// Ошибка ввода-вывода.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -70,6 +74,11 @@ impl From<VlessError> for ProtocolError {
             VlessError::UdpDisabled => Self::Unsupported("UDP"),
             VlessError::Disconnected(message) => Self::Disconnected(message),
             VlessError::Transport(err) => err.into(),
+            // `ProtocolError::AuthRejected` не несёт текста, а текст здесь —
+            // самое ценное: он честно называет, что сервер, не узнавший нас,
+            // неотличим от обычного сайта (см. `reality::error`). Тот же
+            // компромисс, что уже принят чуть выше для `Malformed`.
+            err @ VlessError::Reality(_) => Self::InvalidConfig(err.to_string()),
             VlessError::Io(err) => Self::Io(err),
         }
     }
