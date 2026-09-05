@@ -229,6 +229,32 @@ pub struct Strings {
     pub obfs_param: &'static str,
     /// Что вписать в параметр обфускации.
     pub obfs_param_example: &'static str,
+    /// Приватный ключ.
+    pub private_key: &'static str,
+    /// Не задан приватный ключ.
+    pub need_private_key: &'static str,
+    /// Публичный ключ сервера.
+    pub server_public_key: &'static str,
+    /// Не задан публичный ключ сервера.
+    pub need_server_public_key: &'static str,
+    /// Предварительный ключ.
+    pub preshared_key: &'static str,
+    /// Адрес интерфейса внутри тоннеля.
+    pub interface_address: &'static str,
+    /// Что вписать в адрес интерфейса.
+    pub interface_address_example: &'static str,
+    /// Не задан адрес интерфейса.
+    pub need_interface_address: &'static str,
+    /// Адрес IPv6 интерфейса.
+    pub interface_address_v6: &'static str,
+    /// Наибольший размер пакета.
+    pub mtu: &'static str,
+    /// Что вписать в MTU.
+    pub mtu_example: &'static str,
+    /// Как часто напоминать о себе.
+    pub keepalive: &'static str,
+    /// Что вписать в интервал.
+    pub keepalive_example: &'static str,
     /// Учётные данные для заголовка `Authorization`.
     pub authorization: &'static str,
     /// Предупреждение: через MASQUE ходит только UDP.
@@ -490,6 +516,19 @@ mod tests {
                 table.need_host_fingerprint,
                 table.obfs_param,
                 table.obfs_param_example,
+                table.private_key,
+                table.need_private_key,
+                table.server_public_key,
+                table.need_server_public_key,
+                table.preshared_key,
+                table.interface_address,
+                table.interface_address_example,
+                table.need_interface_address,
+                table.interface_address_v6,
+                table.mtu,
+                table.mtu_example,
+                table.keepalive,
+                table.keepalive_example,
                 table.authorization,
                 table.masque_udp_only,
                 table.ssr_protocol,

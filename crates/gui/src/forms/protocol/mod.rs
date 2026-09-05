@@ -42,6 +42,7 @@ pub mod ssh;
 pub mod trojan;
 pub mod tuic;
 pub mod vless;
+pub mod wireguard;
 
 pub use catalog::{ALL, DEFAULT, by_id, by_scheme};
 pub use spec::{FieldSpec, ProtocolSpec};

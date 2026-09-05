@@ -205,6 +205,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         // Одна фича, два имени: по HTTP/2 и по HTTP/3.
         "naive" => &["http2", "http3"],
         "masque" => &["masque"],
+        "wireguard" => &["wireguard"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         // Одна фича, два имени в настройках.
@@ -259,6 +260,12 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     // Две записи из одного крейта: тот же `CONNECT` и та же схема
     // дополнения, но поверх разных переносов.
+    // Первый протокол уровня пакетов, и потому вторая таблица реестра.
+    // Превращать его пакеты в соединения будет мост (`crate::packet_tunnel`),
+    // и выше по дереву он неотличим от обычного направления.
+    #[cfg(feature = "wireguard")]
+    registry.register_packet(Arc::new(penguin_wireguard::WireguardFactory::new()));
+
     #[cfg(feature = "masque")]
     registry.register(Arc::new(penguin_masque::MasqueFactory::new()));
 

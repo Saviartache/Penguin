@@ -1,0 +1,44 @@
+[package]
+name = "penguin-wireguard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "WireGuard: Noise IK поверх UDP, направление уровня пакетов"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# X25519 с многоразовым секретом. Почему не `ring::agreement` — в корневом
+# `Cargo.toml`, у самой строки зависимости.
+x25519-dalek.workspace = true
+blake2.workspace = true
+chacha20poly1305.workspace = true
+# HMAC-BLAKE2s из KDF рукопожатия собран вручную в `crypto::primitives`, а не
+# через крейт `hmac`: тот собирается только над хэшами с «нетерпеливой»
+# буферизацией блока, а у BLAKE2 она «ленивая» — это конфликт типажей, а не
+# версий, так что `hmac` этому крейту не нужен вовсе.
+rand.workspace = true
+
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# `net` — только здесь: интеграционный тест (`tests/loopback.rs`) поднимает
+# настоящий сокет на loopback ради поддельного сервера, ровно как это уже
+# делают `protocols/snell` и `protocols/mieru`. Производный код (`src/`,
+# кроме `#[cfg(test)]`) сокетов по-прежнему не открывает — их даёт `Dialer`.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }

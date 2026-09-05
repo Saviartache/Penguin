@@ -33,6 +33,7 @@ members = [
     "protocols/shadowsocksr",
     "protocols/ssh",
     "protocols/utls",
+    "protocols/wireguard",
     "protocols/tuic",
     "protocols/vless",
     "protocols/shadowsocks",
@@ -87,6 +88,7 @@ penguin-naive = { path = "protocols/naive" }
 penguin-shadowsocksr = { path = "protocols/shadowsocksr" }
 penguin-ssh = { path = "protocols/ssh" }
 penguin-utls = { path = "protocols/utls" }
+penguin-wireguard = { path = "protocols/wireguard" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-tuic = { path = "protocols/tuic" }
 penguin-vless = { path = "protocols/vless" }
@@ -153,6 +155,12 @@ md-5 = "0.10"
 # это примитив, который либо берут готовым, либо ошибаются в нём молча.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 rand = "0.8"
+# Только ради WireGuard: постоянный приватный ключ участвует в каждом
+# рукопожатии за весь сеанс, а `ring::agreement` потребляет его при первом же
+# использовании. `static_secrets` даёт многоразовый секрет — он же нужен и для
+# одноразового ключа рукопожатия, который в одном сеансе Noise IK участвует в
+# двух разных вычислениях Диффи-Хеллмана.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "getrandom"] }
 # Только ради ShadowsocksR: там все шифры потоковые, а в `ring` (AEAD) их
 # нет. Данные ими не заверяются — это свойство протокола, не наше решение
 # (см. документ крейта `penguin-shadowsocksr`).

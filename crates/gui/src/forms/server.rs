@@ -464,6 +464,12 @@ mod tests {
             "psk" => "общий ключ",
             "username" => "penguin",
             "host_fingerprint" => "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
+            // Ключи из примеров самого WireGuard: настоящие по длине и по
+            // записи, чужие по происхождению — выдуманные не прошли бы проверку
+            // длины в `validate()`.
+            "private_key" => "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
+            "server_public_key" => "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=",
+            "address_ipv4" => "10.0.0.2/32",
             _ => "",
         }
     }
