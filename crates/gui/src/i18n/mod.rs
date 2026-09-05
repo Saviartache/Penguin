@@ -201,6 +201,8 @@ pub struct Strings {
     pub psk: &'static str,
     /// Не задан общий ключ.
     pub need_psk: &'static str,
+    /// Не задано имя пользователя.
+    pub need_username: &'static str,
     /// Версия протокола, описания которого нет.
     pub snell_version: &'static str,
     /// Имя узла, под который прикрыто соединение.
@@ -456,6 +458,7 @@ mod tests {
                 table.obfs,
                 table.psk,
                 table.need_psk,
+                table.need_username,
                 table.snell_version,
                 table.obfs_host,
                 table.obfs_host_example,
