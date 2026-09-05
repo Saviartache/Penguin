@@ -1,0 +1,37 @@
+[package]
+name = "penguin-utls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Свой сборщик ClientHello с отпечатком браузера — для Reality, Trojan, VLESS/TLS"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Крейт уровня протоколов (AGENTS.md §1.1.1): зависит от того же, от чего
+# они, и о клиенте знает столько же — ничего. `core` даёт `Address` для SNI,
+# `proto` — язык ошибок, в который переводится своя ошибка.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+# ALPN-константы (`h2`, `http/1.1`) берутся отсюда, а не пишутся заново:
+# протокол, объявивший не тот ALPN, виден первым же пакетом рукопожатия, и
+# третья копия одного и того же списка байт — это третий шанс разойтись со
+# всеми остальными.
+penguin-transport.workspace = true
+
+# `agreement::EphemeralPrivateKey` — тот самый тип, что нужен для `key_share`:
+# сгенерировать пару можно один раз и отдать вызывающему для настоящего
+# рукопожатия позже, но раскрыть закрытый скаляр наружу нельзя — им и так
+# никто, кроме `ring`, не воспользуется правильно. `rustls` этот крейт уже
+# тянет в дерево, здесь он не новая зависимость, а прямое использование того,
+# что уже есть.
+ring.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rand = { workspace = true, features = ["small_rng"] }
