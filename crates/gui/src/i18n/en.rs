@@ -104,6 +104,8 @@ pub static STRINGS: Strings = Strings {
     need_host_fingerprint: "No host key: without it anyone can pose as the server",
     obfs_param: "Obfuscation parameter",
     obfs_param_example: "host names, comma separated; http_simple only",
+    login_group: "Group",
+    openconnect_no_dtls: "No DTLS here: all traffic goes over TCP inside TLS. On a lossy link this is noticeably slower",
     private_key: "Private key",
     need_private_key: "No private key",
     server_public_key: "Server public key",

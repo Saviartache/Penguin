@@ -1,0 +1,34 @@
+[package]
+name = "penguin-openconnect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Протокол OpenConnect (Cisco AnyConnect, ocserv): CSTP внутри TLS"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# `net` не включена нигде ниже: сокеты выдаёт `Dialer`, а не `tokio::net`.
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+tokio-util.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Опознание — это обмен HTTPS с XML: разбор ответов ocserv и сборка запросов.
+quick-xml.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

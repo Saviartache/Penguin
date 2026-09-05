@@ -229,6 +229,10 @@ pub struct Strings {
     pub obfs_param: &'static str,
     /// Что вписать в параметр обфускации.
     pub obfs_param_example: &'static str,
+    /// Группа входа на сервере.
+    pub login_group: &'static str,
+    /// Предупреждение: у OpenConnect нет DTLS.
+    pub openconnect_no_dtls: &'static str,
     /// Приватный ключ.
     pub private_key: &'static str,
     /// Не задан приватный ключ.
@@ -516,6 +520,8 @@ mod tests {
                 table.need_host_fingerprint,
                 table.obfs_param,
                 table.obfs_param_example,
+                table.login_group,
+                table.openconnect_no_dtls,
                 table.private_key,
                 table.need_private_key,
                 table.server_public_key,

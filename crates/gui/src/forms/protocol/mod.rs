@@ -33,6 +33,7 @@ pub mod juicity;
 pub mod masque;
 pub mod mieru;
 pub mod naive;
+pub mod openconnect;
 pub mod shadowsocks;
 pub mod shadowsocksr;
 pub mod snell;

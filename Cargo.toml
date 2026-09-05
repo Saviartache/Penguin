@@ -30,6 +30,7 @@ members = [
     "protocols/mieru",
     "protocols/masque",
     "protocols/naive",
+    "protocols/openconnect",
     "protocols/shadowsocksr",
     "protocols/ssh",
     "protocols/utls",
@@ -85,6 +86,7 @@ penguin-brook = { path = "protocols/brook" }
 penguin-mieru = { path = "protocols/mieru" }
 penguin-masque = { path = "protocols/masque" }
 penguin-naive = { path = "protocols/naive" }
+penguin-openconnect = { path = "protocols/openconnect" }
 penguin-shadowsocksr = { path = "protocols/shadowsocksr" }
 penguin-ssh = { path = "protocols/ssh" }
 penguin-utls = { path = "protocols/utls" }
@@ -129,6 +131,12 @@ smoltcp = { version = "0.12", default-features = false }
 # отдельный проект. Бэкенд и алгоритмы выбираются в `protocols/ssh`, чтобы не
 # тащить сюда второй криптографический бэкенд по умолчанию.
 russh = { version = "0.63", default-features = false }
+
+# Только ради OpenConnect: опознание на сервере ocserv устроено как обмен
+# HTTPS-запросами с телом XML. Свой разбор XML — это либо утиный разбор
+# строк, который молча ломается на первом же CDATA, либо копия этого
+# крейта, написанная хуже.
+quick-xml = "0.42"
 
 # --- данные ---
 serde = { version = "1", features = ["derive", "rc"] }

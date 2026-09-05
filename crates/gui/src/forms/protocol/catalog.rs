@@ -7,8 +7,8 @@
 
 use crate::forms::protocol::spec::ProtocolSpec;
 use crate::forms::protocol::{
-    anytls, brook, gost_relay, http, hysteria2, juicity, masque, mieru, naive, shadowsocks,
-    shadowsocksr, snell, socks5, ssh, trojan, tuic, vless, wireguard,
+    anytls, brook, gost_relay, http, hysteria2, juicity, masque, mieru, naive, openconnect,
+    shadowsocks, shadowsocksr, snell, socks5, ssh, trojan, tuic, vless, wireguard,
 };
 
 /// Протоколы в порядке показа.
@@ -17,6 +17,7 @@ use crate::forms::protocol::{
 /// выбора, ни редактор, ни разбор ссылок при этом не трогаются.
 pub static ALL: &[&ProtocolSpec] = &[
     &wireguard::SPEC,
+    &openconnect::SPEC,
     &hysteria2::SPEC,
     &tuic::SPEC,
     &juicity::SPEC,

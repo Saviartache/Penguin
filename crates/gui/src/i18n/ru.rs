@@ -104,6 +104,8 @@ pub static STRINGS: Strings = Strings {
     need_host_fingerprint: "Не задан ключ хоста — без него сервер подменит кто угодно",
     obfs_param: "Параметр обфускации",
     obfs_param_example: "имена узлов через запятую; только для http_simple",
+    login_group: "Группа",
+    openconnect_no_dtls: "DTLS здесь нет: весь трафик идёт по TCP внутри TLS. На плохой связи это заметно медленнее",
     private_key: "Приватный ключ",
     need_private_key: "Не задан приватный ключ",
     server_public_key: "Публичный ключ сервера",
