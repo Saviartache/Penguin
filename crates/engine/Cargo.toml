@@ -21,11 +21,17 @@ penguin-netstack.workspace = true
 penguin-inbound.workspace = true
 penguin-tun.workspace = true
 penguin-dns.workspace = true
+# Только ради имён внутри пакетного тоннеля: `RecordType` для сборки запроса.
+# В дереве он и так есть — его тянет `penguin-dns`.
+hickory-proto.workspace = true
 penguin-platform.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tokio-util.workspace = true
 bytes.workspace = true
+# Номер запроса DNS: совпадения мало для подлинности, но предсказуемый номер
+# облегчил бы подделку ответа тому, кто уже внутри тоннеля.
+rand.workspace = true
 # Снимки счётчиков и истории уезжают в интерфейс через канал управления.
 serde.workspace = true
 # Параметры профиля непрозрачны для движка и передаются протоколу как есть.

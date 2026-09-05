@@ -7,7 +7,7 @@
 //! компрессия, подсказки для переподключения и заголовки `X-DTLS-*` не
 //! посылаются вовсе — без них сервер их и не предложит.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use penguin_core::address::Address;
@@ -57,6 +57,11 @@ pub struct Params {
     pub keepalive: Option<Duration>,
     /// `X-CSTP-DPD`. Не задан — сервер не просил проверки живости.
     pub dpd: Option<Duration>,
+    /// Серверы имён из `X-CSTP-DNS`, в порядке прихода.
+    ///
+    /// Их надо брать именно у сервера: внутри тоннеля часто своё пространство
+    /// имён, и чужой сервер имён про него не знает.
+    pub dns: Vec<IpAddr>,
 }
 
 /// Открывает тоннель: новое TLS-соединение, запрос `CONNECT`, разбор ответа.
@@ -133,7 +138,19 @@ fn parse_params(head: &Head) -> OpenConnectResult<Params> {
         mtu: parse_mtu(head)?,
         keepalive: parse_seconds(head, "X-CSTP-Keepalive")?,
         dpd: parse_seconds(head, "X-CSTP-DPD")?,
+        dns: parse_dns(head),
     })
+}
+
+/// Серверы имён из `X-CSTP-DNS`.
+///
+/// Заголовок повторяется по разу на сервер (`worker-vpn.c`), а не собирает
+/// их в одну строку. Неразборчивое значение пропускается, а не роняет вход:
+/// тоннель без сервера имён работает, просто без доменных имён.
+fn parse_dns(head: &Head) -> Vec<IpAddr> {
+    head.headers_named("X-CSTP-DNS")
+        .filter_map(|value| value.trim().parse::<IpAddr>().ok())
+        .collect()
 }
 
 /// Адрес IPv4 и его префикс. Обязателен: [`penguin_proto::packet::PacketInterface::ipv4`]

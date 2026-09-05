@@ -251,6 +251,10 @@ pub struct Strings {
     pub need_interface_address: &'static str,
     /// Адрес IPv6 интерфейса.
     pub interface_address_v6: &'static str,
+    /// Серверы имён внутри тоннеля.
+    pub tunnel_dns: &'static str,
+    /// Что вписать в серверы имён.
+    pub tunnel_dns_example: &'static str,
     /// Наибольший размер пакета.
     pub mtu: &'static str,
     /// Что вписать в MTU.
@@ -531,6 +535,8 @@ mod tests {
                 table.interface_address_example,
                 table.need_interface_address,
                 table.interface_address_v6,
+                table.tunnel_dns,
+                table.tunnel_dns_example,
                 table.mtu,
                 table.mtu_example,
                 table.keepalive,

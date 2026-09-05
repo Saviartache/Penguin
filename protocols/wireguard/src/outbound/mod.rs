@@ -99,6 +99,7 @@ impl WireguardOutbound {
             ipv4: config.address_ipv4_parsed()?,
             ipv6: config.address_ipv6_parsed()?,
             mtu: config.mtu,
+            dns: config.dns.clone(),
         };
 
         let (outbound_tx, outbound_rx) = mpsc::channel(CHANNEL_CAPACITY);

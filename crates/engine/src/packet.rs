@@ -145,6 +145,7 @@ mod tests {
                     ipv4: (Ipv4Addr::new(10, 7, 0, 2), 24),
                     ipv6: None,
                     mtu: 1420,
+                    dns: Vec::new(),
                 },
                 incoming: Mutex::new(incoming),
                 sent: Mutex::new(Vec::new()),

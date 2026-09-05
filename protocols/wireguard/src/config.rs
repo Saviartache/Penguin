@@ -52,6 +52,19 @@ pub struct WireguardConfig {
     #[serde(default = "default_mtu")]
     pub mtu: u16,
 
+    /// Серверы имён внутри тоннеля — строка `DNS` из файла `wg-quick`.
+    ///
+    /// Задаётся в настройках, а не приходит от сервера: у WireGuard нет
+    /// разговора, в котором сервер что-то рассказывает о себе. Пустой список
+    /// означает, что доменные имена через это направление не разрешить —
+    /// см. [`penguin_proto::packet::PacketInterface::dns`].
+    ///
+    /// Принимается и списком, и строкой через запятую — так эту же настройку
+    /// пишет сам `wg-quick` (`DNS = 1.1.1.1, 8.8.8.8`), и так её набирает
+    /// человек в окне.
+    #[serde(default, deserialize_with = "deserialize_dns")]
+    pub dns: Vec<std::net::IpAddr>,
+
     /// Интервал `PersistentKeepalive` в секундах. Ноль — выключен.
     ///
     /// За NAT без него шлюз забывает отображение адреса через минуту-другую,
@@ -81,6 +94,44 @@ const fn default_keepalive_secs() -> u32 {
     DEFAULT_KEEPALIVE_SECS
 }
 
+/// Читает [`WireguardConfig::dns`] и списком, и строкой через запятую.
+///
+/// Строка — потому что так эту настройку пишет `wg-quick` и так её набирает
+/// человек в окне; список — потому что так её удобно писать в TOML и JSON.
+/// Разбирать одно, а принимать другое значило бы заставить человека узнать,
+/// какой из двух видов «правильный».
+///
+/// Неразборчивый адрес — ошибка, а не пропуск: молча выброшенный сервер имён
+/// означает тоннель, в котором имена перестали разрешаться, и искать причину
+/// человек будет где угодно, только не в запятой.
+fn deserialize_dns<'de, D>(deserializer: D) -> Result<Vec<std::net::IpAddr>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    use serde::de::Error as _;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Written {
+        Text(String),
+        List(Vec<std::net::IpAddr>),
+    }
+
+    match Written::deserialize(deserializer)? {
+        Written::List(list) => Ok(list),
+        Written::Text(text) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                part.parse::<std::net::IpAddr>()
+                    .map_err(|e| D::Error::custom(format!("сервер имён `{part}`: {e}")))
+            })
+            .collect(),
+    }
+}
+
 // Написано руками, а не выведено: производный `Default` дал бы `mtu: 0` и
 // `keepalive_secs: 0`, то есть настройки, собранные в коде, вели бы себя не
 // так, как ровно те же настройки, прочитанные из файла.
@@ -93,6 +144,7 @@ impl Default for WireguardConfig {
             preshared_key: None,
             address_ipv4: String::new(),
             address_ipv6: None,
+            dns: Vec::new(),
             mtu: default_mtu(),
             keepalive_secs: default_keepalive_secs(),
             reserved: [0, 0, 0],
@@ -232,6 +284,56 @@ mod tests {
             address_ipv4: "10.0.0.2/32".to_owned(),
             ..WireguardConfig::default()
         }
+    }
+
+    /// Разбирает настройки с заданным полем `dns`.
+    fn with_dns(written: serde_json::Value) -> Result<WireguardConfig, serde_json::Error> {
+        serde_json::from_value(json!({
+            "server": "vpn.example.com:51820",
+            "private_key": ZERO_KEY,
+            "server_public_key": ZERO_KEY,
+            "address_ipv4": "10.0.0.2/32",
+            "dns": written,
+        }))
+    }
+
+    #[test]
+    fn the_name_servers_are_read_both_as_a_list_and_as_a_line() {
+        // Списком их удобно писать в файле, строкой через запятую — их пишет
+        // `wg-quick` и набирает человек в окне. Принимать надо оба вида:
+        // иначе человеку придётся узнать, какой из них «правильный».
+        let expected: Vec<std::net::IpAddr> = vec![
+            "1.1.1.1".parse().expect("адрес"),
+            "8.8.8.8".parse().expect("адрес"),
+        ];
+
+        let list = with_dns(json!(["1.1.1.1", "8.8.8.8"])).expect("список разбирается");
+        assert_eq!(list.dns, expected);
+
+        let line = with_dns(json!("1.1.1.1, 8.8.8.8")).expect("строка разбирается");
+        assert_eq!(line.dns, expected);
+    }
+
+    #[test]
+    fn an_empty_line_of_name_servers_means_none() {
+        let config = with_dns(json!("")).expect("разбирается");
+        assert!(config.dns.is_empty());
+    }
+
+    #[test]
+    fn a_misspelled_name_server_is_refused_instead_of_dropped() {
+        // Молча выброшенный сервер имён означает тоннель, в котором имена
+        // перестали разрешаться, и причину человек будет искать где угодно,
+        // только не в запятой.
+        let error = with_dns(json!("1.1.1.1, 8.8.8")).expect_err("адрес неверен");
+        assert!(error.to_string().contains("8.8.8"), "{error}");
+    }
+
+    #[test]
+    fn without_name_servers_the_list_is_empty_not_absent() {
+        // Поле необязательное: тоннель без сервера имён работает, просто
+        // доменные имена через него не разрешить.
+        assert!(config().dns.is_empty());
     }
 
     #[test]

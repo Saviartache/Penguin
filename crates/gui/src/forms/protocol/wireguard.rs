@@ -35,6 +35,10 @@ static FIELDS: &[FieldSpec] = &[
         s.interface_address_v6
     })
     .example(|s| s.optional_hint),
+    // Без него через тоннель ходят только соединения на голый адрес: имя
+    // разрешать нечем, а спрашивать снаружи нельзя — это отдало бы список
+    // имён мимо тоннеля.
+    FieldSpec::text("dns", &["dns"], |s| s.tunnel_dns).example(|s| s.tunnel_dns_example),
     FieldSpec::text("mtu", &["mtu"], |s| s.mtu).example(|s| s.mtu_example),
     FieldSpec::text("keepalive_secs", &["keepalive_secs"], |s| s.keepalive)
         .example(|s| s.keepalive_example),

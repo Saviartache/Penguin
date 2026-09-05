@@ -115,6 +115,8 @@ pub static STRINGS: Strings = Strings {
     interface_address_example: "10.0.0.2/32",
     need_interface_address: "Не задан адрес в тоннеле — сервер его не сообщает",
     interface_address_v6: "Адрес IPv6 в тоннеле",
+    tunnel_dns: "Серверы имён",
+    tunnel_dns_example: "1.1.1.1, 8.8.8.8; без них имена не разрешатся",
     mtu: "MTU",
     mtu_example: "1420 при обычных 1500",
     keepalive: "Напоминать о себе, с",

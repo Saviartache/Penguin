@@ -115,6 +115,8 @@ pub static STRINGS: Strings = Strings {
     interface_address_example: "10.0.0.2/32",
     need_interface_address: "No address in the tunnel: the server will not tell it",
     interface_address_v6: "IPv6 address in the tunnel",
+    tunnel_dns: "Name servers",
+    tunnel_dns_example: "1.1.1.1, 8.8.8.8; without them names will not resolve",
     mtu: "MTU",
     mtu_example: "1420 when the outer one is 1500",
     keepalive: "Keepalive, s",
