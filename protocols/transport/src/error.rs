@@ -40,6 +40,14 @@ pub enum TransportError {
     #[error("{0} не уложилось в срок")]
     Timeout(&'static str),
 
+    /// Метка подлинности не сошлась.
+    ///
+    /// Для AEAD это не «шум на линии»: метка заверяет данные, и не сошедшаяся
+    /// означает либо неверный пароль, либо правку по дороге. Различить их
+    /// нельзя, и продолжать нельзя ни в том, ни в другом случае.
+    #[error("метка подлинности не сошлась: неверный пароль или правка по дороге")]
+    Rejected,
+
     /// Соединение оборвалось.
     #[error("соединение потеряно: {0}")]
     Disconnected(String),
@@ -80,6 +88,7 @@ impl From<TransportError> for ProtocolError {
             // стоит адрес не того сервера, повторять нечего.
             err @ TransportError::Malformed(_) => Self::InvalidConfig(err.to_string()),
             err @ TransportError::Timeout(_) => Self::Disconnected(err.to_string()),
+            TransportError::Rejected => Self::AuthRejected,
             TransportError::Disconnected(message) => Self::Disconnected(message),
             TransportError::Io(err) => Self::Io(err),
         }

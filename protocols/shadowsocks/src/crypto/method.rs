@@ -9,13 +9,16 @@
 //! который выглядит как «просто ещё один в списке», а на деле снимает защиту
 //! целиком, в списке стоять не должен.
 
-use ring::aead;
+use penguin_transport::aead::Algorithm;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{ShadowsocksError, ShadowsocksResult};
 
 /// Длина метки подлинности у всех трёх методов.
-pub const TAG_LEN: usize = 16;
+///
+/// Своя запись, а не своё число: считает метку общий слой, и разойтись им
+/// нельзя.
+pub const TAG_LEN: usize = penguin_transport::aead::TAG_LEN;
 
 /// Метод шифрования.
 ///
@@ -85,12 +88,12 @@ impl Method {
         self.key_len()
     }
 
-    /// Шифр в терминах `ring`.
-    pub fn algorithm(self) -> &'static aead::Algorithm {
+    /// Шифр в терминах общего слоя.
+    pub fn algorithm(self) -> Algorithm {
         match self {
-            Self::Aes128Gcm => &aead::AES_128_GCM,
-            Self::Aes256Gcm => &aead::AES_256_GCM,
-            Self::Chacha20Poly1305 => &aead::CHACHA20_POLY1305,
+            Self::Aes128Gcm => Algorithm::Aes128Gcm,
+            Self::Aes256Gcm => Algorithm::Aes256Gcm,
+            Self::Chacha20Poly1305 => Algorithm::ChaCha20Poly1305,
         }
     }
 }
@@ -158,13 +161,20 @@ mod tests {
     }
 
     #[test]
-    fn the_tag_is_the_same_length_everywhere() {
+    fn the_key_length_matches_the_shared_table() {
+        // Разойтись им нельзя: ключ выводит этот крейт, а собирает общий
+        // слой, и лишний байт означал бы «ключ не той длины» на ровном месте.
         for method in [
             Method::Aes128Gcm,
             Method::Aes256Gcm,
             Method::Chacha20Poly1305,
         ] {
-            assert_eq!(method.algorithm().tag_len(), TAG_LEN);
+            assert_eq!(
+                method.key_len(),
+                method.algorithm().key_len(),
+                "{}",
+                method.name()
+            );
         }
     }
 }

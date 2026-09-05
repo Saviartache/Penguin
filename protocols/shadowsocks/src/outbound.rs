@@ -26,7 +26,7 @@ use crate::config::ShadowsocksConfig;
 use crate::crypto::{Cipher, Method, kdf};
 use crate::datagram::ShadowsocksDatagram;
 use crate::error::{ShadowsocksError, ShadowsocksResult};
-use crate::stream::{SsStream, seal_chunk};
+use crate::stream::{self, seal_chunk};
 
 /// Исходящее направление через сервер Shadowsocks.
 pub struct ShadowsocksOutbound {
@@ -117,7 +117,7 @@ impl Outbound for ShadowsocksOutbound {
         rand::thread_rng().fill(&mut salt[..]);
 
         let key = kdf::session_key(&self.master, &salt, method).map_err(ProtocolError::from)?;
-        let mut send = Cipher::new(method, &key).map_err(ProtocolError::from)?;
+        let mut send = Cipher::new(method.algorithm(), &key).map_err(ProtocolError::from)?;
 
         // Адрес назначения — первый кусок внутри шифра. Он и соль уходят
         // одной записью: два пакета там, где протокол шлёт один, видны по
@@ -134,10 +134,9 @@ impl Outbound for ShadowsocksOutbound {
         })
         .await?;
 
-        Ok(Box::new(SsStream::new(
+        Ok(Box::new(stream::wrap(
             io,
-            method,
-            self.master.clone(),
+            kdf::keying(self.master.clone(), method),
             send,
         )))
     }
