@@ -33,6 +33,7 @@ members = [
     "protocols/openconnect",
     "protocols/shadowsocksr",
     "protocols/ssh",
+    "protocols/trusttunnel",
     "protocols/utls",
     "protocols/wireguard",
     "protocols/tuic",
@@ -89,6 +90,7 @@ penguin-naive = { path = "protocols/naive" }
 penguin-openconnect = { path = "protocols/openconnect" }
 penguin-shadowsocksr = { path = "protocols/shadowsocksr" }
 penguin-ssh = { path = "protocols/ssh" }
+penguin-trusttunnel = { path = "protocols/trusttunnel" }
 penguin-utls = { path = "protocols/utls" }
 penguin-wireguard = { path = "protocols/wireguard" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }

@@ -41,6 +41,7 @@ pub mod socks5;
 pub mod spec;
 pub mod ssh;
 pub mod trojan;
+pub mod trusttunnel;
 pub mod tuic;
 pub mod vless;
 pub mod wireguard;

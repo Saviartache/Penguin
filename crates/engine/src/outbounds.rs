@@ -207,6 +207,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "masque" => &["masque"],
         "wireguard" => &["wireguard"],
         "openconnect" => &["openconnect"],
+        "trusttunnel" => &["trusttunnel"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         // Одна фича, два имени в настройках.
@@ -269,6 +270,9 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     #[cfg(feature = "openconnect")]
     registry.register_packet(Arc::new(penguin_openconnect::OpenConnectFactory::new()));
+
+    #[cfg(feature = "trusttunnel")]
+    registry.register(Arc::new(penguin_trusttunnel::TrustTunnelFactory::new()));
 
     #[cfg(feature = "masque")]
     registry.register(Arc::new(penguin_masque::MasqueFactory::new()));

@@ -4300,6 +4300,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "dashmap",
+ "hickory-proto",
  "penguin-anytls",
  "penguin-brook",
  "penguin-config",
@@ -4325,10 +4326,12 @@ dependencies = [
  "penguin-socks5",
  "penguin-ssh",
  "penguin-trojan",
+ "penguin-trusttunnel",
  "penguin-tuic",
  "penguin-tun",
  "penguin-vless",
  "penguin-wireguard",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4754,6 +4757,25 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "penguin-trusttunnel"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "h2",
+ "http",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",

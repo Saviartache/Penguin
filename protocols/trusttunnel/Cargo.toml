@@ -1,0 +1,37 @@
+[package]
+name = "penguin-trusttunnel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "TrustTunnel: CONNECT поверх HTTP/2 без своего рукопожатия"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+# CONNECT-туннель поверх HTTP/2. HTTP/3 не реализован — см. документацию
+# крейта: спецификация прямо разрешает ограничиться одной ногой.
+h2.workspace = true
+http.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
+# разбирает их только этот крейт.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
