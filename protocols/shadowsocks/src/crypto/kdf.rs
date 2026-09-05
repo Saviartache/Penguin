@@ -8,14 +8,11 @@
 //!
 //! # Почему MD5 и почему это не наш выбор
 //!
-//! `EVP_BytesToKey` — старая функция из OpenSSL: она гоняет MD5 по паролю без
-//! соли и без растяжения, то есть подбору не мешает почти ничем. Заменить её
-//! на что-то разумное нельзя: так ключ выводит **сервер**, и любая другая
-//! функция даст другой ключ и молчащее соединение.
-//!
-//! Вывод из этого один и он для интерфейса: у Shadowsocks стойкость держится
-//! на длине пароля, а не на функции вывода. Короткий пароль здесь означает
-//! короткий ключ.
+//! `EVP_BytesToKey` — старая функция из OpenSSL, она лежит в
+//! [`penguin_transport::kdf`] — там же разобрано, почему её нельзя заменить
+//! на что-то разумное. Вывод из этого один и он для интерфейса: у
+//! Shadowsocks стойкость держится на длине пароля, а не на функции
+//! вывода. Короткий пароль здесь означает короткий ключ.
 //!
 //! # Зачем ещё и HKDF
 //!
@@ -28,7 +25,6 @@
 
 use std::sync::Arc;
 
-use md5::{Digest, Md5};
 use penguin_transport::aead::Keying;
 use penguin_transport::error::TransportError;
 use ring::hkdf;
@@ -41,25 +37,9 @@ use crate::error::{ShadowsocksError, ShadowsocksResult};
 /// Часть договора с сервером: другая метка — другой ключ.
 const INFO: &[u8] = b"ss-subkey";
 
-/// Главный ключ из пароля.
-///
-/// Повторяет `EVP_BytesToKey` из OpenSSL с MD5 и одним проходом: MD5 от
-/// предыдущего куска и пароля, пока не наберётся нужная длина.
+/// Главный ключ из пароля — `EVP_BytesToKey` длиной под выбранный шифр.
 pub fn master_key(password: &str, method: Method) -> Vec<u8> {
-    let want = method.key_len();
-    let mut key = Vec::with_capacity(want + Md5::output_size());
-    let mut previous = Vec::new();
-
-    while key.len() < want {
-        let mut digest = Md5::new();
-        digest.update(&previous);
-        digest.update(password.as_bytes());
-        previous = digest.finalize().to_vec();
-        key.extend_from_slice(&previous);
-    }
-
-    key.truncate(want);
-    key
+    penguin_transport::kdf::evp_bytes_to_key(password.as_bytes(), method.key_len())
 }
 
 /// Сеансовый ключ из главного и соли.
