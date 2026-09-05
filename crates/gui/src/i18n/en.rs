@@ -90,6 +90,7 @@ pub static STRINGS: Strings = Strings {
     obfs: "Obfuscation",
     psk: "Pre-shared key",
     need_psk: "Pre-shared key is empty",
+    need_username: "User name is empty",
     snell_version: "Version (protocol is undocumented)",
     obfs_host: "Obfuscation host",
     obfs_host_example: "which site to look like",

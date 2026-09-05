@@ -30,6 +30,7 @@ pub mod gost_relay;
 pub mod http;
 pub mod hysteria2;
 pub mod juicity;
+pub mod mieru;
 pub mod shadowsocks;
 pub mod snell;
 pub mod socks5;

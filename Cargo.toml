@@ -27,6 +27,7 @@ members = [
     "protocols/snell",
     "protocols/gost-relay",
     "protocols/brook",
+    "protocols/mieru",
     "protocols/tuic",
     "protocols/vless",
     "protocols/shadowsocks",
@@ -71,6 +72,7 @@ penguin-juicity = { path = "protocols/juicity" }
 penguin-snell = { path = "protocols/snell" }
 penguin-gost-relay = { path = "protocols/gost-relay" }
 penguin-brook = { path = "protocols/brook" }
+penguin-mieru = { path = "protocols/mieru" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-tuic = { path = "protocols/tuic" }
 penguin-vless = { path = "protocols/vless" }
@@ -129,6 +131,12 @@ md-5 = "0.10"
 # это примитив, который либо берут готовым, либо ошибаются в нём молча.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 rand = "0.8"
+# Только ради Mieru: нонс XChaCha20-Poly1305 — 24 байта, вдвое длиннее того,
+# что умеет общий `aead` (у `ring` XChaCha20 нет вовсе).
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+# Только ради Mieru: сеансовый ключ выводится PBKDF2-HMAC-SHA256 из хэша
+# пароля с именем пользователя и соли, зависящей от времени.
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 
 # --- DNS ---
 hickory-proto = { version = "0.24", default-features = false }

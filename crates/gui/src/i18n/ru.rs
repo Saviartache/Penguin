@@ -90,6 +90,7 @@ pub static STRINGS: Strings = Strings {
     obfs: "Обфускация",
     psk: "Общий ключ",
     need_psk: "Не задан общий ключ",
+    need_username: "Не задано имя пользователя",
     snell_version: "Версия (описание протокола не опубликовано)",
     obfs_host: "Имя узла обфускации",
     obfs_host_example: "под какой сайт прикрываться",
