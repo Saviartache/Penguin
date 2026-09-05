@@ -48,7 +48,9 @@ pub struct Entry {
     ///
     /// `send_slice` записывает **сколько поместилось** и возвращает это
     /// число. Считать его успехом целиком — потерять хвост.
-    pub to_app: Option<Bytes>,
+    ///
+    /// Не `to_app`: со стороны тоннеля за сокетом не приложение, а сервер.
+    pub to_socket: Option<Bytes>,
     /// Приложение закрыло свою сторону.
     pub app_closed: bool,
     /// Движок закрыл свою.
@@ -96,7 +98,7 @@ impl ConnectionTable {
                 ends,
                 pending: Some(connection),
                 to_engine: None,
-                to_app: None,
+                to_socket: None,
                 app_closed: false,
                 engine_closed: false,
             },

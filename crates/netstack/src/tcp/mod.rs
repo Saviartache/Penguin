@@ -9,6 +9,7 @@
 
 pub mod conn;
 pub mod listener;
+pub mod pump;
 pub mod table;
 
 pub use conn::{ConnectionEnds, TcpConnection};
