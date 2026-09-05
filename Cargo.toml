@@ -65,7 +65,11 @@ penguin-netstack = { path = "crates/netstack" }
 penguin-inbound  = { path = "crates/inbound" }
 penguin-dns      = { path = "crates/dns" }
 penguin-platform = { path = "crates/platform" }
-penguin-engine   = { path = "crates/engine" }
+# `default-features = false` здесь несёт весь смысл списков фич у демона и
+# клиента. Без него движок приходит к ним со своими умолчаниями — а в них
+# все протоколы сразу, и `--no-default-features` перестаёт значить что-либо:
+# собирается тот же бинарник до байта. Мерено, а не предположено.
+penguin-engine   = { path = "crates/engine", default-features = false }
 penguin-ipc      = { path = "crates/ipc" }
 penguin-daemon   = { path = "crates/daemon" }
 penguin-cli      = { path = "crates/cli" }
