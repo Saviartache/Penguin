@@ -28,6 +28,7 @@ members = [
     "protocols/gost-relay",
     "protocols/brook",
     "protocols/mieru",
+    "protocols/naive",
     "protocols/shadowsocksr",
     "protocols/ssh",
     "protocols/tuic",
@@ -75,6 +76,7 @@ penguin-snell = { path = "protocols/snell" }
 penguin-gost-relay = { path = "protocols/gost-relay" }
 penguin-brook = { path = "protocols/brook" }
 penguin-mieru = { path = "protocols/mieru" }
+penguin-naive = { path = "protocols/naive" }
 penguin-shadowsocksr = { path = "protocols/shadowsocksr" }
 penguin-ssh = { path = "protocols/ssh" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
@@ -106,6 +108,10 @@ rustls-pemfile = "2"
 ring = "0.17"
 tokio-rustls = { version = "0.26", default-features = false }
 http = "1"
+# Только ради `naive`: CONNECT поверх HTTP/2. Остальным протоколам он не
+# нужен — HTTP/2 в проекте есть только затем, чтобы NaiveProxy маскировался
+# под обычный веб-трафик.
+h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 smoltcp = { version = "0.12", default-features = false }

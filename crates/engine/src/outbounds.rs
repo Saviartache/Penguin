@@ -202,6 +202,8 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "mieru" => &["mieru"],
         "shadowsocksr" => &["shadowsocksr"],
         "ssh" => &["ssh"],
+        // Одна фича, два имени: по HTTP/2 и по HTTP/3.
+        "naive" => &["http2", "http3"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         // Одна фича, два имени в настройках.
@@ -253,6 +255,14 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     #[cfg(feature = "ssh")]
     registry.register(Arc::new(penguin_ssh::SshFactory::new()));
+
+    // Две записи из одного крейта: тот же `CONNECT` и та же схема
+    // дополнения, но поверх разных переносов.
+    #[cfg(feature = "naive")]
+    {
+        registry.register(Arc::new(penguin_naive::NaiveFactory::http2()));
+        registry.register(Arc::new(penguin_naive::NaiveFactory::http3()));
+    }
 
     // Две записи из одного крейта: `socks5` и `socks5-tls`. Под TLS не видны
     // ни имя сервера назначения, ни пароль — а без TLS видно и то и другое.

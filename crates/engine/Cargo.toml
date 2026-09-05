@@ -50,12 +50,13 @@ penguin-snell = { workspace = true, optional = true }
 penguin-gost-relay = { workspace = true, optional = true }
 penguin-brook = { workspace = true, optional = true }
 penguin-mieru = { workspace = true, optional = true }
+penguin-naive = { workspace = true, optional = true }
 penguin-shadowsocksr = { workspace = true, optional = true }
 penguin-ssh = { workspace = true, optional = true }
 penguin-http-proxy = { workspace = true, optional = true }
 
 [features]
-default = ["hysteria2", "tuic", "juicity", "anytls", "vless", "trojan", "shadowsocks", "snell", "gost-relay", "brook", "mieru", "shadowsocksr", "ssh", "socks5", "http-proxy"]
+default = ["hysteria2", "tuic", "juicity", "anytls", "vless", "trojan", "shadowsocks", "snell", "gost-relay", "brook", "mieru", "shadowsocksr", "ssh", "naive", "socks5", "http-proxy"]
 hysteria2 = ["dep:penguin-hysteria2"]
 socks5 = ["dep:penguin-socks5"]
 trojan = ["dep:penguin-trojan"]
@@ -69,6 +70,9 @@ gost-relay = ["dep:penguin-gost-relay"]
 brook = ["dep:penguin-brook"]
 mieru = ["dep:penguin-mieru"]
 shadowsocksr = ["dep:penguin-shadowsocksr"]
+# Одна фича на два протокола: `http2` и `http3` — это один крейт и одна
+# схема дополнения; собрать половину крейта всё равно нельзя.
+naive = ["dep:penguin-naive"]
 ssh = ["dep:penguin-ssh"]
 # Одна фича на два протокола: `http` и `https` — это один крейт и одна строка
 # настройки; собрать половину крейта всё равно нельзя.
