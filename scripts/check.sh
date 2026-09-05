@@ -44,7 +44,7 @@ if [[ $FAST -eq 0 ]]; then
     # чужой цели, которого на машине разработчика нет.
     for TARGET in x86_64-pc-windows-msvc x86_64-unknown-linux-gnu aarch64-apple-darwin; do
         run "check $TARGET" cargo check --target "$TARGET" --all-targets \
-            -p penguin-platform -p penguin-tun -p penguin-process
+            -p penguin-platform -p penguin-tun -p penguin-process -p penguin-ipc
     done
 
     run "doc" env RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps

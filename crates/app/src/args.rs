@@ -27,6 +27,14 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "ПУТЬ")]
     pub config_dir: Option<PathBuf>,
 
+    /// Desktop identity approved by the elevated service helper (Unix only).
+    #[arg(long, global = true, hide = true)]
+    pub controller_uid: Option<u32>,
+
+    /// Pre-elevation configuration source; only imported on first installation.
+    #[arg(long, global = true, hide = true)]
+    pub import_config: Option<PathBuf>,
+
     /// Подробный вывод в журнал.
     #[arg(short, long, global = true)]
     pub verbose: bool,

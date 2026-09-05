@@ -74,7 +74,7 @@ pub fn from_name(name: &str) -> ThemeType {
 
 /// Где лежит файл темы.
 fn theme_path() -> Option<PathBuf> {
-    penguin_config::Paths::discover()
+    penguin_config::Paths::user()
         .ok()
         .map(|paths| paths.config_dir().join(THEME_FILE))
 }

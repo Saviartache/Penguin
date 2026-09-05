@@ -133,6 +133,9 @@ fn handle_event(app: &mut App, event: Event) -> Task<Message> {
 pub fn handle_home(app: &mut App, message: HomeMessage) -> Task<Message> {
     match message {
         HomeMessage::ToggleConnection => {
+            if app.state().connection.is_busy_with_service() {
+                return Task::none();
+            }
             // Службы нет — значит, её надо поставить, а не сообщать об этом
             // человеку и ждать, пока он сам догадается. Он нажал «Подключить»:
             // остальное — наша забота.
@@ -248,7 +251,7 @@ pub async fn ensure_at_startup() -> ServiceOutcome {
     // Спрашивается не соединение, а ответ: демон, зависший с поднятым
     // тоннелем, соединение принимает и молчит, и окно, поверившее ему,
     // осталось бы висеть на первом же запросе.
-    if ours && let Some(running) = penguin_ipc::client::greet().await {
+    if ours && let Some(running) = penguin_ipc::client::greet_service().await {
         // Тот файл и служба отвечает — остаётся спросить, тем ли образом она
         // запущена. Отвечать может и служба, поднятая до того, как файл
         // заменили: тоннель она держит прежним кодом.
@@ -280,8 +283,23 @@ async fn ensure_service() -> ServiceOutcome {
 /// службой, оно делает по каналу управления, а служба уже работает с теми
 /// правами, которые нужны.
 async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome {
-    let asked =
-        tokio::task::spawn_blocking(move || penguin_platform::run_elevated(arguments)).await;
+    let asked = tokio::task::spawn_blocking(move || {
+        // Capture the desktop identity and source before pkexec/osascript
+        // switch to root's identity and environment.
+        let mut arguments: Vec<String> = arguments.iter().map(|arg| (*arg).to_owned()).collect();
+        if let Some(uid) = penguin_ipc::current_user_id() {
+            arguments.extend(["--controller-uid".to_owned(), uid.to_string()]);
+        }
+        if let Ok(paths) = penguin_config::Paths::user()
+            && paths.config_file().is_file()
+            && let Ok(path) = std::path::absolute(paths.config_file())
+        {
+            arguments.extend(["--import-config".to_owned(), path.display().to_string()]);
+        }
+        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        penguin_platform::run_elevated(&borrowed)
+    })
+    .await;
 
     match asked {
         Ok(Ok(true)) => {}
@@ -302,7 +320,7 @@ async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome 
     // окно встанет на первом же запросе.
     let deadline = tokio::time::Instant::now() + SERVICE_WAIT;
     while tokio::time::Instant::now() < deadline {
-        if penguin_ipc::client::answers().await {
+        if penguin_ipc::client::answers_service().await {
             return ServiceOutcome::Ready;
         }
         tokio::time::sleep(SERVICE_WAIT_STEP).await;
@@ -470,6 +488,20 @@ mod tests {
 
         connection.stopping = false;
         assert!(!connection.is_busy_with_service());
+    }
+
+    #[test]
+    fn repeated_connect_does_not_start_another_elevation() {
+        let mut app = app();
+        let before = app.state().connection.log.len();
+        let _ = handle_home(&mut app, HomeMessage::ToggleConnection);
+        assert!(app.state().connection.starting);
+        assert_eq!(app.state().connection.log.len(), before);
+        app.state_mut().connection.starting = false;
+        app.state_mut().connection.stopping = true;
+        let _ = handle_home(&mut app, HomeMessage::ToggleConnection);
+        assert!(!app.state().connection.starting);
+        assert_eq!(app.state().connection.log.len(), before);
     }
 
     #[test]

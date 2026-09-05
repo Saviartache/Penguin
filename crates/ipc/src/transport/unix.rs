@@ -17,11 +17,11 @@
 //!
 //! # Кому можно
 //!
-//! Тому же, кому можно на Windows (`transport::windows`): системе, администраторам
-//! и вошедшему пользователю. Здесь это выражается членством в группе
-//! администраторов — то есть теми, кто и так может стать суперпользователем.
-//! Разрешить им говорить с демоном не значит дать что-то новое.
+//! Root, the selected administrator group, and the exact desktop UID approved
+//! by the elevated helper. Socket ownership grants that UID access even when
+//! it is not a member of the selected group. Peer credentials remain mandatory.
 
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use nix::unistd::{Gid, Group, Uid, User};
@@ -39,8 +39,8 @@ const SYSTEM_DIR: &str = "/var/run/penguin";
 /// Имя файла сокета.
 const SOCKET_FILE: &str = "control.sock";
 
-/// Права каталога: суперпользователь и администраторы, больше никто.
-const DIR_MODE: u32 = 0o750;
+/// The approved UID may traverse, but cannot list or replace socket entries.
+const DIR_MODE: u32 = 0o751;
 
 /// Права сокета внутри каталога.
 const SOCKET_MODE: u32 = 0o660;
@@ -49,11 +49,11 @@ const SOCKET_MODE: u32 = 0o660;
 ///
 /// Под суперпользователем — общий каталог, до которого дотянется окно
 /// пользователя. Иначе — свой каталог: так `penguin --foreground`, запущенный
-/// человеком для отладки, работает без всяких прав, и окно того же человека
-/// его находит.
+/// человеком для отладки, работает без всяких прав, и CLI того же человека
+/// его находит. GUI must use only the system service endpoint.
 pub fn listen_path() -> PathBuf {
     if Uid::effective().is_root() {
-        PathBuf::from(SYSTEM_DIR).join(SOCKET_FILE)
+        service_path()
     } else {
         user_path()
     }
@@ -64,7 +64,22 @@ pub fn listen_path() -> PathBuf {
 /// Сначала общий: почти всегда демон — это служба. Потом свой — на случай
 /// отладочного запуска.
 pub fn connect_paths() -> Vec<PathBuf> {
-    vec![PathBuf::from(SYSTEM_DIR).join(SOCKET_FILE), user_path()]
+    vec![service_path(), user_path()]
+}
+
+/// Connects only to the system socket and verifies the server's effective UID.
+///
+/// There is no per-user fallback, including for root readiness probes.
+pub async fn connect_service() -> IpcResult<interprocess::local_socket::tokio::Stream> {
+    super::connect_at(&service_path()).await
+}
+
+pub(crate) fn service_path() -> PathBuf {
+    PathBuf::from(SYSTEM_DIR).join(SOCKET_FILE)
+}
+
+pub(crate) fn is_system_path(path: &Path) -> bool {
+    path == service_path()
 }
 
 /// Путь в каталоге текущего пользователя.
@@ -72,12 +87,21 @@ pub fn connect_paths() -> Vec<PathBuf> {
 /// Тоже в своём подкаталоге: права ставятся на каталог, и ставить их на общий
 /// временный — значит закрыть его всем остальным программам.
 fn user_path() -> PathBuf {
-    // `XDG_RUNTIME_DIR` в Linux и `TMPDIR` в macOS — оба свои у каждого
-    // пользователя, и оба уже закрыты от чужих.
-    let root = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    root.join("penguin").join(SOCKET_FILE)
+    let uid = Uid::effective().as_raw();
+    if let Some(root) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
+        && root.is_absolute()
+        && let Ok(meta) = std::fs::symlink_metadata(&root)
+        && meta.is_dir()
+        && meta.uid() == uid
+        && meta.mode() & 0o077 == 0
+    {
+        return root.join("penguin").join(SOCKET_FILE);
+    }
+    fallback_path(&std::env::temp_dir(), uid)
+}
+
+fn fallback_path(root: &Path, uid: u32) -> PathBuf {
+    root.join(format!("penguin-{uid}")).join(SOCKET_FILE)
 }
 
 /// Заводит каталог сокета и закрывает его от посторонних.
@@ -85,30 +109,38 @@ fn user_path() -> PathBuf {
 /// Каталог у сокета **свой**: права ставятся на него целиком, и путь без
 /// собственного каталога закрыл бы чужой — общий временный, например.
 pub fn prepare(path: &Path) -> IpcResult<()> {
-    let Some(directory) = path.parent() else {
-        return Ok(());
-    };
-
-    std::fs::create_dir_all(directory)
-        .map_err(|e| IpcError::Transport(format!("{}: {e}", directory.display())))?;
-
-    // Права выставляются и на уже существующий каталог: он мог остаться от
-    // прошлой версии, и щедрые права на нём — это открытый канал управления.
-    set_mode(directory, DIR_MODE)?;
-
-    // Группа администраторов нужна только общему каталогу: свой и так закрыт
-    // тем, что лежит в каталоге пользователя.
-    if Uid::effective().is_root() {
-        match administrators() {
-            Some(group) => nix::unistd::chown(directory, Some(Uid::from_raw(0)), Some(group))
-                .map_err(|e| IpcError::Transport(format!("{}: {e}", directory.display())))?,
-            // Машина без группы администраторов — случай редкий, и молчать о
-            // нём нельзя: окно не сможет подключиться к службе.
-            None => tracing::error!(
-                "в системе нет группы администраторов — окно не дотянется до службы"
-            ),
-        }
+    let directory = path.parent().ok_or(IpcError::AccessDenied)?;
+    match std::fs::DirBuilder::new().mode(0o700).create(directory) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err.into()),
     }
+    let _ = directory_handle(directory)?;
+    Ok(())
+}
+
+fn directory_handle(directory: &Path) -> IpcResult<std::fs::File> {
+    let handle = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+        .open(directory)?;
+    let meta = handle.metadata()?;
+    if !crate::policy::protected_directory(
+        meta.uid(),
+        meta.mode(),
+        meta.is_dir(),
+        Uid::effective().as_raw(),
+    ) {
+        return Err(IpcError::AccessDenied);
+    }
+    Ok(handle)
+}
+
+pub(crate) fn restrict(path: &Path) -> IpcResult<()> {
+    // Only after rejecting a live listener: a second daemon must not change
+    // its permissions. Keep the directory private across bind/chown/chmod.
+    directory_handle(path.parent().ok_or(IpcError::AccessDenied)?)?
+        .set_permissions(std::fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
@@ -116,18 +148,43 @@ pub fn prepare(path: &Path) -> IpcResult<()> {
 ///
 /// `Err(AlreadyRunning)` — сокет живой, и демон за ним отвечает.
 pub fn clear_stale(path: &Path) -> IpcResult<()> {
-    if !path.exists() {
-        return Ok(());
-    }
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};
+    use std::os::fd::AsRawFd;
 
-    // Единственный надёжный способ отличить живой сокет от брошенного —
-    // попробовать подключиться. Файл остаётся на месте и после смерти демона,
-    // и по нему не видно ничего.
-    if std::os::unix::net::UnixStream::connect(path).is_ok() {
-        return Err(IpcError::AlreadyRunning);
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    if !meta.file_type().is_socket() {
+        return Err(IpcError::AccessDenied);
     }
-
-    std::fs::remove_file(path).map_err(|e| IpcError::Transport(format!("{}: {e}", path.display())))
+    // A full backlog is live, not stale. A blocking probe can hang startup.
+    let probe = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::empty(),
+        None,
+    )
+    .map_err(std::io::Error::from)?;
+    // Darwin does not support SOCK_NONBLOCK at socket creation.
+    nix::fcntl::fcntl(
+        probe.as_raw_fd(),
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    )
+    .map_err(std::io::Error::from)?;
+    let address = UnixAddr::new(path).map_err(std::io::Error::from)?;
+    match connect(probe.as_raw_fd(), &address) {
+        Ok(()) | Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINPROGRESS) => {
+            Err(IpcError::AlreadyRunning)
+        }
+        Err(nix::errno::Errno::ECONNREFUSED) => {
+            std::fs::remove_file(path)?;
+            Ok(())
+        }
+        Err(nix::errno::Errno::ENOENT) => Ok(()),
+        Err(err) => Err(std::io::Error::from(err).into()),
+    }
 }
 
 /// Ограничивает права уже открытого сокета.
@@ -135,14 +192,23 @@ pub fn clear_stale(path: &Path) -> IpcResult<()> {
 /// Каталог закрыт и без этого; права файла — второй рубеж на случай, если
 /// каталог кто-то откроет.
 pub fn secure(path: &Path) -> IpcResult<()> {
-    set_mode(path, SOCKET_MODE)?;
-
-    if Uid::effective().is_root()
-        && let Some(group) = administrators()
-    {
-        nix::unistd::chown(path, Some(Uid::from_raw(0)), Some(group))
-            .map_err(|e| IpcError::Transport(format!("{}: {e}", path.display())))?;
+    if is_system_path(path) {
+        if !Uid::effective().is_root() {
+            return Err(IpcError::AccessDenied);
+        }
+        let owner = crate::controller::approved()?.unwrap_or(0);
+        let group = administrators().unwrap_or(Gid::from_raw(0));
+        nix::unistd::chown(path, Some(Uid::from_raw(owner)), Some(group))
+            .map_err(std::io::Error::from)?;
     }
+    set_mode(path, SOCKET_MODE)?;
+    let mode = if is_system_path(path) {
+        DIR_MODE
+    } else {
+        0o700
+    };
+    directory_handle(path.parent().ok_or(IpcError::AccessDenied)?)?
+        .set_permissions(std::fs::Permissions::from_mode(mode))?;
     Ok(())
 }
 
@@ -184,6 +250,9 @@ const ADMIN_GROUPS: &[&str] = &["sudo", "wheel"];
 /// сам по себе: основная группа в списке членов не значится, а список членов
 /// не всегда полон.
 pub fn is_administrator(uid: u32) -> bool {
+    if uid == 0 {
+        return true;
+    }
     let Some(admins) = administrators() else {
         return false;
     };
@@ -238,10 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn the_directory_is_closed_to_others() {
-        // Последняя цифра — права «всех остальных». Ненулевая означает канал
-        // управления, открытый любому процессу в системе.
-        assert_eq!(DIR_MODE & 0o007, 0);
+    fn others_can_only_traverse_the_directory() {
+        // Traversal lets the approved socket owner connect, not replace it.
+        assert_eq!(DIR_MODE & 0o007, 1);
+        assert_eq!(DIR_MODE & 0o022, 0);
         assert_eq!(SOCKET_MODE & 0o007, 0);
     }
 
@@ -255,17 +324,38 @@ mod tests {
     }
 
     #[test]
-    fn an_ordinary_user_gets_a_path_of_their_own() {
-        // Иначе `penguin --foreground` для отладки требовал бы прав, которых
-        // у отладки нет.
-        assert_eq!(listen_path(), user_path(), "тест идёт не от root");
+    fn service_target_is_fixed_and_not_a_per_user_endpoint() {
+        let service = service_path();
+        assert_eq!(service, Path::new("/var/run/penguin/control.sock"));
+        assert!(is_system_path(&service));
+        for uid in [0, 501, 1000] {
+            let foreground = fallback_path(Path::new("/tmp"), uid);
+            assert_ne!(service, foreground);
+            assert!(!is_system_path(&foreground));
+        }
     }
 
     #[test]
-    fn the_system_has_a_group_of_administrators() {
-        // Без неё окно не дотянется до службы, и знать об этом надо здесь, а
-        // не по молчаливому отказу в подключении.
-        assert!(administrators().is_some());
+    fn an_ordinary_user_gets_a_path_of_their_own() {
+        // Иначе `penguin --foreground` для отладки требовал бы прав, которых
+        // у отладки нет.
+        if Uid::effective().is_root() {
+            assert!(is_system_path(&listen_path()));
+        } else {
+            assert_eq!(listen_path(), user_path());
+        }
+    }
+
+    #[test]
+    fn fallback_is_uid_specific() {
+        assert_ne!(
+            fallback_path(Path::new("/tmp"), 1000),
+            fallback_path(Path::new("/tmp"), 1001)
+        );
+        assert_eq!(
+            fallback_path(Path::new("/tmp"), 501),
+            Path::new("/tmp/penguin-501/control.sock")
+        );
     }
 
     #[test]

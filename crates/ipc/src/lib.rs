@@ -27,16 +27,30 @@
 //! `transport::windows`. Ссылкой это не оформлено намеренно: модуль есть
 //! только в сборке под Windows, и ссылка на него сломала бы документацию
 //! остальных систем.
+//!
+//! # Service Readiness
+//!
+//! GUI connections must use [`Client::connect_service`]. Service startup probes,
+//! including elevated/root probes, must use [`client::greet_service`] or
+//! [`client::answers_service`]: a Unix per-user foreground daemon must not be
+//! mistaken for the system service. Windows uses the existing named pipe.
+//! [`Client::connect`], [`client::greet`] and [`client::answers`] retain Unix
+//! foreground fallback for CLI and debugging use.
 
 pub mod auth;
 pub mod client;
 pub mod codec;
+#[cfg(unix)]
+mod controller;
 pub mod error;
+mod identity;
+mod policy;
 pub mod schema;
 pub mod server;
 pub mod transport;
 
 pub use client::Client;
 pub use error::{IpcError, IpcResult};
+pub use identity::{authorize_controller, current_user_id};
 pub use schema::{Event, Request, Response, StatusReport};
 pub use server::{Handler, Server};

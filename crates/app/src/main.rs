@@ -27,19 +27,21 @@
 mod args;
 mod console;
 mod logging;
+mod service;
 
 use anyhow::{Context, Result};
 use args::{Cli, Command, ServiceCommand};
 use clap::Parser;
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
 
     // До первой печати: подключаться к консоли родителя надо раньше, чем в неё
     // что-то пойдёт.
     if cli.writes_to_console() {
         console::attach_to_parent();
     }
+    prepare_arguments(&mut cli)?;
 
     // Права спрашиваются один раз и заранее — до того, как команда начнёт
     // работать и упрётся в отказ на середине.
@@ -51,7 +53,9 @@ fn main() -> Result<()> {
 
     match &cli.command {
         // --- служба ---
-        Some(Command::Service(command)) => service(command),
+        Some(Command::Service(command)) => {
+            service::run(command, cli.controller_uid, cli.import_config.as_deref())
+        }
 
         // --- терминал ---
         Some(Command::Client(command)) => {
@@ -69,86 +73,39 @@ fn main() -> Result<()> {
     }
 }
 
-/// Выполняет команду службы.
-fn service(command: &ServiceCommand) -> Result<()> {
-    match command {
-        ServiceCommand::Ensure => ensure(),
-        ServiceCommand::Install => penguin_daemon::install(),
-        ServiceCommand::Uninstall => penguin_daemon::uninstall(),
-        ServiceCommand::Restart => restart(),
-        ServiceCommand::Start => {
-            penguin_platform::service::start().context("не удалось запустить службу")
+/// Capture user-specific values before pkexec/osascript replace the environment.
+fn prepare_arguments(cli: &mut Cli) -> Result<()> {
+    let Some(Command::Service(command)) = &cli.command else {
+        anyhow::ensure!(
+            cli.controller_uid.is_none() && cli.import_config.is_none(),
+            "controller/import options require a service command"
+        );
+        return Ok(());
+    };
+    anyhow::ensure!(
+        cli.config_dir.is_none(),
+        "service commands use the machine configuration directory; --config-dir is only supported by --foreground, --service and client commands"
+    );
+    if !service::prepares_service(command) {
+        anyhow::ensure!(
+            cli.controller_uid.is_none() && cli.import_config.is_none(),
+            "controller/import options require service ensure, install, start or restart"
+        );
+        return Ok(());
+    }
+    if !penguin_platform::is_elevated() {
+        // Never take the elevated account's HOME as the import source.
+        cli.controller_uid = penguin_daemon::current_user_id();
+        if cli.import_config.is_none() {
+            cli.import_config = penguin_config::Paths::user()
+                .ok()
+                .map(|paths| paths.config_file())
+                .filter(|path| path.is_file());
         }
-        ServiceCommand::Stop => {
-            penguin_platform::service::stop().context("не удалось остановить службу")
-        }
-        ServiceCommand::Status => penguin_daemon::status(),
     }
-}
-
-/// Доводит службу до рабочего состояния: ставит, если её нет, и запускает.
-///
-/// Ровно то, что нужно окну: оно не знает и не хочет знать, установлена служба
-/// или только остановлена, — ему нужно, чтобы она работала. Поэтому одна
-/// команда, а не две: два запроса UAC подряд ради одного действия — плохая
-/// цена за аккуратность API.
-fn ensure() -> Result<()> {
-    use penguin_platform::service::ServiceStatus;
-
-    let mut status = penguin_platform::service::status().context("не удалось узнать состояние")?;
-
-    // Установленной службы мало: она может быть зарегистрирована на другой
-    // файл — прошлую сборку, копию в другом каталоге. Тогда тоннель поднимает
-    // не та программа, которую запустил человек, и рядом с ней может не
-    // оказаться ни драйвера, ни настроек. Снаружи это выглядит как «поставил
-    // новую версию, а ошибки те же».
-    //
-    // Не «на ту же программу», а «ровно на этот файл»: диспетчер читает
-    // описание буквально, и ссылка в нём, оставшаяся от прошлой поставки,
-    // указывает на программу лишь до следующей пересборки.
-    if status != ServiceStatus::NotInstalled && !penguin_platform::service::registered_verbatim() {
-        println!("Описание службы устарело — переустанавливаю.");
-        penguin_daemon::uninstall()?;
-        status = ServiceStatus::NotInstalled;
+    if let Some(path) = &cli.import_config {
+        cli.import_config = Some(std::path::absolute(path).context("invalid import path")?);
     }
-
-    if status == ServiceStatus::NotInstalled {
-        penguin_daemon::install()?;
-        // Свежепоставленная служба не работает — её ещё предстоит запустить.
-        status = ServiceStatus::Stopped;
-    }
-
-    // «Числится работающей» — ещё не «работает». Демон, зависший с поднятым
-    // тоннелем, для диспетчера жив, а на запросы не отвечает: окно ждёт ответа,
-    // которого не будет, и снять тоннель некому. Такую службу поднимаем заново,
-    // и это единственное, что тут помогает.
-    if status == ServiceStatus::Running && !penguin_daemon::responds() {
-        println!("Служба не отвечает — перезапускаю.");
-        return restart();
-    }
-
-    // Уже работающую службу запускать не надо: команда вернула бы отказ, а
-    // делать при этом ничего не требуется.
-    if status != ServiceStatus::Running {
-        penguin_platform::service::start().context("не удалось запустить службу")?;
-    }
-    println!("Служба работает.");
-    Ok(())
-}
-
-/// Перезапускает службу.
-///
-/// Нужна после замены файла: служба держит в памяти тот образ, с которым её
-/// запустили, и положенное рядом исправление не действует, пока она не
-/// поднялась заново.
-fn restart() -> Result<()> {
-    // Остановка может не удаться потому, что служба и так стоит; это не
-    // причина не запускать её.
-    if let Err(err) = penguin_platform::service::stop() {
-        tracing::debug!(%err, "останавливать было нечего");
-    }
-    penguin_platform::service::start().context("не удалось запустить службу")?;
-    println!("Служба перезапущена.");
     Ok(())
 }
 
@@ -197,6 +154,13 @@ fn elevated_arguments(cli: &Cli) -> Vec<String> {
     }
     if cli.verbose {
         arguments.push("--verbose".to_owned());
+    }
+    if let Some(uid) = cli.controller_uid {
+        arguments.extend(["--controller-uid".to_owned(), uid.to_string()]);
+    }
+    if let Some(path) = &cli.import_config {
+        arguments.push("--import-config".to_owned());
+        arguments.push(path.display().to_string());
     }
 
     arguments
@@ -264,5 +228,35 @@ mod tests {
     fn verbose_survives_the_elevation() {
         let arguments = elevated_arguments(&cli(&["penguin", "service", "ensure", "--verbose"]));
         assert!(arguments.iter().any(|argument| argument == "--verbose"));
+    }
+
+    #[test]
+    fn desktop_identity_and_import_source_survive_elevation() {
+        let original = cli(&[
+            "penguin",
+            "service",
+            "ensure",
+            "--controller-uid",
+            "501",
+            "--import-config",
+            "/Users/alice/My Settings/config.toml",
+        ]);
+        let arguments = elevated_arguments(&original);
+        let reparsed = Cli::try_parse_from(std::iter::once("penguin".to_owned()).chain(arguments))
+            .expect("arguments");
+        assert_eq!(reparsed.controller_uid, Some(501));
+        assert_eq!(reparsed.import_config, original.import_config);
+    }
+
+    #[test]
+    fn service_commands_do_not_silently_ignore_custom_config() {
+        let mut cli = cli(&["penguin", "service", "ensure", "--config-dir", "custom"]);
+        assert!(prepare_arguments(&mut cli).is_err());
+    }
+
+    #[test]
+    fn read_only_commands_cannot_grant_control() {
+        let mut cli = cli(&["penguin", "service", "status", "--controller-uid", "501"]);
+        assert!(prepare_arguments(&mut cli).is_err());
     }
 }

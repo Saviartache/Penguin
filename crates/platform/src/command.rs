@@ -25,9 +25,17 @@ pub(crate) struct Failure {
     code: Option<i32>,
     /// Не хватило прав.
     denied: bool,
+    /// The executable could not be found, rather than exiting with code 127.
+    not_found: bool,
 }
 
 impl Failure {
+    /// Whether spawning failed because the executable was not found.
+    #[allow(dead_code, reason = "used by Linux elevation")]
+    pub(crate) fn is_not_found(&self) -> bool {
+        self.not_found
+    }
+
     /// Превращает неудачу в ошибку нужного раздела.
     pub(crate) fn into_error(self, make: fn(String) -> PlatformError, what: &str) -> PlatformError {
         if self.denied {
@@ -124,6 +132,7 @@ fn finish(output: std::io::Result<std::process::Output>, program: &str) -> Resul
         // оболочки. Отличить нехватку прав по коду нельзя, и решает её здесь
         // вызывающий: почти всё в этом крейте прав требует.
         denied: false,
+        not_found: false,
     })
 }
 
@@ -134,6 +143,7 @@ fn spawn_failure(program: &str, err: &std::io::Error) -> Failure {
         reason: err.to_string(),
         code: None,
         denied: err.kind() == std::io::ErrorKind::PermissionDenied,
+        not_found: err.kind() == std::io::ErrorKind::NotFound,
     }
 }
 
@@ -176,5 +186,26 @@ mod tests {
     fn a_missing_program_fails_without_panicking() {
         let failure = run("такой-программы-нет-и-не-будет", &[]).expect_err("не запустилась");
         assert!(!failure.reason.is_empty());
+        assert!(failure.is_not_found());
+        assert_eq!(failure.code(), None);
+    }
+
+    #[test]
+    fn exit_127_is_not_a_missing_executable() {
+        let failure = run("sh", &["-c", "exit 127"]).expect_err("failed");
+        assert_eq!(failure.code(), Some(127));
+        assert!(!failure.is_not_found());
+    }
+
+    #[test]
+    fn spawn_permission_denial_is_not_a_missing_executable() {
+        let failure = spawn_failure("pkexec", &std::io::ErrorKind::PermissionDenied.into());
+        assert!(!failure.is_not_found());
+        assert_eq!(failure.code(), None);
+        assert!(
+            failure
+                .into_error(PlatformError::Service, "elevation")
+                .needs_privileges()
+        );
     }
 }
