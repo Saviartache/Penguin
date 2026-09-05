@@ -108,6 +108,17 @@ services:
       - "127.0.0.1:18388:8388/udp"
     networks: [interop]
 
+  # Свой образ, а не sing-box: Snell тот не умеет. Сервер здесь — не Surge,
+  # а чужая реализация того же разбора: другого просто нет.
+  snell:
+    image: metacubex/mihomo:Alpha
+    volumes:
+      - ./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro
+    ports:
+      - "127.0.0.1:18443:8443"
+      - "127.0.0.1:18444:8444"
+    networks: [interop]
+
   # Свой образ, а не sing-box: Juicity тот не умеет. Порт по UDP — под ним
   # QUIC, и проброс TCP здесь не значил бы ничего.
   juicity:

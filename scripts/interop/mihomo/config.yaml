@@ -1,0 +1,26 @@
+# mihomo в роли сервера Snell.
+#
+# Своя реализация, не Surge: описания протокола нет, и сверяться приходится с
+# тем, кто читал тот же разбор. Это ловит наши ошибки сборки и понимания
+# разбора, но не расхождение самого разбора с Surge.
+
+log-level: warning
+mode: direct
+
+listeners:
+  # Две версии: у них разное обрамление, и одна проверка вторую не заменяет.
+  - name: snell-v3
+    type: snell
+    listen: 0.0.0.0
+    port: 8443
+    psk: secret
+    version: 3
+    udp: true
+
+  - name: snell-v4
+    type: snell
+    listen: 0.0.0.0
+    port: 8444
+    psk: secret
+    version: 4
+    udp: true

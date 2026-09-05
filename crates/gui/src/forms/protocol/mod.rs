@@ -29,6 +29,7 @@ pub mod http;
 pub mod hysteria2;
 pub mod juicity;
 pub mod shadowsocks;
+pub mod snell;
 pub mod socks5;
 pub mod spec;
 pub mod trojan;

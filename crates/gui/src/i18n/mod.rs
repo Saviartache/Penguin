@@ -197,6 +197,16 @@ pub struct Strings {
     pub http_host: &'static str,
     /// Пароль обфускации.
     pub obfs: &'static str,
+    /// Общий ключ.
+    pub psk: &'static str,
+    /// Не задан общий ключ.
+    pub need_psk: &'static str,
+    /// Версия протокола, описания которого нет.
+    pub snell_version: &'static str,
+    /// Имя узла, под который прикрыто соединение.
+    pub obfs_host: &'static str,
+    /// Что вписать в поле имени узла обфускации.
+    pub obfs_host_example: &'static str,
     /// Отдача.
     pub bandwidth_up: &'static str,
     /// Приём.
@@ -444,6 +454,11 @@ mod tests {
                 table.path_example,
                 table.http_host,
                 table.obfs,
+                table.psk,
+                table.need_psk,
+                table.snell_version,
+                table.obfs_host,
+                table.obfs_host_example,
                 table.bandwidth_up,
                 table.bandwidth_down,
                 table.insecure,

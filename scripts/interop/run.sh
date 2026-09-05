@@ -217,6 +217,18 @@ password = "secret"
 sni      = "interop.penguin.test"
 insecure = true'
 
+# Версия — часть договора с сервером, и умолчания у неё нет: неверная не даёт
+# отказа, а даёт молчание. Здесь та же, что в `mihomo/config.yaml`.
+check snell snell 'server  = "127.0.0.1:18443"
+psk     = "secret"
+version = 3'
+
+# Четвёртая версия — это другое обрамление, а не другая настройка: проверять
+# её надо отдельно.
+check snell-v4 snell 'server  = "127.0.0.1:18444"
+psk     = "secret"
+version = 4'
+
 # Метод — часть договора с сервером: он же стоит в `singbox/shadowsocks.json`,
 # и разойтись им нельзя, иначе соединение откроется и ничего не передаст.
 check shadowsocks shadowsocks 'server   = "127.0.0.1:18388"

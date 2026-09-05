@@ -461,6 +461,7 @@ mod tests {
             "server" => "example.com:443",
             "password" => "секрет",
             "uuid" => "b831381d-6324-4d53-ad4f-8cda48b30811",
+            "psk" => "общий ключ",
             _ => "",
         }
     }

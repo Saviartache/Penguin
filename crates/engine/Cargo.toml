@@ -46,10 +46,11 @@ penguin-vless = { workspace = true, optional = true }
 penguin-tuic = { workspace = true, optional = true }
 penguin-anytls = { workspace = true, optional = true }
 penguin-juicity = { workspace = true, optional = true }
+penguin-snell = { workspace = true, optional = true }
 penguin-http-proxy = { workspace = true, optional = true }
 
 [features]
-default = ["hysteria2", "tuic", "juicity", "anytls", "vless", "trojan", "shadowsocks", "socks5", "http-proxy"]
+default = ["hysteria2", "tuic", "juicity", "anytls", "vless", "trojan", "shadowsocks", "snell", "socks5", "http-proxy"]
 hysteria2 = ["dep:penguin-hysteria2"]
 socks5 = ["dep:penguin-socks5"]
 trojan = ["dep:penguin-trojan"]
@@ -58,6 +59,7 @@ vless = ["dep:penguin-vless"]
 tuic = ["dep:penguin-tuic"]
 anytls = ["dep:penguin-anytls"]
 juicity = ["dep:penguin-juicity"]
+snell = ["dep:penguin-snell"]
 # Одна фича на два протокола: `http` и `https` — это один крейт и одна строка
 # настройки; собрать половину крейта всё равно нельзя.
 http-proxy = ["dep:penguin-http-proxy"]

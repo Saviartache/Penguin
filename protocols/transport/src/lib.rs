@@ -29,6 +29,7 @@
 //!  tls       SNI, ALPN и четыре способа решить, свой ли сервер на том конце
 //!  ws        WebSocket: поток байт, выглядящий обычной веб-страницей
 //!  httpupgrade  то же рукопожатие без кадров — дешевле там, где путь свой
+//!  obfs      простая обфускация под HTTP и под TLS: вид, а не шифр
 //! ```
 
 pub mod addr;
@@ -37,6 +38,7 @@ pub mod deadline;
 pub mod error;
 pub mod frag;
 pub mod httpupgrade;
+pub mod obfs;
 pub mod tls;
 pub mod ws;
 

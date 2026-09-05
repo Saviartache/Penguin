@@ -7,7 +7,7 @@
 
 use crate::forms::protocol::spec::ProtocolSpec;
 use crate::forms::protocol::{
-    anytls, http, hysteria2, juicity, shadowsocks, socks5, trojan, tuic, vless,
+    anytls, http, hysteria2, juicity, shadowsocks, snell, socks5, trojan, tuic, vless,
 };
 
 /// Протоколы в порядке показа.
@@ -22,6 +22,7 @@ pub static ALL: &[&ProtocolSpec] = &[
     &vless::SPEC,
     &trojan::SPEC,
     &shadowsocks::SPEC,
+    &snell::SPEC,
     &socks5::TLS,
     &socks5::SPEC,
     &http::HTTPS,

@@ -184,6 +184,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "tuic" => &["tuic"],
         "anytls" => &["anytls"],
         "juicity" => &["juicity"],
+        "snell" => &["snell"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         // Одна фича, два имени в настройках.
@@ -217,6 +218,9 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     #[cfg(feature = "juicity")]
     registry.register(Arc::new(penguin_juicity::JuicityFactory::new()));
+
+    #[cfg(feature = "snell")]
+    registry.register(Arc::new(penguin_snell::SnellFactory::new()));
 
     // Две записи из одного крейта: `socks5` и `socks5-tls`. Под TLS не видны
     // ни имя сервера назначения, ни пароль — а без TLS видно и то и другое.
