@@ -3510,6 +3510,7 @@ dependencies = [
  "penguin-config",
  "penguin-core",
  "penguin-dns",
+ "penguin-gost-relay",
  "penguin-http-proxy",
  "penguin-hysteria2",
  "penguin-inbound",
@@ -3531,6 +3532,22 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "penguin-gost-relay"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 

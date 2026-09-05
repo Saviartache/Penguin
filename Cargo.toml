@@ -25,6 +25,7 @@ members = [
     "protocols/anytls",
     "protocols/juicity",
     "protocols/snell",
+    "protocols/gost-relay",
     "protocols/tuic",
     "protocols/vless",
     "protocols/shadowsocks",
@@ -67,6 +68,7 @@ penguin-transport = { path = "protocols/transport" }
 penguin-anytls = { path = "protocols/anytls" }
 penguin-juicity = { path = "protocols/juicity" }
 penguin-snell = { path = "protocols/snell" }
+penguin-gost-relay = { path = "protocols/gost-relay" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-tuic = { path = "protocols/tuic" }
 penguin-vless = { path = "protocols/vless" }

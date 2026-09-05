@@ -1,0 +1,30 @@
+[package]
+name = "penguin-gost-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Протокол ретрансляции GOST: версия, команда, признаки TLV"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта.
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
