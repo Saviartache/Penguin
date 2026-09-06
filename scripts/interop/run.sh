@@ -7,6 +7,10 @@
 #
 # Нужны `docker`, `openssl`, `curl`. Из `check.sh` не зовётся: образы тянутся
 # долго, а падение сети выглядело бы падением коммита.
+#
+# Всё, что происходит, дублируется в `report.txt` рядом со скриптом. Он и есть
+# то, что нужно показать после прогона: по нему видно не только какой протокол
+# не прошёл, но и что ответил его сервер.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -17,24 +21,99 @@ ROOT="$(cd ../.. && pwd)"
 SCRATCH="$(mktemp -d)"
 BIN="$ROOT/target/debug/penguin"
 ONLY="${1:-}"
+REPORT="$PWD/report.txt"
+
+# Весь вывод — и на экран, и в отчёт. Скрипт перезапускает сам себя один раз:
+# так под `tee` попадает всё, включая то, что печатают `docker` и `cargo`.
+if [[ -z "${INTEROP_REPORT:-}" ]]; then
+    export INTEROP_REPORT="$REPORT"
+    "$0" "$@" 2>&1 | tee "$REPORT"
+    status="${PIPESTATUS[0]}"
+    # На Windows путь вида `/e/...` в проводник не вставить, поэтому рядом
+    # печатается и родной.
+    if command -v cygpath >/dev/null 2>&1; then
+        printf '\nОтчёт: %s\n' "$(cygpath -w "$REPORT")"
+    else
+        printf '\nОтчёт: %s\n' "$REPORT"
+    fi
+    exit "$status"
+fi
 
 FAILED=()
-bold() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
-ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$1"; }
-bad()  { printf '\033[31m  ✗ %s\033[0m\n' "$1"; }
+# Цвет только на живом терминале: под `tee` он превратился бы в мусор посреди
+# отчёта, который потом читают глазами.
+if [[ -t 1 ]]; then
+    bold() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
+    ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$1"; }
+    bad()  { printf '\033[31m  ✗ %s\033[0m\n' "$1"; }
+else
+    bold() { printf '\n▶ %s\n' "$1"; }
+    ok()   { printf '  [ок]     %s\n' "$1"; }
+    bad()  { printf '  [ПРОВАЛ] %s\n' "$1"; }
+fi
 
+# Уборка не имеет права висеть. `docker compose down` на неотвечающем демоне
+# ждёт молча и без конца, и выглядит это как зависшая проверка — хотя она уже
+# всё сказала. Отсюда и проверка живости демона, и срок поверх неё.
 cleanup() {
-    docker compose down --remove-orphans >/dev/null 2>&1
+    if command -v docker >/dev/null 2>&1 &&
+        timeout 10 docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+        timeout 120 docker compose down --remove-orphans >/dev/null 2>&1
+    fi
     rm -rf "$SCRATCH"
 }
 trap cleanup EXIT
 
+# --- docker ---------------------------------------------------------------
+#
+# Ищем сам, а не требуем в `PATH`. Docker Desktop на Windows кладёт себя в
+# каталог пользователя и правит `PATH` в реестре — а оболочка, запущенная до
+# установки, о новом `PATH` не знает. Человек при этом видит работающий
+# `docker` в своём окне и справедливо считает, что всё установлено.
+find_docker() {
+    command -v docker >/dev/null 2>&1 && return 0
+
+    local candidates=(
+        "${LOCALAPPDATA:-}/Programs/DockerDesktop/resources/bin"
+        "${PROGRAMFILES:-}/Docker/Docker/resources/bin"
+        "/c/Program Files/Docker/Docker/resources/bin"
+        "/c/ProgramData/DockerDesktop/version-bin"
+        "$HOME/AppData/Local/Programs/DockerDesktop/resources/bin"
+    )
+    local dir
+    for dir in "${candidates[@]}"; do
+        [[ -x "$dir/docker.exe" || -x "$dir/docker" ]] || continue
+        PATH="$PATH:$dir"
+        export PATH
+        command -v docker >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
 need() {
     command -v "$1" >/dev/null 2>&1 || { bad "нет $1"; exit 1; }
 }
-need docker
+
+bold "окружение"
+if ! find_docker; then
+    bad "docker не найден ни в PATH, ни там, куда его ставит Docker Desktop"
+    exit 1
+fi
 need openssl
 need curl
+
+# Установленный `docker` и запущенный демон — разные вещи, и путать их не
+# стоит: без демона любая команда падает так, будто docker не установлен.
+if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+    bad "демон docker не отвечает — запустите Docker Desktop и повторите"
+    docker version 2>&1 | tail -3
+    exit 1
+fi
+printf '  docker %s, compose %s\n' \
+    "$(docker version --format '{{.Server.Version}}' 2>/dev/null)" \
+    "$(docker compose version --short 2>/dev/null)"
+printf '  система: %s\n' "$(uname -sr 2>/dev/null || echo неизвестна)"
+ok "готово"
 
 # --- сертификат для Hysteria 2 -------------------------------------------
 if [[ ! -f tls/cert.pem ]]; then
@@ -47,9 +126,30 @@ if [[ ! -f tls/cert.pem ]]; then
 fi
 
 # --- серверы --------------------------------------------------------------
+#
+# Без `--wait`: он падает целиком, если хоть один образ не поднялся, и тогда
+# не проверяется ни один протокол. Здесь же важно обратное — пройти по всем и
+# увидеть, что именно сломано. Про упавшие серверы скажет `ps` ниже.
 bold "эталонные серверы"
-docker compose up -d --wait || { bad "не поднялись"; exit 1; }
-ok "подняты"
+if ! docker compose up -d; then
+    bad "часть серверов не поднялась — смотрите вывод выше"
+fi
+
+printf '\nсостояние контейнеров:\n'
+docker compose ps
+
+# Журнал каждого, кто не работает: без него «сервер молчит» ничего не говорит,
+# а причина у половины отказов видна в первых же строках журнала сервера.
+#
+# Списками служб, а не шаблоном вывода: `--format` у `compose ps` менялся от
+# версии к версии, а `--services` есть везде и печатает по имени на строку.
+running="$(docker compose ps --services --filter status=running 2>/dev/null)"
+for service in $(docker compose ps --services 2>/dev/null); do
+    if ! printf '%s\n' "$running" | grep -qx -- "$service"; then
+        printf '\n--- журнал `%s` (не запущен) ---\n' "$service"
+        docker compose logs --no-color --tail 25 "$service" 2>&1
+    fi
+done
 
 # --- клиент ---------------------------------------------------------------
 bold "сборка клиента"
@@ -307,10 +407,30 @@ down = "50 mbps"
 sni      = "interop.penguin.test"
 insecure = true'
 
-echo
+# --- итог -----------------------------------------------------------------
+#
+# Отдельно называется и то, для чего сервера нет вовсе: без этой строки
+# «все протоколы прошли» читается как «весь клиент проверен», а это неправда.
+bold "чего эта проверка не касалась"
+cat <<'NOTE'
+  Своего эталонного сервера в наборе пока нет у шести протоколов, и ни один
+  из них ниже не проверялся:
+
+    shadowsocksr   готового образа с сервером SSR не нашлось
+    mieru          сервер есть у самого проекта, служба не написана
+    masque         сервер CONNECT-UDP по RFC 9298 надо искать
+    wireguard      служба не написана
+    openconnect    нужен `ocserv` со своими учётными данными
+    trusttunnel    сервер открыт, служба не написана
+
+  Ещё не проверяется UDP ни у кого: готовой утилиты, которая ходит по UDP
+  через SOCKS5, нет, а своя проверяла бы протокол нашим же кодом.
+NOTE
+
+bold "итог"
 if [[ ${#FAILED[@]} -gt 0 ]]; then
-    printf '\033[31mПРОВАЛЕНО:\033[0m\n'
+    bad "не прошли: ${#FAILED[@]}"
     printf '  · %s\n' "${FAILED[@]}"
     exit 1
 fi
-printf '\033[32mВсе протоколы прошли.\033[0m\n'
+ok "все, у кого есть эталонный сервер, прошли"
