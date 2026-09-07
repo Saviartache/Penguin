@@ -1,8 +1,4 @@
 //! Регистрация протокола: разбор конфигурации и сборка направления.
-//!
-//! Фабрик две, ради двух записей в реестре — `http2` и `http3`, — но крейт
-//! один: сам `CONNECT`, дополнение и разбор ответа у них общие, а разное
-//! уносится в [`crate::outbound`] и [`crate::transport`].
 
 use std::sync::Arc;
 
@@ -11,36 +7,18 @@ use penguin_proto::error::ProtocolError;
 use penguin_proto::factory::{BuildContext, ProtocolFactory};
 use penguin_proto::outbound::Outbound;
 
+use crate::PROTOCOL_HTTP2;
 use crate::config::NaiveConfig;
-use crate::outbound::{NaiveHttp2Outbound, NaiveHttp3Outbound};
-use crate::{PROTOCOL_HTTP2, PROTOCOL_HTTP3};
-
-/// Какой транспорт несёт `CONNECT`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Variant {
-    Http2,
-    Http3,
-}
+use crate::outbound::NaiveHttp2Outbound;
 
 /// Фабрика сервера naive.
 #[derive(Debug, Clone, Copy)]
-pub struct NaiveFactory {
-    variant: Variant,
-}
+pub struct NaiveFactory;
 
 impl NaiveFactory {
     /// `CONNECT` поверх HTTP/2.
     pub fn http2() -> Self {
-        Self {
-            variant: Variant::Http2,
-        }
-    }
-
-    /// `CONNECT` поверх HTTP/3.
-    pub fn http3() -> Self {
-        Self {
-            variant: Variant::Http3,
-        }
+        Self
     }
 
     /// Разбирает параметры из конфигурации.
@@ -53,10 +31,7 @@ impl NaiveFactory {
 #[async_trait]
 impl ProtocolFactory for NaiveFactory {
     fn protocol(&self) -> &'static str {
-        match self.variant {
-            Variant::Http2 => PROTOCOL_HTTP2,
-            Variant::Http3 => PROTOCOL_HTTP3,
-        }
+        PROTOCOL_HTTP2
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
@@ -73,18 +48,12 @@ impl ProtocolFactory for NaiveFactory {
         let config = self.parse(params)?;
 
         // В отличие от `http-proxy`, здесь соединение поднимается сразу и
-        // держится открытым на весь профиль: у HTTP/2 и HTTP/3 есть
+        // держится открытым на весь профиль: у HTTP/2 есть
         // мультиплексирование, и повторное рукопожатие на каждый поток было
-        // бы платой за то, ради чего эти протоколы выбирают.
-        let outbound: Arc<dyn Outbound> = match self.variant {
-            Variant::Http2 => {
-                Arc::new(NaiveHttp2Outbound::connect(ctx.id, config, ctx.dialer).await?)
-            }
-            Variant::Http3 => {
-                Arc::new(NaiveHttp3Outbound::connect(ctx.id, config, ctx.dialer).await?)
-            }
-        };
-        Ok(outbound)
+        // бы платой за то, ради чего этот протокол выбирают.
+        Ok(Arc::new(
+            NaiveHttp2Outbound::connect(ctx.id, config, ctx.dialer).await?,
+        ))
     }
 }
 
@@ -104,9 +73,6 @@ mod tests {
         NaiveFactory::http2()
             .validate(&params)
             .expect("настройки верны");
-        NaiveFactory::http3()
-            .validate(&params)
-            .expect("настройки верны");
     }
 
     #[test]
@@ -122,8 +88,7 @@ mod tests {
 
     #[test]
     fn protocol_names_are_stable() {
-        // Имена стоят в конфигурациях пользователей — менять их нельзя.
+        // Имя стоит в конфигурациях пользователей — менять его нельзя.
         assert_eq!(NaiveFactory::http2().protocol(), "http2");
-        assert_eq!(NaiveFactory::http3().protocol(), "http3");
     }
 }

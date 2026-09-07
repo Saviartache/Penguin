@@ -80,8 +80,6 @@ gost-relay = ["dep:penguin-gost-relay"]
 brook = ["dep:penguin-brook"]
 mieru = ["dep:penguin-mieru"]
 shadowsocksr = ["dep:penguin-shadowsocksr"]
-# Одна фича на два протокола: `http2` и `http3` — это один крейт и одна
-# схема дополнения; собрать половину крейта всё равно нельзя.
 naive = ["dep:penguin-naive"]
 masque = ["dep:penguin-masque"]
 wireguard = ["dep:penguin-wireguard"]

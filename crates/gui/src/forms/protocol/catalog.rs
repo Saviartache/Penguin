@@ -31,7 +31,6 @@ pub static ALL: &[&ProtocolSpec] = &[
     &brook::SPEC,
     &mieru::SPEC,
     &trusttunnel::SPEC,
-    &naive::HTTP3,
     &naive::HTTP2,
     &masque::SPEC,
     &ssh::SPEC,
