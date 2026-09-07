@@ -15,11 +15,12 @@ use penguin_proto::error::ProtocolError;
 use penguin_proto::stream::ProxyStream;
 use penguin_transport::tls::TlsClient;
 use penguin_transport::{deadline, httpupgrade, ws};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::config::{GostRelayConfig, Security, Transport};
 use crate::error::{GostRelayError, GostRelayResult};
-use crate::frame::{request, response};
+use crate::frame::request;
+use crate::stream::GostRelayStream;
 
 /// Всё, что нужно, чтобы открыть поток до сервера.
 pub struct Connector {
@@ -125,11 +126,15 @@ impl Connector {
         deadline::handshake::<_, GostRelayError>("заголовок GOST Relay", async {
             io.write_all(&header).await?;
             io.flush().await?;
-            read_response(&mut io, target).await
+            Ok(())
         })
         .await?;
 
-        Ok(io)
+        // Ответ не вычитывается здесь: сервер придерживает его до первых
+        // данных от адресата, а их не будет, пока не уйдёт запрос
+        // приложения. Заголовок снимает поток, при первом чтении
+        // ([`crate::stream`]).
+        Ok(Box::new(GostRelayStream::new(io, target.to_string())))
     }
 
     /// Соединение до сервера вместе с переносом, но без заголовка запроса.
@@ -183,103 +188,3 @@ impl Connector {
     }
 }
 
-/// Читает заголовок ответа и превращает статус, отличный от успеха, в
-/// ошибку.
-///
-/// Признаки ответа дочитываются и отбрасываются, даже когда сервер по факту
-/// ничего в них не кладёт (см. документ [`response`]): иначе один сервер,
-/// который однажды решит что-то туда положить, испортит начало потока
-/// приложения.
-async fn read_response<S>(io: &mut S, target: &SocketAddress) -> GostRelayResult<()>
-where
-    S: AsyncRead + Unpin,
-{
-    let mut head = [0u8; 4];
-    io.read_exact(&mut head).await?;
-    let head = response::parse_header(head);
-
-    if head.version != request::VERSION {
-        return Err(GostRelayError::malformed(format!(
-            "версия ответа {:#04x} вместо {:#04x}",
-            head.version,
-            request::VERSION
-        )));
-    }
-
-    if head.feature_len > 0 {
-        let mut discard = vec![0u8; usize::from(head.feature_len)];
-        io.read_exact(&mut discard).await?;
-    }
-
-    match head.status {
-        response::STATUS_OK => Ok(()),
-        response::STATUS_UNAUTHORIZED => Err(GostRelayError::AuthRejected),
-        status => Err(GostRelayError::Refused {
-            target: target.to_string(),
-            reason: response::status_text(status),
-        }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn target() -> SocketAddress {
-        SocketAddress::domain("example.com", 443)
-    }
-
-    #[tokio::test]
-    async fn a_successful_response_drains_its_features() {
-        let mut wire = vec![request::VERSION, response::STATUS_OK, 0x00, 0x03];
-        wire.extend_from_slice(b"xyz");
-        wire.extend_from_slice("дальше идут данные приложения".as_bytes());
-
-        let mut io = std::io::Cursor::new(wire);
-        read_response(&mut io, &target()).await.expect("успех");
-
-        let mut rest = Vec::new();
-        io.read_to_end(&mut rest).await.unwrap();
-        assert_eq!(rest, "дальше идут данные приложения".as_bytes());
-    }
-
-    #[tokio::test]
-    async fn unauthorized_becomes_auth_rejected() {
-        let wire = [request::VERSION, response::STATUS_UNAUTHORIZED, 0x00, 0x00];
-        let mut io = std::io::Cursor::new(wire);
-        let err = read_response(&mut io, &target()).await.expect_err("отказ");
-        assert!(matches!(err, GostRelayError::AuthRejected));
-    }
-
-    #[tokio::test]
-    async fn other_statuses_become_a_named_refusal() {
-        let wire = [
-            request::VERSION,
-            response::STATUS_HOST_UNREACHABLE,
-            0x00,
-            0x00,
-        ];
-        let mut io = std::io::Cursor::new(wire);
-        let err = read_response(&mut io, &target()).await.expect_err("отказ");
-        match err {
-            GostRelayError::Refused { target, reason } => {
-                assert_eq!(target, "example.com:443");
-                assert_eq!(
-                    reason,
-                    response::status_text(response::STATUS_HOST_UNREACHABLE)
-                );
-            }
-            other => panic!("не тот вариант: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn a_wrong_version_is_not_a_status_to_interpret() {
-        // Чужой протокол на этом порту тоже может прислать что-то похожее
-        // на успех — версия обязана быть проверена раньше статуса.
-        let wire = [0x05, response::STATUS_OK, 0x00, 0x00];
-        let mut io = std::io::Cursor::new(wire);
-        let err = read_response(&mut io, &target()).await.expect_err("не то");
-        assert!(matches!(err, GostRelayError::Malformed(_)));
-    }
-}
