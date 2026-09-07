@@ -34,14 +34,13 @@
 //! и потому прочерк здесь дефис ([`crate::screens::compact`]), а обрезанный
 //! хвост помечен тильдой ([`CUT`]).
 
-use iced::gradient::Linear;
 use iced::theme::Palette;
 use iced::widget::text::{LineHeight, Wrapping};
-use iced::widget::{Space, container, text};
-use iced::{Background, Color, Element, Length, Padding, Radians};
-use uikit::color::with_alpha;
+use iced::widget::{container, text};
+use iced::{Color, Element, Length, Padding};
 use uikit::layout::{Flex, Sizable, Size, px};
 use uikit::style::tokens::{ink, type_scale};
+use uikit::widgets::Sparkline;
 
 /// Кегль консоли.
 const SIZE: f32 = type_scale::BODY;
@@ -96,32 +95,6 @@ const LEADER: char = '.';
 
 /// Черта в заголовке раздела.
 const DASH: char = '─';
-
-/// Зазор между столбиками графика.
-///
-/// Один пиксел: столбик шириной в несколько пикселов, разделённый большим
-/// зазором, перестаёт читаться как столбик и становится точкой.
-const BAR_GAP: f32 = 1.0;
-
-/// Насколько столбик прозрачнее на вершине, чем у основания.
-///
-/// Полная сила цвета — внизу, у оси: там столбики стоят сплошной полосой, и
-/// график виден как одно целое. Кверху они тают: сплошные плашки в тёмной
-/// консоли выглядят частоколом и спорят с текстом вокруг.
-const BAR_TIP: f32 = 0.3;
-
-/// Толщина оси — черты под столбиками.
-///
-/// Пиксел: ось показывает, где у графика низ, и не должна выглядеть как самый
-/// короткий столбик.
-const AXIS: f32 = 1.0;
-
-/// На сколько ступеней делится высота графика.
-///
-/// Доля столбика берётся местом в колонке, а не числом знаков, поэтому ступеней
-/// столько, сколько нужно для плавности, — высота графика в пикселах тут ни при
-/// чём.
-const STEPS: u16 = 100;
 
 /// Длина заполнителя в знаках.
 ///
@@ -242,7 +215,7 @@ fn draw<'a, Message: 'a>(
         Line::Section(label) => section(palette, label, typed),
         Line::Pair(label, value) => duo(palette, label, value, dim, palette.text, typed),
         Line::Toned(label, value, tone) => duo(palette, label, value, dim, *tone, typed),
-        Line::Graph(points) => graph(palette, points),
+        Line::Graph(points) => graph(points),
     }
 }
 
@@ -307,105 +280,26 @@ fn duo<'a, Message: 'a>(
         .build()
 }
 
-/// Столбчатый график во всю оставшуюся высоту.
+/// Столбчатый график во всю оставшуюся высоту — ряд кита.
 ///
-/// Столбики, а не блочные знаки: знаками высота графика ограничена одной строкой
-/// и восемью ступенями внутри неё. Здесь высота — это всё место, что осталось от
-/// текста, ступеней столько, сколько задано [`STEPS`], и график читается как
-/// график, а не как «что-то идёт».
+/// Своих столбиков у консоли нет: ряд чисел столбиками — это `Sparkline`, и
+/// вторая его копия здесь означала бы два разных графика в одной семье
+/// приложений. Оттуда же и вид: столбики лучами света, плотными у основания,
+/// свежие ярче старых, и своя черта под ними вместо оси.
+///
+/// Доли приходят готовыми, от нуля до единицы, поэтому шкала задана единицей:
+/// иначе ряд считал бы её по собственному пику, и высота столбиков менялась бы
+/// на каждом отсчёте.
 ///
 /// Свежий отсчёт — справа: слева уезжает старое, как на любом графике времени.
-/// Сколько отсчётов рисовать, решает вызывающий: он знает, какую историю держит,
-/// а здесь рисуются все, что дали.
-fn graph<'a, Message: 'a>(palette: &Palette, points: &[f32]) -> Element<'a, Message> {
-    let bars = points.iter().map(|point| bar(palette.primary, *point));
-
-    let bars = Flex::row()
+/// Сколько отсчётов рисовать, решает вызывающий: он знает, какую историю
+/// держит.
+fn graph<'a, Message: 'a>(points: &[f32]) -> Element<'a, Message> {
+    Sparkline::new(points.iter().copied())
+        .scale(1.0)
         .w(Size::FILL)
         .h(Size::FILL)
-        .extend(bars)
-        .gap(BAR_GAP)
-        .build();
-
-    // Своего отступа у графика нет: зазор сверху и снизу ему даёт колонка — тот
-    // же, что и между строками текста. Ось идёт внутри графика, а не отдельной
-    // строкой консоли: это его низ, а не сообщение рядом с ним.
-    Flex::col()
-        .w(Size::FILL)
-        .h(Size::FILL)
-        .push(bars)
-        .push_auto(axis(palette))
-        .build()
-}
-
-/// Ось графика — черта, по которой стоят столбики.
-///
-/// Без неё низ графика не виден вовсе: отсчёт «ничего не шло» — это столбик
-/// толщиной в пиксел, и в тёмной консоли он теряется, а вместе с ним теряется
-/// и то, откуда столбики растут.
-fn axis<'a, Message: 'a>(palette: &Palette) -> Element<'a, Message> {
-    let color = ink::level(palette, ink::TERTIARY);
-
-    container(Space::new())
-        .width(Length::Fill)
-        .height(Length::Fixed(AXIS))
-        .style(move |_: &iced::Theme| container::Style {
-            background: Some(color.into()),
-            // По сетке пикселов: черта толщиной в пиксел, размазанная между
-            // двумя, — это полупрозрачная черта толщиной в два.
-            snap: true,
-            ..container::Style::default()
-        })
         .into()
-}
-
-/// Один столбик: пустота сверху, залитая доля снизу.
-///
-/// Доля берётся местом в колонке, а не пикселами: высоту графика знает только
-/// раскладка, и считать её здесь значило бы считать её дважды.
-fn bar<'a, Message: 'a>(color: Color, share: f32) -> Element<'a, Message> {
-    // Не ноль: столбик нулевой высоты — это квад нулевого размера, которого не
-    // принимает отрисовщик, и вдобавок пропавшая с графика точка. Отсчёт «ничего
-    // не шло» обязан быть виден основанием.
-    let filled = ((share.clamp(0.0, 1.0) * f32::from(STEPS)).round() as u16).clamp(1, STEPS);
-
-    let fill = bar_fill(color);
-    let body = container(Space::new())
-        .width(Length::Fill)
-        .height(Length::FillPortion(filled))
-        .style(move |_: &iced::Theme| container::Style {
-            background: Some(fill),
-            // По сетке пикселов: столбик в четыре пиксела шириной, размазанный
-            // между пятью, теряет и цвет, и края.
-            snap: true,
-            ..container::Style::default()
-        });
-
-    let mut column = iced::widget::Column::new()
-        .width(Length::Fill)
-        .height(Length::Fill);
-    // Пустоты нет вовсе, когда столбик во всю высоту: `FillPortion(0)` схлопнул
-    // бы колонку в ноль.
-    if filled < STEPS {
-        column = column.push(Space::new().height(Length::FillPortion(STEPS - filled)));
-    }
-    column.push(body).into()
-}
-
-/// Заливка столбика: [`BAR_TIP`] от цвета на вершине, полная сила — у
-/// основания.
-///
-/// Градиент считается по границам самого столбика, а не графика: у `iced`
-/// заливка привязана к квадру, которым нарисована. Смещение `0.0` лежит там,
-/// откуда указывает угол, поэтому половина оборота — вниз — ставит его на
-/// вершину.
-fn bar_fill(color: Color) -> Background {
-    Background::Gradient(
-        Linear::new(Radians(std::f32::consts::PI))
-            .add_stop(0.0, with_alpha(color, color.a * BAR_TIP))
-            .add_stop(1.0, color)
-            .into(),
-    )
 }
 
 /// Заполнитель на всю оставшуюся пустоту: точки, черта, ровная линия.
@@ -491,22 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_fades_from_its_base_up() {
-        // Перепутанный угол развернул бы градиент, и график лишился бы
-        // плотного низа — линии, по которой стоят все столбики.
-        let Background::Gradient(iced::Gradient::Linear(fill)) = bar_fill(palette().primary) else {
-            panic!("столбик залит не градиентом");
-        };
-        let stops: Vec<_> = fill.stops.iter().flatten().collect();
-
-        assert_eq!(fill.angle, Radians(std::f32::consts::PI));
-        assert_eq!(stops.len(), 2);
-        assert_eq!(stops[0].offset, 0.0);
-        assert_eq!(stops[1].offset, 1.0);
-        assert!(stops[0].color.a < stops[1].color.a);
-    }
-
-    #[test]
     fn the_console_fills_the_window() {
         // Ради этого рамку и убрали: её ширина считалась в знаках и до края
         // окна не доставала.
@@ -549,39 +427,21 @@ mod tests {
     }
 
     #[test]
-    fn the_graph_draws_its_own_floor() {
-        // Низ графика — ось: без неё непонятно, откуда растут столбики, а
-        // отсчёт «ничего не шло» толщиной в пиксел в тёмной консоли не виден.
-        let element: Element<'_, ()> = axis(&palette());
-        assert_eq!(element.as_widget().size().height, Length::Fixed(AXIS));
-        assert_eq!(element.as_widget().size().width, Length::Fill);
-    }
-
-    #[test]
     fn the_graph_takes_all_the_height_left_over() {
         // Ради этого он и перестал быть строкой: график занимает всё, что не
-        // занял текст, а не одну строку в знак высотой.
-        let element: Element<'_, ()> = graph(&palette(), &[0.0, 0.5, 1.0]);
+        // занял текст, а не одну строку в знак высотой. Ряд кита по умолчанию
+        // высотой в строку, поэтому высота задаётся здесь.
+        let element: Element<'_, ()> = graph(&[0.0, 0.5, 1.0]);
         let size = element.as_widget().size();
         assert_eq!(size.width, Length::Fill);
         assert_eq!(size.height, Length::Fill);
     }
 
     #[test]
-    fn a_bar_is_never_nothing() {
-        // Столбик нулевой высоты — это квад нулевого размера, которого не
-        // принимает отрисовщик, и пропавшая с графика точка.
-        for share in [-1.0, 0.0, 0.001, 0.5, 1.0, 2.0] {
-            let element: Element<'_, ()> = bar(palette().primary, share);
-            assert_eq!(element.as_widget().size().height, Length::Fill);
-        }
-    }
-
-    #[test]
     fn an_empty_graph_still_holds_its_place() {
         // Отсчётов нет — место всё равно за графиком: без этого текст расползся
         // бы по всей высоте окна.
-        let element: Element<'_, ()> = graph(&palette(), &[]);
+        let element: Element<'_, ()> = graph(&[]);
         assert_eq!(element.as_widget().size().height, Length::Fill);
     }
 
