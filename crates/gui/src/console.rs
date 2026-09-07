@@ -9,15 +9,14 @@
 //! шрифте и любом масштабе.
 //!
 //! Язык взят у вывода `MEM` и `CHKDSK`: заглавные подписи слева, значения у
-//! правого края, точки между ними, заголовок раздела с чертой до края,
-//! приглашение с мигающим блоком внизу. Что это дало помимо точности:
+//! правого края, точки между ними, заголовок раздела с чертой до края. Что это
+//! дало помимо точности:
 //!
 //! - у каждой строки свой цвет — поле приглушено, значение ярко, состояние идёт
 //!   своим тоном. Одной строкой текста так было нельзя;
 //! - печать при первом открытии идёт по знакам, но место под строку заготовлено
 //!   заранее: недобранное занято пробелами, поэтому точки и значения не
-//!   дёргаются на каждом знаке;
-//! - курсор мигает, а не стоит.
+//!   дёргаются на каждом знаке.
 //!
 //! Отступ от края одинаковый со всех четырёх сторон — см. [`PAD`].
 //!
@@ -146,18 +145,13 @@ pub enum Line {
     /// строк-разделителей в консоли поэтому и нет — свободную высоту держит
     /// график, а блоки делит черта в заголовке раздела.
     Graph(Vec<f32>),
-    /// Приглашение с курсором.
-    Prompt(String),
 }
 
 /// Сколько консоли показывать.
 #[derive(Debug, Clone, Copy)]
 pub enum Reveal {
     /// Напечатано всё.
-    Done {
-        /// Виден ли курсор в этот момент — он мигает.
-        cursor: bool,
-    },
+    Done,
     /// Печатается: доля напечатанного, `0.0..=1.0`.
     Typing(f32),
 }
@@ -169,13 +163,9 @@ pub fn console<'a, Message: 'a>(
     reveal: Reveal,
 ) -> Element<'a, Message> {
     let total: usize = lines.iter().map(cost).sum();
-    let (typed, cursor) = match reveal {
-        Reveal::Done { cursor } => (total, cursor),
-        // Пока печатается, курсор ставит сама набираемая строка.
-        Reveal::Typing(fraction) => {
-            let fraction = fraction.clamp(0.0, 1.0);
-            (((total as f32) * fraction).ceil() as usize, false)
-        }
+    let typed = match reveal {
+        Reveal::Done => total,
+        Reveal::Typing(fraction) => ((total as f32) * fraction.clamp(0.0, 1.0)).ceil() as usize,
     };
 
     let mut body = Flex::col().w(Size::FILL).h(Size::FILL).gap(SPACING);
@@ -185,9 +175,9 @@ pub fn console<'a, Message: 'a>(
         // До строки ещё не дошли — её просто нет: так она и появляется, сверху
         // вниз, а не проявляется из пустоты на своём месте.
         let shown = if typed >= end {
-            Some(draw(palette, line, None, cursor))
+            Some(draw(palette, line, None))
         } else if typed > at {
-            Some(draw(palette, line, Some(typed - at), cursor))
+            Some(draw(palette, line, Some(typed - at)))
         } else {
             None
         };
@@ -226,7 +216,7 @@ pub fn console<'a, Message: 'a>(
 fn cost(line: &Line) -> usize {
     match line {
         Line::Pair(label, value) | Line::Toned(label, value, _) => count(label) + count(value),
-        Line::Section(label) | Line::Prompt(label) => count(label),
+        Line::Section(label) => count(label),
         // График — данные, а не набранный текст: он появляется целиком.
         Line::Graph(_) => 0,
     }
@@ -237,7 +227,6 @@ fn draw<'a, Message: 'a>(
     palette: &Palette,
     line: &Line,
     typed: Option<usize>,
-    cursor: bool,
 ) -> Element<'a, Message> {
     let dim = ink::level(palette, ink::SECONDARY);
     match line {
@@ -245,7 +234,6 @@ fn draw<'a, Message: 'a>(
         Line::Pair(label, value) => duo(palette, label, value, dim, palette.text, typed),
         Line::Toned(label, value, tone) => duo(palette, label, value, dim, *tone, typed),
         Line::Graph(points) => graph(palette, points),
-        Line::Prompt(prompt) => prompt_line(palette, prompt, typed, cursor),
     }
 }
 
@@ -394,22 +382,6 @@ fn bar<'a, Message: 'a>(color: Color, share: f32) -> Element<'a, Message> {
     column.push(body).into()
 }
 
-/// Приглашение с курсором.
-fn prompt_line<'a, Message: 'a>(
-    palette: &Palette,
-    prompt: &str,
-    typed: Option<usize>,
-    cursor: bool,
-) -> Element<'a, Message> {
-    let shown = match typed {
-        // Место под курсор занято всегда: мигая, он не должен двигать строку.
-        None if cursor => format!("{prompt}{CURSOR}"),
-        None => format!("{prompt} "),
-        Some(shown) => typing(prompt, shown, count(prompt)),
-    };
-    cell(shown, palette.text)
-}
-
 /// Заполнитель на всю оставшуюся пустоту: точки, черта, ровная линия.
 ///
 /// Он нарочно длиннее любого окна и обрезается контейнером — так его правый край
@@ -488,7 +460,7 @@ mod tests {
             Line::Pair("ПРОФИЛЬ".to_owned(), "84.22.150.245".to_owned()),
             Line::Toned("СОСТОЯНИЕ".to_owned(), "ОТКЛЮЧЕНО".to_owned(), Color::WHITE),
             Line::Graph(vec![0.0, 0.5, 1.0]),
-            Line::Prompt("C:\\OSTRIACKI> ".to_owned()),
+            Line::Pair("СОЕДИНЕНИЙ".to_owned(), "0".to_owned()),
         ]
     }
 
@@ -496,7 +468,7 @@ mod tests {
     fn the_console_fills_the_window() {
         // Ради этого рамку и убрали: её ширина считалась в знаках и до края
         // окна не доставала.
-        let element: Element<'_, ()> = console(&palette(), &lines(), Reveal::Done { cursor: true });
+        let element: Element<'_, ()> = console(&palette(), &lines(), Reveal::Done);
         let size = element.as_widget().size();
 
         assert_eq!(size.width, Length::Fill);
@@ -587,15 +559,5 @@ mod tests {
         // длиннее нужного.
         assert_eq!(count("СЕРВЕР"), 6);
         assert!("СЕРВЕР".len() > 6);
-    }
-
-    #[test]
-    fn the_blinking_cursor_does_not_move_the_prompt() {
-        // Место под курсор занято всегда: мигание — это знак или пробел, а не
-        // знак или ничто.
-        let palette = palette();
-        let lit: Element<'_, ()> = prompt_line(&palette, "C:\\>", None, true);
-        let dark: Element<'_, ()> = prompt_line(&palette, "C:\\>", None, false);
-        assert_eq!(lit.as_widget().size(), dark.as_widget().size());
     }
 }

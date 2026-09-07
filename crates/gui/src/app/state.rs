@@ -40,13 +40,6 @@ pub const GRAPH_POINTS: usize = 60;
 /// нажать одну кнопку, смотрит на анимацию вместо дела.
 const BOOT: Duration = Duration::from_millis(750);
 
-/// Полупериод мигания курсора.
-///
-/// Два пробуждения в секунду. Правило «никакого таймера на замершем окне»
-/// писалось про кадры пружины — шестьдесят в секунду; здесь на четыре порядка
-/// меньше работы, а курсор, который не мигает, читается как замёрзшее окно.
-pub const BLINK: Duration = Duration::from_millis(500);
-
 /// Всё состояние окна.
 #[derive(Debug)]
 pub struct State {
@@ -140,20 +133,6 @@ impl Boot {
         let started = self.started?;
         let fraction = started.elapsed().as_secs_f32() / BOOT.as_secs_f32();
         Some(fraction.clamp(0.0, 1.0))
-    }
-
-    /// Виден ли курсор в этот момент.
-    ///
-    /// Считается временем, а не переключается сообщением: у мигания нет
-    /// состояния, которое стоило бы хранить и с которым можно было бы
-    /// разойтись.
-    pub fn cursor(&self) -> bool {
-        let Some(started) = self.started else {
-            // Заставки не было — курсор просто стоит. Так его видят тесты и
-            // так он выглядит, если мигать нечем.
-            return true;
-        };
-        (started.elapsed().as_millis() / BLINK.as_millis()).is_multiple_of(2)
     }
 
     /// Идёт ли печать сейчас.

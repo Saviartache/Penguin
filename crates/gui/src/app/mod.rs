@@ -242,11 +242,6 @@ impl App {
         // процессор ни за чем.
         if !self.morph.settled() || self.state.boot.typing() {
             streams.push(iced::time::every(FRAME).map(Message::Frame));
-        } else if !self.state.expanded {
-            // Допечатали, и всё замерло — кроме курсора консоли. Ему хватает
-            // двух пробуждений в секунду вместо шестидесяти, и просит он их
-            // только пока консоль на экране: под раскрытой панелью её не видно.
-            streams.push(iced::time::every(state::BLINK).map(Message::Frame));
         }
 
         Subscription::batch(streams)

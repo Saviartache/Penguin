@@ -14,8 +14,7 @@
 //! - дальше график: он забирает всю высоту, не занятую текстом. Раньше на этом
 //!   месте была пустота — та самая, из-за которой окно выглядело недозаполненным;
 //! - над графиком его подпись, под ним его цифры: скорость приёма и отдачи,
-//!   число соединений;
-//! - последней строкой приглашение с мигающим курсором.
+//!   число соединений. Ими консоль и заканчивается, у самого нижнего края.
 //!
 //! Конфигурация и трафик показываются вместе, а не по очереди: переключение
 //! содержимого на одном месте заставляло бы искать глазами, что там сейчас.
@@ -45,12 +44,6 @@ const BUTTON_HEIGHT: f32 = 40.0;
 /// [`crate::console`], правило про глифы).
 const NONE: &str = "-";
 
-/// Приглашение у нижнего края.
-///
-/// Латиницей и с обратной косой — приглашение `COMMAND.COM`, а не приглашение
-/// оболочки Unix: окно и живёт на Windows.
-const PROMPT: &str = "C:\\OSTRIACKI> ";
-
 /// Собирает компактный экран.
 pub fn view(state: &State) -> Element<'_, Message> {
     // Колонка объявляет размер сама. Без этого она «по содержимому», а
@@ -72,11 +65,10 @@ fn screen(state: &State) -> Element<'_, Message> {
     lines.push(status(state));
     // Заголовок раздела стоит над графиком и служит ему подписью: цифры под ним
     // и так читаются как его же. График забирает всю высоту, которую не занял
-    // текст, — он же и прижимает цифры с приглашением к нижнему краю.
+    // текст, — он же и прижимает цифры к нижнему краю.
     lines.push(Line::Section(crate::i18n::s().traffic.to_uppercase()));
     lines.push(Line::Graph(history(state)));
     lines.extend(traffic(state));
-    lines.push(Line::Prompt(PROMPT.to_owned()));
 
     console::console(&state.palette, &lines, reveal(state))
 }
@@ -105,9 +97,7 @@ fn history(state: &State) -> Vec<f32> {
 fn reveal(state: &State) -> Reveal {
     match state.boot.progress() {
         Some(fraction) if fraction < 1.0 => Reveal::Typing(fraction),
-        _ => Reveal::Done {
-            cursor: state.boot.cursor(),
-        },
+        _ => Reveal::Done,
     }
 }
 
@@ -396,7 +386,7 @@ mod tests {
                 Line::Pair(label, value) | Line::Toned(label, value, _) => {
                     (label.as_str(), value.as_str())
                 }
-                Line::Section(label) | Line::Prompt(label) => (label.as_str(), ""),
+                Line::Section(label) => (label.as_str(), ""),
                 // У графика знаков нет вовсе — он рисуется столбиками.
                 Line::Graph(_) => continue,
             };
