@@ -154,7 +154,7 @@ fn interface_with(address: Ipv4Addr) -> crate::error::PlatformResult<Option<Stri
         let Some(inet) = storage.as_sockaddr_in() else {
             continue;
         };
-        if Ipv4Addr::from(inet.ip()) == address {
+        if inet.ip() == address {
             return Ok(Some(interface.interface_name));
         }
     }

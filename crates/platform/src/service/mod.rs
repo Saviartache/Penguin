@@ -186,7 +186,7 @@ pub fn status() -> PlatformResult<ServiceStatus> {
 ///
 /// На macOS путей два — программа и её копия в системном каталоге, которую
 /// только и соглашается запускать launchd, — и сравниваются не они, а сборки
-/// ([`macos::runs_current_build`]).
+/// (`macos::runs_current_build`).
 pub fn matches_current_executable() -> bool {
     #[cfg(target_os = "macos")]
     {
