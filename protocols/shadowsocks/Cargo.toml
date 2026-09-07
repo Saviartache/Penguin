@@ -19,9 +19,6 @@ penguin-transport.workspace = true
 
 # Шифры, HKDF и случайные байты. `ring` уже собран в дереве через `rustls`.
 ring.workspace = true
-# Вывод ключа из пароля: `EVP_BytesToKey`. Так делает сервер, и заменить это
-# на что-то разумное нельзя, не сломав совместимость.
-md-5.workspace = true
 rand.workspace = true
 
 tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }

@@ -154,23 +154,29 @@ globset = "0.4"
 maxminddb = "0.24"
 
 # --- криптография ---
-blake2 = "0.10"
-sha2 = "0.10"
+#
+# Вся семья RustCrypto держится на одном поколении `digest 0.11` (`cipher 0.5`,
+# `aead 0.6`). Смешивать поколения нельзя не из аккуратности: типажи `Digest`,
+# `Mac` и `KeyInit` у 0.10 и 0.11 разные, `Hmac<Md5>` через границу поколений
+# не собирается, и каждая половина тянет в дерево свою копию `digest`,
+# `block-buffer`, `crypto-common` и `generic-array`.
+blake2 = "0.11"
+sha2 = "0.11"
 # Только ради `EVP_BytesToKey` — вывода ключа из пароля у Shadowsocks. Своей
 # стойкости он не даёт и придуман не для этого; заменить его нельзя, потому
 # что так делает сервер.
-md-5 = "0.10"
+md-5 = "0.11"
 # Только ради Snell: сеансовый ключ он выводит Argon2id прямо из пароля, и
 # другой функции у него нет. Своей реализации Argon2 в проекте не будет —
 # это примитив, который либо берут готовым, либо ошибаются в нём молча.
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 rand = "0.8"
 # Только ради WireGuard: постоянный приватный ключ участвует в каждом
 # рукопожатии за весь сеанс, а `ring::agreement` потребляет его при первом же
 # использовании. `static_secrets` даёт многоразовый секрет — он же нужен и для
 # одноразового ключа рукопожатия, который в одном сеансе Noise IK участвует в
 # двух разных вычислениях Диффи-Хеллмана.
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "getrandom"] }
+x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "getrandom"] }
 # Только ради ShadowsocksR: там все шифры потоковые, а в `ring` (AEAD) их
 # нет. Данные ими не заверяются — это свойство протокола, не наше решение
 # (см. документ крейта `penguin-shadowsocksr`).
@@ -178,17 +184,14 @@ aes = "0.9"
 cfb-mode = "0.9"
 ctr = "0.10"
 rc4 = "0.2"
-sha1 = "0.10"
-# Версия закреплена на `0.10.x` в дереве `digest`, чтобы совпасть с `md-5` и
-# `sha1`, которые уже в этой версии, — иначе `Hmac<Md5>` не собрать: более
-# новый `hmac` требует `digest 0.11` и другого типажа (`EagerHash`).
-hmac = "0.12"
+sha1 = "0.11"
+hmac = "0.13"
 # Только ради Mieru: нонс XChaCha20-Poly1305 — 24 байта, вдвое длиннее того,
 # что умеет общий `aead` (у `ring` XChaCha20 нет вовсе).
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
 # Только ради Mieru: сеансовый ключ выводится PBKDF2-HMAC-SHA256 из хэша
 # пароля с именем пользователя и соли, зависящей от времени.
-pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 
 # --- DNS ---
 hickory-proto = { version = "0.24", default-features = false }
@@ -211,7 +214,7 @@ windows = "0.58"
 windows-service = "0.7"
 wintun = "0.5"
 
-nix = { version = "0.29", default-features = false }
+nix = { version = "0.31", default-features = false }
 libc = "0.2"
 
 [workspace.lints.rust]

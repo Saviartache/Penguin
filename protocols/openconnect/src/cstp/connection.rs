@@ -175,7 +175,7 @@ impl CstpConnection {
                 ipv4: tunnel.ipv4,
                 ipv6: tunnel.ipv6,
                 mtu: tunnel.mtu,
-                dns: tunnel.dns.clone(),
+                dns: tunnel.dns,
             },
             shared,
             incoming: Mutex::new(rx),

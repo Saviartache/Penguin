@@ -38,7 +38,6 @@ serde.workspace = true
 # Параметры протокола приходят от `penguin-config` непрозрачным JSON.
 serde_json.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

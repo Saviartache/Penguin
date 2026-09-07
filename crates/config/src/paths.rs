@@ -185,20 +185,6 @@ fn xdg_dir(variable: &str, fallback: &str) -> ConfigResult<PathBuf> {
     }
 }
 
-/// Адрес канала управления между демоном и интерфейсом.
-///
-/// Не в `Paths`: на Windows это не файл и каталогу не принадлежит.
-pub fn control_channel() -> String {
-    #[cfg(windows)]
-    {
-        r"\\.\pipe\penguin-control".to_owned()
-    }
-    #[cfg(not(windows))]
-    {
-        "/var/run/penguin.sock".to_owned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,10 +25,8 @@ penguin-transport.workspace = true
 
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "macros"] }
 async-trait.workspace = true
-bytes.workspace = true
 serde.workspace = true
 # Параметры протокола приходят от `penguin-config` непрозрачным JSON —
 # разбирает их только этот крейт.
 serde_json.workspace = true
 thiserror.workspace = true
-tracing.workspace = true

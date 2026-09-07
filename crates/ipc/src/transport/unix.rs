@@ -169,7 +169,7 @@ pub fn clear_stale(path: &Path) -> IpcResult<()> {
     .map_err(std::io::Error::from)?;
     // Darwin does not support SOCK_NONBLOCK at socket creation.
     nix::fcntl::fcntl(
-        probe.as_raw_fd(),
+        &probe,
         nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
     )
     .map_err(std::io::Error::from)?;

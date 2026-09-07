@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use penguin_proto::error::ProtocolError;
-use penguin_proto::factory::{BuildContext, ProtocolFactory};
+use penguin_proto::factory::{BuildContext, ProtocolFactory, parse_params};
 use penguin_proto::outbound::Outbound;
 
 use crate::PROTOCOL;
@@ -26,8 +26,7 @@ impl Hysteria2Factory {
 
     /// Разбирает параметры из конфигурации.
     fn parse(params: &serde_json::Value) -> Result<Hysteria2Config, ProtocolError> {
-        serde_json::from_value(params.clone())
-            .map_err(|e| ProtocolError::InvalidConfig(format!("Hysteria 2: {e}")))
+        parse_params("Hysteria 2", params)
     }
 }
 

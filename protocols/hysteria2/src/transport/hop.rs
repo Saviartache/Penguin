@@ -50,11 +50,6 @@ impl PortHopper {
         let step = elapsed.as_secs() / self.interval.as_secs().max(1);
         self.ports.nth(scatter(step) as u32)
     }
-
-    /// Сколько портов в наборе.
-    pub fn port_count(&self) -> u32 {
-        self.ports.count()
-    }
 }
 
 /// Перемешивает номер шага.

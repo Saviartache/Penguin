@@ -4,8 +4,6 @@
 //! таскать его типы по всему клиенту не стоит. Здесь остаётся ровно то, что
 //! нужно перехвату: узнать, о чём спрашивают, и собрать ответ.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
-
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
@@ -192,14 +190,9 @@ pub const fn record_type_of(address: std::net::IpAddr) -> RecordType {
     }
 }
 
-/// Адрес-заглушка IPv4, если ответ пуст.
-pub const UNSPECIFIED_V4: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
-/// Адрес-заглушка IPv6.
-pub const UNSPECIFIED_V6: Ipv6Addr = Ipv6Addr::UNSPECIFIED;
-
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use super::*;
 

@@ -30,7 +30,6 @@ ring.workspace = true
 md-5.workspace = true
 
 tokio = { workspace = true, features = ["rt", "io-util", "time", "macros"] }
-async-trait.workspace = true
 bytes.workspace = true
 rand.workspace = true
 serde.workspace = true
@@ -39,4 +38,3 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time"] }
-serde_json.workspace = true

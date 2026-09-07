@@ -126,7 +126,10 @@ impl Scheme {
 
         Some(Self {
             raw: raw.to_vec(),
-            md5: format!("{:x}", Md5::digest(raw)),
+            md5: Md5::digest(raw)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
             stop,
             rules,
         })

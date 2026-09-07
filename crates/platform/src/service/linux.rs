@@ -64,7 +64,11 @@ fn restore_context(path: &str, recursive: bool) {
     arguments.push(path);
 
     if let Err(err) = command::run(program, &arguments) {
-        tracing::warn!(path, reason = err.reason(), "контекст SELinux не восстановлен");
+        tracing::warn!(
+            path,
+            reason = err.reason(),
+            "контекст SELinux не восстановлен"
+        );
     }
 }
 

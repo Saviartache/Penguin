@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use penguin_proto::error::ProtocolError;
-use penguin_proto::factory::BuildContext;
+use penguin_proto::factory::{BuildContext, parse_params};
 use penguin_proto::packet::{PacketFactory, PacketOutbound};
 use penguin_transport::tls::{ALPN_HTTP11, TlsClient};
 
@@ -34,8 +34,7 @@ impl OpenConnectFactory {
 
     /// Разбирает параметры из конфигурации.
     fn parse(params: &serde_json::Value) -> Result<OpenConnectConfig, ProtocolError> {
-        serde_json::from_value(params.clone())
-            .map_err(|e| ProtocolError::InvalidConfig(format!("OpenConnect: {e}")))
+        parse_params("OpenConnect", params)
     }
 }
 

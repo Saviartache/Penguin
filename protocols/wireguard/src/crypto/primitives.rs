@@ -188,7 +188,7 @@ pub const fn sealed_len(plaintext_len: usize) -> usize {
 fn nonce_from_counter(counter: u64) -> Nonce {
     let mut bytes = [0u8; 12];
     bytes[4..12].copy_from_slice(&counter.to_le_bytes());
-    *Nonce::from_slice(&bytes)
+    bytes.into()
 }
 
 #[cfg(test)]

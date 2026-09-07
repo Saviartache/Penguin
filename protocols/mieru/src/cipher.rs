@@ -14,7 +14,7 @@
 //! то, что не даёт паре «ключ, нонс» повториться между направлениями.
 
 use chacha20poly1305::aead::Aead;
-use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{KeyInit, XChaCha20Poly1305};
 
 use crate::error::{MieruError, MieruResult};
 use crate::keying::Key;
@@ -66,7 +66,7 @@ impl SendCipher {
 
         let sealed = self
             .aead
-            .encrypt(XNonce::from_slice(&nonce), plaintext)
+            .encrypt(&nonce.into(), plaintext)
             .map_err(|_| MieruError::malformed("кусок не зашифровался"))?;
         out.extend_from_slice(&sealed);
         Ok(())
@@ -126,7 +126,7 @@ impl RecvCipher {
         };
 
         self.aead
-            .decrypt(XNonce::from_slice(&nonce), ciphertext)
+            .decrypt(&nonce.into(), ciphertext)
             .map_err(|_| MieruError::Rejected)
     }
 }

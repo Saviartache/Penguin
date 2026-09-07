@@ -28,7 +28,6 @@ penguin-gui.workspace = true
 
 clap.workspace = true
 anyhow.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 

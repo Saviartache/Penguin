@@ -4,7 +4,6 @@ pub mod address;
 pub mod base64;
 pub mod endpoint;
 pub mod error;
-pub mod flow;
 pub mod id;
 pub mod network;
 pub mod path;

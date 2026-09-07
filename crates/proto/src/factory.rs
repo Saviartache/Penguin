@@ -4,10 +4,27 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use penguin_core::id::OutboundId;
+use serde::de::DeserializeOwned;
 
 use crate::dialer::Dialer;
 use crate::error::ProtocolError;
 use crate::outbound::Outbound;
+
+/// Разбирает непрозрачные параметры протокола, подписывая ошибку его именем.
+///
+/// `name` — имя для человека («Hysteria 2»), а не ключ протокола в
+/// конфигурации: эта строка попадает в форму профиля.
+///
+/// Не через `serde_json::from_value`: тот берёт `Value` по значению, и каждая
+/// фабрика копировала бы всё дерево параметров — дважды за подключение, ведь
+/// [`ProtocolFactory::validate`] и [`ProtocolFactory::build`] разбирают его
+/// порознь.
+pub fn parse_params<T: DeserializeOwned>(
+    name: &str,
+    params: &serde_json::Value,
+) -> Result<T, ProtocolError> {
+    T::deserialize(params).map_err(|err| ProtocolError::InvalidConfig(format!("{name}: {err}")))
+}
 
 /// Всё, что нужно фабрике, кроме её собственных параметров.
 ///

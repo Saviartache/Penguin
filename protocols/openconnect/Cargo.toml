@@ -19,7 +19,6 @@ penguin-transport.workspace = true
 
 # `net` не включена нигде ниже: сокеты выдаёт `Dialer`, а не `tokio::net`.
 tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
-tokio-util.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 serde.workspace = true

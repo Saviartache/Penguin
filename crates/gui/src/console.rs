@@ -274,7 +274,7 @@ fn duo<'a, Message: 'a>(
     let value = clip(value, LIMIT);
     let (label_len, value_len) = (count(label), count(&value));
     let (label_shown, dotted, value_shown) = match typed {
-        None => (label.to_owned(), true, value.clone()),
+        None => (label.to_owned(), true, value),
         // Набирается поле: значения ещё нет, но место под него уже занято
         // пробелами — иначе точки поехали бы вправо на каждом знаке.
         Some(shown) if shown < label_len => (

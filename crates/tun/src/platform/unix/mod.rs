@@ -13,7 +13,7 @@
 
 mod frame;
 
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -87,9 +87,9 @@ impl UnixTun {
 fn set_nonblocking(fd: &OwnedFd) -> std::io::Result<()> {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
-    let flags = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFL)?;
+    let flags = fcntl(fd, FcntlArg::F_GETFL)?;
     let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-    fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(flags))?;
+    fcntl(fd, FcntlArg::F_SETFL(flags))?;
     Ok(())
 }
 

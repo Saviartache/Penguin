@@ -46,13 +46,6 @@ impl PortSet {
         }
     }
 
-    /// Добавляет отдельные порты.
-    pub fn add_ports<I: IntoIterator<Item = u16>>(&mut self, ports: I) {
-        self.singles.extend(ports);
-        self.singles.sort_unstable();
-        self.singles.dedup();
-    }
-
     /// Добавляет диапазоны.
     pub fn add_ranges<I: IntoIterator<Item = (u16, u16)>>(&mut self, ranges: I) {
         self.ranges.extend(

@@ -235,7 +235,8 @@ pub fn registered_verbatim() -> bool {
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let (Ok(Some(registered)), Ok(current)) = (registered_executable(), std::env::current_exe())
+        let (Ok(Some(registered)), Ok(current)) =
+            (registered_executable(), std::env::current_exe())
         else {
             return false;
         };

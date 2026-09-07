@@ -28,7 +28,6 @@ serde.workspace = true
 # разбирает их только этот крейт.
 serde_json.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

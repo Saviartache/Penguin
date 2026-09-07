@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use penguin_proto::error::ProtocolError;
-use penguin_proto::factory::{BuildContext, ProtocolFactory};
+use penguin_proto::factory::{BuildContext, ProtocolFactory, parse_params};
 use penguin_proto::outbound::Outbound;
 
 use crate::config::HttpProxyConfig;
@@ -36,8 +36,7 @@ impl HttpProxyFactory {
 
     /// Разбирает параметры из конфигурации.
     fn parse(&self, params: &serde_json::Value) -> Result<HttpProxyConfig, ProtocolError> {
-        serde_json::from_value(params.clone())
-            .map_err(|e| ProtocolError::InvalidConfig(format!("{}: {e}", self.protocol())))
+        parse_params(self.protocol(), params)
     }
 }
 
