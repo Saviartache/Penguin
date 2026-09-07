@@ -19,6 +19,10 @@ pub mod windows;
 
 #[cfg(any(target_os = "macos", test))]
 mod launchd;
+// Копия программы, которую запускает диспетчер: одна и та же забота у launchd
+// и systemd, и решается она одинаково.
+#[cfg(unix)]
+mod stage;
 #[cfg(any(target_os = "linux", test))]
 mod systemd;
 
@@ -188,7 +192,11 @@ pub fn matches_current_executable() -> bool {
     {
         macos::runs_current_build()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::runs_current_build()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let (Ok(registered), Ok(current)) = (registered_executable(), std::env::current_exe())
         else {
@@ -221,7 +229,11 @@ pub fn registered_verbatim() -> bool {
     {
         macos::runs_current_build()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::runs_current_build()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let (Ok(Some(registered)), Ok(current)) = (registered_executable(), std::env::current_exe())
         else {
@@ -257,7 +269,11 @@ pub fn registered_executable() -> PlatformResult<Option<std::path::PathBuf>> {
 ///
 /// Сравнение строк не годится: один и тот же файл записывают и через прямые
 /// слэши, и через обратные, и с другим регистром буквы диска.
-#[cfg(not(target_os = "macos"))]
+///
+/// Только там, где диспетчер запускает сам файл. На macOS и Linux он запускает
+/// копию ([`stage`]), и путь в описании у всех сборок один и тот же — там
+/// вопрос «та ли это сборка» решается сравнением самой сборки.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn same_file(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
@@ -271,7 +287,7 @@ fn same_file(left: &Path, right: &Path) -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn a_missing_file_never_matches() {
         // Служба, указывающая на удалённую сборку, — обычное дело после
@@ -282,7 +298,7 @@ mod tests {
         ));
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn the_same_file_written_differently_still_matches() {
         // Один и тот же файл записывают по-разному; сравнение строк на этом

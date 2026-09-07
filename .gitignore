@@ -1,5 +1,8 @@
 # Сборка
 /target
+# Сборка под Linux в контейнере: своя папка, чтобы не спорить с хозяйской за
+# один и тот же `target` (`scripts/interop`, проверка службы в Docker).
+/target-linux
 # Собранная поставка: пересобирается `./scripts/package.sh`.
 /dist
 **/*.rs.bk

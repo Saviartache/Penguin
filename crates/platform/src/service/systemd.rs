@@ -1,43 +1,33 @@
 //! Serialization of Penguin-owned systemd units, without OS calls.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::ServiceStatus;
 use crate::error::{PlatformError, PlatformResult};
 
-pub(super) fn unit(executable: &Path) -> PlatformResult<String> {
-    let path = executable
-        .to_str()
-        .filter(|path| path.starts_with('/') && !path.chars().any(char::is_control))
-        .ok_or_else(|| {
-            PlatformError::Service(
-                "executable must be an absolute UTF-8 path without control characters".into(),
-            )
-        })?;
+/// Где лежит копия, которую запускает systemd.
+///
+/// Постоянное место, принадлежащее `root`, а не тот путь, где оказался
+/// запущенный файл. Юнит, указывающий в каталог сборки или на съёмный
+/// носитель, systemd примет — и откажет при следующей загрузке, когда там
+/// уже ничего нет. `/usr/local/lib` — место для того, что поставили не
+/// пакетным менеджером и что человек не зовёт руками (FHS 3.0, §4.5).
+pub(super) const HELPER_DIR: &str = "/usr/local/lib/penguin";
+pub(super) const HELPER_PATH: &str = "/usr/local/lib/penguin/penguin";
 
-    // systemd rejects quotes/backslashes in the executable itself, even escaped.
-    // A fixed shell script execs the path as data, never as shell source. env
-    // cannot do this for paths containing '=': it treats them as assignments.
-    // ':' disables systemd's $ expansion; %% still escapes unit specifiers.
-    let path = path
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('%', "%%");
-    Ok(format!(
-        "[Unit]\n\
-         Description=Penguin VPN\n\
-         After=network.target\n\
-         \n\
-         [Service]\n\
-         Type=simple\n\
-         ExecStart=:/bin/sh -c 'exec \"$0\" \"$@\"' \"{path}\" --service\n\
-         Restart=on-failure\n\
-         RestartSec=5\n\
-         \n\
-         [Install]\n\
-         WantedBy=multi-user.target\n"
-    ))
-}
+/// Описание службы. Путь в нём постоянный, поэтому экранировать нечего.
+pub(super) const UNIT_TEXT: &str = "[Unit]\n\
+     Description=Penguin VPN\n\
+     After=network.target\n\
+     \n\
+     [Service]\n\
+     Type=simple\n\
+     ExecStart=/usr/local/lib/penguin/penguin --service\n\
+     Restart=on-failure\n\
+     RestartSec=5\n\
+     \n\
+     [Install]\n\
+     WantedBy=multi-user.target\n";
 
 pub(super) fn executable_from(unit: &str) -> Option<PathBuf> {
     let mut commands = unit
@@ -125,39 +115,21 @@ pub(super) fn state_from(report: &str) -> PlatformResult<ServiceStatus> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
-    fn unit_keeps_the_path_out_of_shell_source() {
-        let text = unit(Path::new("/opt/my \"app\"/it's\\$HOME%/penguin")).expect("unit");
-        assert!(text.contains(
-            r#"ExecStart=:/bin/sh -c 'exec "$0" "$@"' "/opt/my \"app\"/it's\\$HOME%%/penguin" --service"#
-        ));
-        assert!(text.contains("Restart=on-failure\nRestartSec=5"));
-        assert!(text.contains("WantedBy=multi-user.target"));
-    }
-
-    #[test]
-    fn executable_round_trips() {
-        for path in [
-            "/usr/bin/penguin",
-            "/opt/My Apps/penguin",
-            "/opt/\"quotes\"/penguin",
-            "/opt/it's/penguin",
-            "/opt/back\\slash/penguin",
-            "/opt/$HOME${USER}$$/penguin",
-            "/opt/%n%%/penguin",
-            "/opt/\u{41f}\u{438}\u{43d}\u{433}\u{432}\u{438}\u{43d}/penguin",
-            "/opt/--service/penguin",
-            "/opt/[glob]*?/penguin",
-            "/opt/name=value/penguin",
-            "/opt/$(touch marker);`id`/penguin",
-            "/opt/penguin ",
-        ] {
-            let text = unit(Path::new(path)).expect("unit");
-            let parsed = executable_from(&text).expect("executable");
-            assert_eq!(parsed.to_str(), Some(path), "{text}");
-        }
+    fn the_unit_runs_the_staged_copy_and_keeps_its_restart_policy() {
+        assert_eq!(
+            executable_from(UNIT_TEXT).as_deref(),
+            Some(Path::new(HELPER_PATH))
+        );
+        assert!(HELPER_PATH.starts_with(HELPER_DIR));
+        // `Restart=always` подняло бы службу обратно после того, как окно
+        // погасило её по просьбе человека: она выходит с нулевым кодом.
+        assert!(UNIT_TEXT.contains("Restart=on-failure\nRestartSec=5"));
+        assert!(UNIT_TEXT.contains("WantedBy=multi-user.target"));
     }
 
     #[test]
@@ -192,19 +164,6 @@ mod tests {
                 executable_from(&format!("ExecStart={command}")).is_none(),
                 "{command}"
             );
-        }
-    }
-
-    #[test]
-    fn invalid_paths_are_rejected_before_writing() {
-        for path in [
-            "",
-            "relative/penguin",
-            "/opt/line\nbreak",
-            "/opt/tab\tname",
-            "/opt/nul\0name",
-        ] {
-            assert!(unit(Path::new(path)).is_err());
         }
     }
 
