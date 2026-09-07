@@ -51,6 +51,7 @@ jobs:
           KEY: ${{ secrets.PENGUIN_UIKIT_DEPLOY_KEY }}
         run: |
           mkdir -p "$HOME/.ssh"
+          [ -n "$KEY" ] || { echo "секрета PENGUIN_UIKIT_DEPLOY_KEY нет в репозитории"; exit 1; }
           # Секрет принимается и текстом ключа, и его base64: по дороге в него
           # теряются переводы строк, а без завершающего ssh ключ не читает.
           raw=$(printf '%s' "$KEY" | tr -d '\r')
