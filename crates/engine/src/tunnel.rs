@@ -181,7 +181,21 @@ impl TunnelSession {
         // адаптер, и клиент разговаривает сам с собой: не работает ни тоннель,
         // ни даже проверка задержки.
         match &outside {
-            Some(outside) => self.routes.pin_outside(&servers, outside)?,
+            Some(outside) => {
+                // Чужой тоннель, забравший маршрут по умолчанию, — единственная
+                // причина отказа, которую нашей стороной не исправить вовсе:
+                // соединение с сервером уйдёт внутрь него, и молчание оттуда
+                // выглядит как недоступный сервер.
+                if let Some(foreign) = penguin_platform::interface::foreign_tunnel(outside) {
+                    tracing::warn!(
+                        interface = %foreign,
+                        "путь наружу ведёт в чужой тоннель: соединение с сервером пойдёт \
+                         через него, и если он режет QUIC (UDP 443), рукопожатие не \
+                         завершится — выключите другой VPN-клиент"
+                    );
+                }
+                self.routes.pin_outside(&servers, outside)?;
+            }
             None => tracing::warn!("путь наружу неизвестен — трафик до сервера уйдёт в тоннель"),
         }
 
@@ -314,58 +328,56 @@ async fn server_addresses(config: &RootConfig, outbound: &OutboundId) -> Vec<IpA
         return Vec::new();
     };
 
-    tokio::net::lookup_host(with_port(server.trim()))
+    // Загрузочным разрешателем, а не системным. Системный на имя сервера
+    // отвечает подставным адресом — своим, оставшимся от прошлого запуска, или
+    // чужого клиента с тем же диапазоном. Вывести наружу подставной адрес
+    // значит завернуть собственное соединение в тоннель, которого ещё нет:
+    // снаружи это «рукопожатие не завершилось: timed out»
+    // (см. [`penguin_dns::bootstrap`]).
+    penguin_dns::bootstrap::resolver_for(&config.dns)
+        .resolve(host_of(server))
         .await
-        .map(|found| found.map(|address| address.ip()).collect())
         .unwrap_or_default()
 }
 
-/// Дописывает порт, если его нет.
+/// Имя сервера без порта.
 ///
-/// Разрешение имён требует порт, а в настройках сервер может стоять и без
-/// него. Свободная функция с тестом: адрес IPv6 сам полон двоеточий, и
-/// проверка «есть двоеточие — значит есть порт» на нём ломается.
-fn with_port(server: &str) -> String {
-    // Уже с портом — в том числе `[::1]:443`.
-    if server.parse::<std::net::SocketAddr>().is_ok() {
-        return server.to_owned();
+/// Разрешателю нужно имя, а в настройках сервер стоит и с портом, и без.
+/// Свободная функция с тестом: адрес IPv6 сам полон двоеточий, и проверка
+/// «после двоеточия — порт» на нём ломается.
+fn host_of(server: &str) -> &str {
+    let server = server.trim();
+    // Скобки и есть граница адреса — и в `[::1]:443`, и в `[::1]`.
+    if let Some(rest) = server.strip_prefix('[') {
+        return rest.split_once(']').map_or(rest, |(host, _)| host);
     }
-    // Голый адрес IPv6: двоеточий много, а порта нет.
+    // Голый адрес IPv6: двоеточий много, и последнее — часть адреса.
     if server.parse::<IpAddr>().is_ok() {
-        return format!("{server}:{DEFAULT_PORT}");
+        return server;
     }
-    if server.contains(':') {
-        return server.to_owned();
-    }
-    format!("{server}:{DEFAULT_PORT}")
+    server.rsplit_once(':').map_or(server, |(host, _)| host)
 }
-
-/// Порт, если в настройках его не указали.
-const DEFAULT_PORT: u16 = 443;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_server_without_a_port_gets_one() {
-        assert_eq!(with_port("example.net"), "example.net:443");
-        assert_eq!(with_port("203.0.113.5"), "203.0.113.5:443");
-    }
-
-    #[test]
-    fn a_server_with_a_port_is_left_alone() {
-        assert_eq!(with_port("example.net:3478"), "example.net:3478");
-        assert_eq!(with_port("203.0.113.5:3478"), "203.0.113.5:3478");
+    fn a_port_is_dropped_and_a_bare_host_left_alone() {
+        assert_eq!(host_of("example.net"), "example.net");
+        assert_eq!(host_of(" example.net:3478 "), "example.net");
+        assert_eq!(host_of("203.0.113.5"), "203.0.113.5");
+        assert_eq!(host_of("203.0.113.5:3478"), "203.0.113.5");
     }
 
     #[test]
     fn an_ipv6_address_is_not_mistaken_for_a_port() {
-        // Двоеточий в нём много, а порта нет: проверка «есть двоеточие —
-        // значит есть порт» дала бы неразрешимый адрес, и kill switch
-        // перекрыл бы сам тоннель.
-        assert_eq!(with_port("2001:db8::1"), "2001:db8::1:443");
-        assert_eq!(with_port("[2001:db8::1]:3478"), "[2001:db8::1]:3478");
+        // Двоеточий в нём много, а порта нет: проверка «после двоеточия —
+        // порт» отрезала бы кусок адреса, и kill switch перекрыл бы сам
+        // тоннель.
+        assert_eq!(host_of("2001:db8::1"), "2001:db8::1");
+        assert_eq!(host_of("[2001:db8::1]"), "2001:db8::1");
+        assert_eq!(host_of("[2001:db8::1]:3478"), "2001:db8::1");
     }
 
     #[tokio::test]

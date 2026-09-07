@@ -40,6 +40,66 @@ pub fn default_route() -> PlatformResult<DefaultRoute> {
     route_to(probe)
 }
 
+/// Имя интерфейса, если путь наружу ведёт через **чужой** тоннель.
+///
+/// `None` — путь ведёт обычным интерфейсом, и это норма.
+///
+/// Спрашивается до того, как поднят свой адаптер, поэтому «тоннель» здесь и
+/// значит «чужой»: другой VPN-клиент уже забрал себе маршрут по умолчанию.
+/// Наше соединение с сервером уйдёт внутрь него, и что с ним станет — решает
+/// он. Клиенты этого рода по умолчанию режут QUIC, то есть UDP на 443, а
+/// именно им ходят Hysteria 2, TUIC и MASQUE. Снаружи это неотличимо от
+/// недоступного сервера: рукопожатие не завершается, и переживает это любую
+/// перенастройку нашей стороны.
+///
+/// На Windows не проверяется: имя адаптеру там даёт производитель, и
+/// опознать по нему тоннель нельзя.
+#[cfg(unix)]
+pub fn foreign_tunnel(route: &DefaultRoute) -> Option<String> {
+    let name = interface_name(route.interface_index)?;
+    is_tunnel(&name).then_some(name)
+}
+
+#[cfg(not(unix))]
+pub fn foreign_tunnel(_route: &DefaultRoute) -> Option<String> {
+    None
+}
+
+/// Имя интерфейса по его номеру.
+#[cfg(unix)]
+#[allow(unsafe_code, reason = "имя интерфейса по номеру даёт только libc")]
+fn interface_name(index: u32) -> Option<String> {
+    let mut buffer = [0 as libc::c_char; libc::IF_NAMESIZE];
+    if unsafe { libc::if_indextoname(index, buffer.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    let length = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "имя интерфейса система составляет из ASCII"
+    )]
+    let bytes: Vec<u8> = buffer[..length].iter().map(|byte| *byte as u8).collect();
+    String::from_utf8(bytes).ok()
+}
+
+/// Тоннельный ли это интерфейс — по имени, которое даёт ему система.
+///
+/// Свободная функция с тестом: ошибка здесь означает либо предупреждение при
+/// каждом обычном подключении, либо молчание там, ради чего всё затевалось.
+#[cfg(unix)]
+fn is_tunnel(name: &str) -> bool {
+    // `utun` — macOS, `tun`/`wg` — Linux, `ppp` и `ipsec` — оба. Физические
+    // интерфейсы называются иначе: `en`, `eth`, `wl`, `bridge`.
+    const PREFIXES: [&str; 5] = ["utun", "tun", "wg", "ppp", "ipsec"];
+    PREFIXES.iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
 /// Находит интерфейс, через который машина дойдёт до указанного адреса.
 #[cfg(windows)]
 #[allow(unsafe_code, reason = "запрос таблицы маршрутизации через IP Helper")]
@@ -131,6 +191,27 @@ pub(crate) fn source_address_towards(destination: IpAddr) -> Option<IpAddr> {
     // зависит.
     socket.connect((destination, 53)).ok()?;
     Some(socket.local_addr().ok()?.ip())
+}
+
+#[cfg(all(test, unix))]
+mod tunnel_names {
+    use super::is_tunnel;
+
+    #[test]
+    fn tunnel_interfaces_are_recognised() {
+        for name in ["utun0", "utun8", "tun0", "wg0", "ppp0", "ipsec0"] {
+            assert!(is_tunnel(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn physical_interfaces_are_left_alone() {
+        // Ложное срабатывание здесь — предупреждение о чужом VPN при каждом
+        // обычном подключении, и читать его перестанут в тот же день.
+        for name in ["en0", "eth0", "wlan0", "bridge100", "lo0", "awdl0", "utun"] {
+            assert!(!is_tunnel(name), "{name}");
+        }
+    }
 }
 
 #[cfg(test)]
