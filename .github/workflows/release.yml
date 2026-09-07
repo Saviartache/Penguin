@@ -28,6 +28,9 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -37,34 +40,31 @@ jobs:
           - { name: macos-arm64, runner: macos-latest, system: macos }
           - { name: macos-x64, runner: macos-15-intel, system: macos }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Кит подключён submodule'ом по SSH (`.gitmodules`), а своего ключа у
-      # прогона нет: он приходит секретом `PENGUIN_UIKIT_DEPLOY_KEY` — приватная
-      # половина deploy key, заведённого в самом ките на чтение.
+      # прогона нет: он приходит секретом `PENGUIN_UIKIT_DEPLOY_KEY` —
+      # приватной половиной deploy key, заведённого в ките на чтение.
       #
       # Ключ ставится только submodule'у, а не всему прогону: сам Penguin уже
       # взят выше своим токеном, и deploy key кита к нему не подходит.
       - name: submodule
-        shell: bash
         env:
           KEY: ${{ secrets.PENGUIN_UIKIT_DEPLOY_KEY }}
         run: |
-          mkdir -p "$HOME/.ssh"
           [ -n "$KEY" ] || { echo "секрета PENGUIN_UIKIT_DEPLOY_KEY нет в репозитории"; exit 1; }
           # Секрет принимается и текстом ключа, и его base64: по дороге в него
           # теряются переводы строк, а без завершающего ssh ключ не читает.
-          raw=$(printf '%s' "$KEY" | tr -d '\r')
-          case "$raw" in
+          key=$(printf '%s' "$KEY" | tr -d '\r')
+          case "$key" in
             *BEGIN*) ;;
-            *) raw=$(printf '%s' "$raw" | openssl base64 -d -A) ;;
+            *) key=$(printf '%s' "$key" | openssl base64 -d -A) ;;
           esac
-          printf '%s\n' "$raw" > "$HOME/.ssh/uikit"
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$key" > "$HOME/.ssh/uikit"
           chmod 600 "$HOME/.ssh/uikit"
-          ssh-keygen -y -f "$HOME/.ssh/uikit" > "$HOME/.ssh/uikit.pub" \
+          ssh-keygen -y -f "$HOME/.ssh/uikit" > /dev/null \
             || { echo "секрет PENGUIN_UIKIT_DEPLOY_KEY не разбирается как приватный ключ"; exit 1; }
-          # Отпечаток открытой половины — сверять со списком deploy key кита.
-          ssh-keygen -lf "$HOME/.ssh/uikit.pub"
           ssh-keyscan github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
           # `IdentitiesOnly` — иначе ssh сначала предложит ключи агента машины,
           # и GitHub ответит отказом раньше, чем дойдёт до нашего.
@@ -73,7 +73,6 @@ jobs:
 
       # Версия, компоненты и цели — из `rust-toolchain.toml`.
       - name: toolchain
-        shell: bash
         run: rustup toolchain install
 
       # Заголовки X11, Wayland и EGL: `x11-dl`, `wayland-sys` и `khronos-egl`
@@ -91,28 +90,21 @@ jobs:
       # распаковщика нет.
       - name: unzip
         if: matrix.system == 'windows'
-        shell: bash
         run: command -v unzip > /dev/null || choco install unzip -y --no-progress
 
       - name: package
-        shell: bash
         run: ./scripts/package.sh ${{ matrix.system }}
 
-      - name: версия
-        id: version
-        shell: bash
-        run: |
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            value="${GITHUB_REF_NAME#v}"
-          else
-            value="$(git rev-parse --short HEAD)"
-          fi
-          echo "value=$value" >> "$GITHUB_OUTPUT"
-
       - name: архив
-        shell: bash
         run: |
-          name="penguin-${{ steps.version.outputs.value }}-${{ matrix.name }}"
+          # Ручной прогон помечается хешем: тега у него нет, а имена архивов
+          # разных прогонов путать нельзя.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(git rev-parse --short HEAD)"
+          fi
+          name="penguin-$version-${{ matrix.name }}"
           cd "dist/penguin-${{ matrix.system }}"
           case "${{ matrix.system }}" in
             # В Git Bash нет ни `zip`, ни `tar` с zip; 7-Zip на машине есть.
@@ -123,7 +115,7 @@ jobs:
             linux) tar -czf "../$name.tar.gz" . ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: |
@@ -138,7 +130,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: archives
           merge-multiple: true
