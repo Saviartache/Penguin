@@ -103,12 +103,12 @@ const DASH: char = '─';
 /// зазором, перестаёт читаться как столбик и становится точкой.
 const BAR_GAP: f32 = 1.0;
 
-/// Насколько столбик прозрачнее у основания, чем на вершине.
+/// Насколько столбик прозрачнее на вершине, чем у основания.
 ///
-/// Значение читается по вершине — там цвет держится в полную силу. Основание
-/// уводится в прозрачность: сплошные плашки в тёмной консоли выглядят
-/// частоколом и спорят с текстом вокруг.
-const BAR_ROOT: f32 = 0.3;
+/// Полная сила цвета — внизу, у оси: там столбики стоят сплошной полосой, и
+/// график виден как одно целое. Кверху они тают: сплошные плашки в тёмной
+/// консоли выглядят частоколом и спорят с текстом вокруг.
+const BAR_TIP: f32 = 0.3;
 
 /// Толщина оси — черты под столбиками.
 ///
@@ -392,7 +392,7 @@ fn bar<'a, Message: 'a>(color: Color, share: f32) -> Element<'a, Message> {
     column.push(body).into()
 }
 
-/// Заливка столбика: цвет в полную силу на вершине, [`BAR_ROOT`] от него у
+/// Заливка столбика: [`BAR_TIP`] от цвета на вершине, полная сила — у
 /// основания.
 ///
 /// Градиент считается по границам самого столбика, а не графика: у `iced`
@@ -402,8 +402,8 @@ fn bar<'a, Message: 'a>(color: Color, share: f32) -> Element<'a, Message> {
 fn bar_fill(color: Color) -> Background {
     Background::Gradient(
         Linear::new(Radians(std::f32::consts::PI))
-            .add_stop(0.0, color)
-            .add_stop(1.0, with_alpha(color, color.a * BAR_ROOT))
+            .add_stop(0.0, with_alpha(color, color.a * BAR_TIP))
+            .add_stop(1.0, color)
             .into(),
     )
 }
@@ -491,9 +491,9 @@ mod tests {
     }
 
     #[test]
-    fn a_bar_fades_from_its_tip_down() {
-        // Перепутанный угол развернул бы градиент, и полная сила цвета
-        // оказалась бы у основания — там, где значения нет.
+    fn a_bar_fades_from_its_base_up() {
+        // Перепутанный угол развернул бы градиент, и график лишился бы
+        // плотного низа — линии, по которой стоят все столбики.
         let Background::Gradient(iced::Gradient::Linear(fill)) = bar_fill(palette().primary) else {
             panic!("столбик залит не градиентом");
         };
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(stops.len(), 2);
         assert_eq!(stops[0].offset, 0.0);
         assert_eq!(stops[1].offset, 1.0);
-        assert!(stops[1].color.a < stops[0].color.a);
+        assert!(stops[0].color.a < stops[1].color.a);
     }
 
     #[test]
