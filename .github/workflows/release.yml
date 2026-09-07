@@ -41,7 +41,8 @@ jobs:
 
       # Кит подключён submodule'ом по SSH (`.gitmodules`), а своего ключа у
       # прогона нет: он приходит секретом `UIKIT_DEPLOY_KEY` — приватная
-      # половина deploy key, заведённого в самом ките на чтение.
+      # половина deploy key, заведённого в самом ките на чтение, в base64:
+      # перенос строк по дороге в секрет теряется, а ключ без них нечитаем.
       #
       # Ключ ставится только submodule'у, а не всему прогону: сам Penguin уже
       # взят выше своим токеном, и deploy key кита к нему не подходит.
@@ -51,8 +52,10 @@ jobs:
           KEY: ${{ secrets.UIKIT_DEPLOY_KEY }}
         run: |
           mkdir -p "$HOME/.ssh"
-          printf '%s\n' "$KEY" > "$HOME/.ssh/uikit"
+          printf '%s' "$KEY" | openssl base64 -d -A > "$HOME/.ssh/uikit"
           chmod 600 "$HOME/.ssh/uikit"
+          ssh-keygen -y -f "$HOME/.ssh/uikit" > /dev/null \
+            || { echo "секрет UIKIT_DEPLOY_KEY не разбирается как приватный ключ"; exit 1; }
           ssh-keyscan github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
           # `IdentitiesOnly` — иначе ssh сначала предложит ключи агента машины,
           # и GitHub ответит отказом раньше, чем дойдёт до нашего.
