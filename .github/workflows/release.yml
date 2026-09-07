@@ -41,8 +41,7 @@ jobs:
 
       # Кит подключён submodule'ом по SSH (`.gitmodules`), а своего ключа у
       # прогона нет: он приходит секретом `PENGUIN_UIKIT_DEPLOY_KEY` — приватная
-      # половина deploy key, заведённого в самом ките на чтение, в base64:
-      # перенос строк по дороге в секрет теряется, а ключ без них нечитаем.
+      # половина deploy key, заведённого в самом ките на чтение.
       #
       # Ключ ставится только submodule'у, а не всему прогону: сам Penguin уже
       # взят выше своим токеном, и deploy key кита к нему не подходит.
@@ -52,10 +51,19 @@ jobs:
           KEY: ${{ secrets.PENGUIN_UIKIT_DEPLOY_KEY }}
         run: |
           mkdir -p "$HOME/.ssh"
-          printf '%s' "$KEY" | openssl base64 -d -A > "$HOME/.ssh/uikit"
+          # Секрет принимается и текстом ключа, и его base64: по дороге в него
+          # теряются переводы строк, а без завершающего ssh ключ не читает.
+          raw=$(printf '%s' "$KEY" | tr -d '\r')
+          case "$raw" in
+            *BEGIN*) ;;
+            *) raw=$(printf '%s' "$raw" | openssl base64 -d -A) ;;
+          esac
+          printf '%s\n' "$raw" > "$HOME/.ssh/uikit"
           chmod 600 "$HOME/.ssh/uikit"
-          ssh-keygen -y -f "$HOME/.ssh/uikit" > /dev/null \
+          ssh-keygen -y -f "$HOME/.ssh/uikit" > "$HOME/.ssh/uikit.pub" \
             || { echo "секрет PENGUIN_UIKIT_DEPLOY_KEY не разбирается как приватный ключ"; exit 1; }
+          # Отпечаток открытой половины — сверять со списком deploy key кита.
+          ssh-keygen -lf "$HOME/.ssh/uikit.pub"
           ssh-keyscan github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
           # `IdentitiesOnly` — иначе ssh сначала предложит ключи агента машины,
           # и GitHub ответит отказом раньше, чем дойдёт до нашего.
