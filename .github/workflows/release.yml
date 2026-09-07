@@ -1,0 +1,146 @@
+# Поставки для всех систем и выпуск на GitHub.
+#
+#   тег `v*`        собирает четыре поставки и создаёт релиз с ними
+#   ручной запуск   только собирает; архивы лежат в артефактах прогона
+#
+# Каждая цель собирается на своей машине, а не кросс-сборкой из
+# `scripts/package.sh`: кросс-сборка нужна на одной машине разработчика, здесь
+# же машина есть для каждой цели — и только так вообще собирается macOS, SDK
+# Apple есть лишь там.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, runner: windows-latest, system: windows }
+          - { name: linux-x64, runner: ubuntu-latest, system: linux }
+          - { name: macos-arm64, runner: macos-latest, system: macos }
+          - { name: macos-x64, runner: macos-15-intel, system: macos }
+    steps:
+      - uses: actions/checkout@v4
+
+      # Кит подключён submodule'ом по SSH (`.gitmodules`), а своего ключа у
+      # прогона нет: он приходит секретом `UIKIT_DEPLOY_KEY` — приватная
+      # половина deploy key, заведённого в самом ките на чтение.
+      #
+      # Ключ ставится только submodule'у, а не всему прогону: сам Penguin уже
+      # взят выше своим токеном, и deploy key кита к нему не подходит.
+      - name: submodule
+        shell: bash
+        env:
+          KEY: ${{ secrets.UIKIT_DEPLOY_KEY }}
+        run: |
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/uikit"
+          chmod 600 "$HOME/.ssh/uikit"
+          ssh-keyscan github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          # `IdentitiesOnly` — иначе ssh сначала предложит ключи агента машины,
+          # и GitHub ответит отказом раньше, чем дойдёт до нашего.
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/uikit -o IdentitiesOnly=yes"
+          git submodule update --init --recursive
+
+      # Версия, компоненты и цели — из `rust-toolchain.toml`.
+      - name: toolchain
+        shell: bash
+        run: rustup toolchain install
+
+      # Заголовки X11, Wayland и EGL: `x11-dl`, `wayland-sys` и `khronos-egl`
+      # ищут их через pkg-config при сборке, даже когда грузят библиотеки уже
+      # на запуске. Без них не собирается оконный бэкенд `iced`.
+      - name: зависимости системы
+        if: matrix.system == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev
+
+      # `scripts/fetch-wintun.sh` распаковывает архив драйвера, а в Git Bash
+      # распаковщика нет.
+      - name: unzip
+        if: matrix.system == 'windows'
+        shell: bash
+        run: command -v unzip > /dev/null || choco install unzip -y --no-progress
+
+      - name: package
+        shell: bash
+        run: ./scripts/package.sh ${{ matrix.system }}
+
+      - name: версия
+        id: version
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            value="${GITHUB_REF_NAME#v}"
+          else
+            value="$(git rev-parse --short HEAD)"
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: архив
+        shell: bash
+        run: |
+          name="penguin-${{ steps.version.outputs.value }}-${{ matrix.name }}"
+          cd "dist/penguin-${{ matrix.system }}"
+          case "${{ matrix.system }}" in
+            # В Git Bash нет ни `zip`, ни `tar` с zip; 7-Zip на машине есть.
+            windows) 7z a -tzip "../$name.zip" ./* > /dev/null ;;
+            # `-y`: ссылка `penguin` внутрь связки должна остаться ссылкой, а
+            # не копией исполняемого файла.
+            macos) zip -qry "../$name.zip" . ;;
+            linux) tar -czf "../$name.tar.gz" . ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: archives
+          merge-multiple: true
+
+      - name: выпуск
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Предвыпуск — по суффиксу в теге: `v0.2.0-rc1` не должен встать
+          # рядом с готовым выпуском как равный.
+          flags=""
+          case "$GITHUB_REF_NAME" in
+            *-*) flags="--prerelease" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" archives/* \
+            --title "$GITHUB_REF_NAME" --generate-notes $flags
