@@ -43,23 +43,23 @@ fn dispatch(command: &ServiceCommand, access_changed: bool) -> Result<()> {
 }
 
 fn ensure(access_changed: bool) -> Result<()> {
-    let mut status = service::status().context("could not query service state")?;
-    if status != ServiceStatus::NotInstalled && !service::registered_verbatim() {
-        penguin_daemon::uninstall()?;
-        status = ServiceStatus::NotInstalled;
-    }
-    if status == ServiceStatus::NotInstalled {
+    let status = service::status().context("could not query service state")?;
+    // Registration is repaired by writing it again, never by removing it
+    // first: a reinstall that fails halfway would otherwise leave the machine
+    // without a service at all, and it is the service that lowers the tunnel.
+    let registered = status != ServiceStatus::NotInstalled && service::registered_verbatim();
+    if !registered {
         penguin_daemon::install()?;
-        // Registration does not launch the daemon on any platform.
-        status = ServiceStatus::Stopped;
     }
     if status == ServiceStatus::Running {
-        // A running process can still be initializing. Give it time before
-        // attempting repair; a changed controller needs new socket ownership.
-        if access_changed || penguin_daemon::wait_until_ready().is_err() {
+        // A replaced registration still runs the previous image. Otherwise a
+        // running process can simply be initializing: give it time before
+        // repairing, and a changed controller needs new socket ownership.
+        if !registered || access_changed || penguin_daemon::wait_until_ready().is_err() {
             return restart();
         }
     } else {
+        // Registration does not launch the daemon on any platform.
         service::start().context("could not start service")?;
         penguin_daemon::wait_until_ready()?;
     }

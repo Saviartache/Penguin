@@ -25,7 +25,15 @@ use crate::service::{SERVICE_DISPLAY_NAME, SERVICE_NAME, ServiceStatus};
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Ставит службу.
+///
+/// Повторный вызов переставляет её на текущий файл: SCM не даёт переписать
+/// описание существующей службы, и снять её приходится здесь. Именно здесь, а
+/// не у того, кто ставит: он не знает, какой системе что нужно, и на macOS
+/// и Linux снимать нечего — там описание перезаписывается на месте.
 pub fn install(executable: &Path) -> PlatformResult<()> {
+    if status()? != ServiceStatus::NotInstalled {
+        uninstall()?;
+    }
     let manager = open_manager(ServiceManagerAccess::CREATE_SERVICE)?;
 
     let info = ServiceInfo {

@@ -10,13 +10,25 @@ use crate::error::{PlatformError, PlatformResult};
 /// Программа, исполняющая сценарии системы.
 const OSASCRIPT: &str = "/usr/bin/osascript";
 
+/// Что человек читает в окне запроса прав.
+///
+/// Права здесь просят ровно на одно — завести и запустить службу тоннеля, — и
+/// сказать об этом надо в самом окне: согласие, данное вслепую, ничем не
+/// отличается от отсутствия согласия.
+const PROMPT: &str = "Penguin ставит и запускает службу тоннеля";
+
 /// Запускает себя же с правами администратора и ждёт завершения.
 pub(super) fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
     let executable = std::env::current_exe()
         .map_err(|err| PlatformError::Service(format!("не удалось узнать свой путь: {err}")))?;
 
     let command = shell_command(&executable.display().to_string(), args);
-    let script = format!("do shell script \"{command}\" with administrator privileges");
+    // С `with prompt`: без него система показывает безымянное окно «программе
+    // нужны ваши права», и человек соглашается, не зная, кто спросил. Строка
+    // наша и в неё ничего не подставляется — экранировать нечего.
+    let script = format!(
+        "do shell script \"{command}\" with prompt \"{PROMPT}\" with administrator privileges"
+    );
 
     match crate::command::run(OSASCRIPT, &["-e", &script]) {
         Ok(_) => Ok(true),
@@ -81,6 +93,14 @@ mod tests {
             "execution error: osascript is not allowed (-1743)"
         ));
         assert!(!refused("sh: penguin: command not found"));
+    }
+
+    #[test]
+    fn the_prompt_cannot_break_the_script() {
+        // Кавычка или обратный слэш в нём оборвали бы строку сценария, и
+        // остаток команды стал бы его кодом — с правами суперпользователя.
+        assert!(!PROMPT.contains(['"', '\\']), "{PROMPT}");
+        assert!(!PROMPT.is_empty());
     }
 
     #[test]

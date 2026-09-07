@@ -1,6 +1,6 @@
 //! Serialization and state parsing for Penguin-owned launchd jobs; no OS calls.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::ServiceStatus;
 use crate::error::{PlatformError, PlatformResult};
@@ -8,41 +8,32 @@ use crate::error::{PlatformError, PlatformResult};
 pub(super) const TARGET: &str = "system/com.penguin.vpn";
 pub(super) const PLIST_PATH: &str = "/Library/LaunchDaemons/com.penguin.vpn.plist";
 
-pub(super) fn plist(executable: &Path) -> PlatformResult<String> {
-    let path = executable
-        .to_str()
-        .filter(|path| {
-            path.starts_with('/')
-                && !path
-                    .chars()
-                    .any(|ch| ch.is_control() || matches!(ch, '\u{fffe}' | '\u{ffff}'))
-        })
-        .ok_or_else(|| {
-            PlatformError::Service(
-                "executable must be an absolute UTF-8 path valid in XML, without control characters"
-                    .into(),
-            )
-        })?;
-    let path = path
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-         <plist version=\"1.0\">\n\
-         <dict>\n\
-           <key>Label</key><string>com.penguin.vpn</string>\n\
-           <key>ProgramArguments</key>\n\
-           <array><string>{path}</string><string>--service</string></array>\n\
-           <key>RunAtLoad</key><true/>\n\
-           <key>KeepAlive</key>\n\
-           <dict><key>SuccessfulExit</key><false/></dict>\n\
-         </dict>\n\
-         </plist>\n"
-    ))
-}
+/// Where the copy launchd actually executes lives.
+///
+/// launchd refuses to bootstrap a system daemon whose program sits where the
+/// system does not vouch for its owner: a build tree, a user directory, an
+/// external volume that is not even mounted when the machine boots. Shipped
+/// clients answer this the same way — a root-owned copy under
+/// `PrivilegedHelperTools`, registered instead of the original.
+pub(super) const HELPER_DIR: &str = "/Library/PrivilegedHelperTools/Penguin";
+pub(super) const HELPER_PATH: &str = "/Library/PrivilegedHelperTools/Penguin/penguin";
+
+/// The job definition. Its program path is fixed, so nothing needs escaping.
+pub(super) const PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.penguin.vpn</string>
+  <key>ProgramArguments</key>
+  <array><string>/Library/PrivilegedHelperTools/Penguin/penguin</string><string>--service</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+  <key>ExitTimeOut</key><integer>10</integer>
+  <key>StandardErrorPath</key><string>/var/log/penguin-service.log</string>
+</dict>
+</plist>
+"#;
 
 pub(super) fn executable_from(plist: &str) -> Option<PathBuf> {
     let arguments = plist
@@ -96,34 +87,31 @@ pub(super) fn absent(code: Option<i32>) -> bool {
     matches!(code, Some(3 | 113))
 }
 
-pub(super) fn start_commands(loaded: bool) -> Vec<Vec<&'static str>> {
-    let mut commands = vec![vec!["enable", TARGET]];
-    if !loaded {
-        commands.push(vec!["bootstrap", "system", PLIST_PATH]);
-    }
-    commands.push(vec!["kickstart", TARGET]);
-    commands
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
-    fn plist_round_trips_and_keeps_restart_policy() {
-        for path in [
-            "/usr/local/bin/penguin",
-            "/Applications/Links & <copies>/penguin",
-            "/Applications/&amp;&lt;&gt;/penguin",
-            "/Applications/\"it's\"\\$%/penguin",
-            "/Applications/\u{41f}\u{438}\u{43d}\u{433}\u{432}\u{438}\u{43d}/penguin",
-            "/opt/penguin ",
-        ] {
-            let text = plist(Path::new(path)).expect("plist");
-            assert_eq!(executable_from(&text).expect("path").to_str(), Some(path));
-            assert!(text.contains("<key>RunAtLoad</key><true/>"));
-            assert!(text.contains("<key>SuccessfulExit</key><false/>"));
-        }
+    fn the_job_runs_the_staged_copy_and_keeps_its_restart_policy() {
+        assert_eq!(
+            executable_from(PLIST).as_deref(),
+            Some(Path::new(HELPER_PATH))
+        );
+        assert!(HELPER_PATH.starts_with(HELPER_DIR));
+        assert!(PLIST.contains("<key>RunAtLoad</key><true/>"));
+        assert!(PLIST.contains("<key>SuccessfulExit</key><false/>"));
+        // Без него launchd выбрасывает поток ошибок целиком, и демон, упавший
+        // до того, как открыл свой журнал, не оставляет ни строчки.
+        assert!(PLIST.contains("<key>StandardErrorPath</key>"));
+    }
+
+    #[test]
+    fn the_managed_target_names_the_job_label() {
+        // Разошедшись, они дают задание, которое ставится и не управляется.
+        let label = TARGET.strip_prefix("system/").expect("system domain");
+        assert!(PLIST.contains(&format!("<string>{label}</string>")));
     }
 
     #[test]
@@ -141,33 +129,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_paths_are_rejected_before_writing() {
-        for path in [
-            "",
-            "relative/penguin",
-            "/opt/line\nbreak",
-            "/opt/tab\tname",
-            "/opt/nul\0name",
-            "/opt/\u{fffe}/penguin",
-            "/opt/\u{ffff}/penguin",
-        ] {
-            assert!(plist(Path::new(path)).is_err(), "{path:?}");
-        }
-    }
-
-    #[test]
-    fn start_enables_before_loading_and_never_kills() {
+    fn an_escaped_legacy_path_is_read_back_whole() {
+        // Прежние описания писались с путём внутри, и путь этот экранировался.
+        let legacy = "<key>ProgramArguments</key><array><string>/opt/&amp;&lt;&gt;/penguin</string><string>--service</string></array>";
         assert_eq!(
-            start_commands(false),
-            vec![
-                vec!["enable", TARGET],
-                vec!["bootstrap", "system", PLIST_PATH],
-                vec!["kickstart", TARGET]
-            ]
-        );
-        assert_eq!(
-            start_commands(true),
-            vec![vec!["enable", TARGET], vec!["kickstart", TARGET]]
+            executable_from(legacy),
+            Some(PathBuf::from("/opt/&<>/penguin"))
         );
     }
 

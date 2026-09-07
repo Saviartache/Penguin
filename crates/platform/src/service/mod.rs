@@ -64,7 +64,12 @@ impl ServiceStatus {
     }
 }
 
-/// Ставит службу.
+/// Ставит службу или переставляет её на указанный файл.
+///
+/// Повторный вызов — это и есть починка неверной регистрации, и звать его
+/// можно, не сняв прежнюю. Снимать заранее нельзя: не сумев записать новую,
+/// мы оставили бы машину вовсе без службы — с поднятым тоннелем и без того,
+/// кто умеет его опустить.
 pub fn install(executable: &Path) -> PlatformResult<()> {
     #[cfg(windows)]
     {
@@ -174,15 +179,27 @@ pub fn status() -> PlatformResult<ServiceStatus> {
 ///
 /// `false` и когда службы нет, и когда состояние выяснить не удалось: в обоих
 /// случаях дальше идти той же дорогой — переустановить.
+///
+/// На macOS путей два — программа и её копия в системном каталоге, которую
+/// только и соглашается запускать launchd, — и сравниваются не они, а сборки
+/// ([`macos::runs_current_build`]).
 pub fn matches_current_executable() -> bool {
-    let (Ok(registered), Ok(current)) = (registered_executable(), std::env::current_exe()) else {
-        return false;
-    };
-    let Some(registered) = registered else {
-        return false;
-    };
+    #[cfg(target_os = "macos")]
+    {
+        macos::runs_current_build()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (Ok(registered), Ok(current)) = (registered_executable(), std::env::current_exe())
+        else {
+            return false;
+        };
+        let Some(registered) = registered else {
+            return false;
+        };
 
-    same_file(&registered, &current)
+        same_file(&registered, &current)
+    }
 }
 
 /// Записан ли в описании службы ровно тот файл, который сейчас работает.
@@ -195,14 +212,25 @@ pub fn matches_current_executable() -> bool {
 /// (`scripts/package.sh`), и служба, поставленная по ссылке, указывает на файл,
 /// которого после следующей пересборки может не быть. Диспетчер читает
 /// описание буквально, и починить такое можно только переписав его.
+///
+/// На macOS описание указывает на копию, и вопрос тот же, что и у
+/// [`matches_current_executable`]: та ли сборка в ней лежит. Расхождение
+/// лечится тем же — переустановкой, которая обновит копию.
 pub fn registered_verbatim() -> bool {
-    let (Ok(Some(registered)), Ok(current)) = (registered_executable(), std::env::current_exe())
-    else {
-        return false;
-    };
-    current
-        .canonicalize()
-        .is_ok_and(|current| registered == current)
+    #[cfg(target_os = "macos")]
+    {
+        macos::runs_current_build()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let (Ok(Some(registered)), Ok(current)) = (registered_executable(), std::env::current_exe())
+        else {
+            return false;
+        };
+        current
+            .canonicalize()
+            .is_ok_and(|current| registered == current)
+    }
 }
 
 /// Путь к файлу, который зарегистрирован службой. `None` — службы нет.
@@ -229,6 +257,7 @@ pub fn registered_executable() -> PlatformResult<Option<std::path::PathBuf>> {
 ///
 /// Сравнение строк не годится: один и тот же файл записывают и через прямые
 /// слэши, и через обратные, и с другим регистром буквы диска.
+#[cfg(not(target_os = "macos"))]
 fn same_file(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
@@ -242,6 +271,7 @@ fn same_file(left: &Path, right: &Path) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_missing_file_never_matches() {
         // Служба, указывающая на удалённую сборку, — обычное дело после
@@ -252,6 +282,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_same_file_written_differently_still_matches() {
         // Один и тот же файл записывают по-разному; сравнение строк на этом
