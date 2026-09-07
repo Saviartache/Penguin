@@ -14,7 +14,6 @@
 //! уязвимости.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use rustls::pki_types::ServerName;
@@ -24,13 +23,11 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
 use super::Upstream;
+use crate::config::UPSTREAM_TIMEOUT;
 use crate::error::{DnsError, DnsResult};
 
 /// Порт DNS-over-TLS.
 pub const DOT_PORT: u16 = 853;
-
-/// Сколько ждать ответа.
-const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Наибольший ответ.
 const MAX_RESPONSE: usize = 65_535;
@@ -117,7 +114,9 @@ impl Upstream for DotUpstream {
             Ok::<Vec<u8>, DnsError>(response)
         };
 
-        tokio::time::timeout(TIMEOUT, exchange)
+        // Бюджет общий на соединение, рукопожатие и обмен: приложение ждёт
+        // ответа, а не отдельно рукопожатия.
+        tokio::time::timeout(UPSTREAM_TIMEOUT, exchange)
             .await
             .map_err(|_| DnsError::Upstream(format!("{} не ответил", self.address)))?
     }
@@ -153,6 +152,9 @@ mod tests {
         let upstream = DotUpstream::new("192.0.2.1", "example.com").expect("собирается");
         let started = std::time::Instant::now();
         assert!(upstream.query(&[0u8; 12]).await.is_err());
-        assert!(started.elapsed() < TIMEOUT * 3, "ожидание затянулось");
+        assert!(
+            started.elapsed() < UPSTREAM_TIMEOUT * 3,
+            "ожидание затянулось"
+        );
     }
 }

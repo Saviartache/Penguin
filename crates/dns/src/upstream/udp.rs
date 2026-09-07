@@ -12,19 +12,13 @@
 //! [`super::dot`].
 
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
 
 use super::Upstream;
+use crate::config::UPSTREAM_TIMEOUT;
 use crate::error::{DnsError, DnsResult};
-
-/// Сколько ждать ответа.
-///
-/// Две секунды: дольше ждать бессмысленно — приложение к этому моменту само
-/// перепошлёт запрос.
-const TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Наибольший ответ, который принимается по UDP.
 ///
@@ -89,7 +83,7 @@ impl Upstream for UdpUpstream {
         socket.send(request).await?;
 
         let mut buffer = vec![0u8; MAX_RESPONSE];
-        let len = tokio::time::timeout(TIMEOUT, socket.recv(&mut buffer))
+        let len = tokio::time::timeout(UPSTREAM_TIMEOUT, socket.recv(&mut buffer))
             .await
             .map_err(|_| DnsError::Upstream(format!("{} не ответил", self.server)))??;
 
@@ -148,6 +142,9 @@ mod tests {
             result.is_err(),
             "молчащий сервер не должен считаться ответившим"
         );
-        assert!(started.elapsed() < TIMEOUT * 3, "ожидание затянулось");
+        assert!(
+            started.elapsed() < UPSTREAM_TIMEOUT * 3,
+            "ожидание затянулось"
+        );
     }
 }
