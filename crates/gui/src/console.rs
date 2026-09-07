@@ -457,7 +457,7 @@ mod tests {
     fn lines() -> Vec<Line> {
         vec![
             Line::Section("КОНФИГУРАЦИЯ".to_owned()),
-            Line::Pair("ПРОФИЛЬ".to_owned(), "84.22.150.245".to_owned()),
+            Line::Pair("ПРОФИЛЬ".to_owned(), "203.0.113.245".to_owned()),
             Line::Toned("СОСТОЯНИЕ".to_owned(), "ОТКЛЮЧЕНО".to_owned(), Color::WHITE),
             Line::Graph(vec![0.0, 0.5, 1.0]),
             Line::Pair("СОЕДИНЕНИЙ".to_owned(), "0".to_owned()),
