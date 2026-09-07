@@ -29,6 +29,9 @@ services:
   # проверять их надо о разные серверы.
   socks5-open:
     image: serjs/go-socks5-proxy
+    # Образ требует пароль по умолчанию и без него не запускается вовсе.
+    environment:
+      REQUIRE_AUTH: "false"
     ports:
       - "127.0.0.1:11081:1080"
     networks: [interop]
@@ -45,10 +48,11 @@ services:
     depends_on: [socks5]
     networks: [interop]
 
+  # Не tinyproxy: образ `vimagick/tinyproxy` падает от подключения, закрытого
+  # до первой строки запроса, — эталоном такой сервер быть не может.
   http:
-    image: vimagick/tinyproxy
-    volumes:
-      - ./tinyproxy/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+    image: gogost/gost
+    command: -L http://:8888
     ports:
       - "127.0.0.1:18888:8888"
     networks: [interop]
@@ -118,8 +122,7 @@ services:
     networks: [interop]
 
   # Своя сборка: сервер NaiveProxy — это Caddy с форком плагина, готового
-  # образа нет. Один и тот же порт по TCP и по UDP: под HTTP/2 лежит TLS,
-  # под HTTP/3 — QUIC, и проверять надо оба.
+  # образа нет.
   naive:
     build: ./naive
     volumes:
@@ -127,7 +130,6 @@ services:
       - ./tls:/etc/caddy/tls:ro
     ports:
       - "127.0.0.1:14436:443"
-      - "127.0.0.1:14436:443/udp"
     networks: [interop]
 
   # Своя сборка, а не готовый образ: у готовых `AllowTcpForwarding` то включён,

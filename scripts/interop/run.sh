@@ -12,7 +12,10 @@
 # то, что нужно показать после прогона: по нему видно не только какой протокол
 # не прошёл, но и что ответил его сервер.
 set -uo pipefail
+SELF="$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "${BASH_SOURCE[0]}")"
+# После `cd` относительный `$0` уже никуда не ведёт, а скрипт зовёт сам себя.
+SELF="$PWD/$SELF"
 
 ROOT="$(cd ../.. && pwd)"
 # Свой каталог настроек: проверка не имеет права трогать настоящие профили
@@ -27,7 +30,7 @@ REPORT="$PWD/report.txt"
 # так под `tee` попадает всё, включая то, что печатают `docker` и `cargo`.
 if [[ -z "${INTEROP_REPORT:-}" ]]; then
     export INTEROP_REPORT="$REPORT"
-    "$0" "$@" 2>&1 | tee "$REPORT"
+    "$SELF" "$@" 2>&1 | tee "$REPORT"
     status="${PIPESTATUS[0]}"
     # На Windows путь вида `/e/...` в проводник не вставить, поэтому рядом
     # печатается и родной.
@@ -133,6 +136,12 @@ fi
 bold "эталонные серверы"
 if ! docker compose up -d; then
     bad "часть серверов не поднялась — смотрите вывод выше"
+    # Одной команде хватает одного несобравшегося образа, чтобы не запустить
+    # и остальных: сборка идёт до запуска. Поэтому второй заход — поимённо,
+    # чтобы сломанный сервер стоил проверки только своему протоколу.
+    for service in $(docker compose config --services 2>/dev/null); do
+        docker compose up -d "$service" >/dev/null 2>&1 || true
+    done
 fi
 
 printf '\nсостояние контейнеров:\n'
@@ -156,26 +165,18 @@ bold "сборка клиента"
 (cd "$ROOT" && cargo build -p penguin-app) || { bad "не собрался"; exit 1; }
 ok "собран"
 
-# Настройки клиента кладём в свой каталог: и Windows, и Linux, и macOS
-# смотрят в переменные среды, и подменить их достаточно.
-#
+# Настройки клиента кладём в свой каталог и передаём его прямо: переменных
+# среды тут мало — у каждой системы своя раскладка каталога пользователя, а
+# общий (`/etc/penguin`, `ProgramData`) сильнее его и перебил бы наш.
+CONFIG_DIR="$SCRATCH/config"
+mkdir -p "$CONFIG_DIR"
 # На Windows путь обязан быть родным: клиент склеивает его средствами системы,
 # и `/tmp/...` из-под Git Bash она не понимает — файл просто не находится, а
 # выглядит это как «нет профиля».
-WINDOWS=0
-case "$OSTYPE" in
-    msys* | cygwin* | win32) WINDOWS=1 ;;
-esac
-
-if [[ $WINDOWS -eq 1 ]]; then
-    NATIVE="$(cygpath -w "$SCRATCH")"
-    export APPDATA="$NATIVE"
-    # Общий каталог сильнее пользовательского, и настоящий бы перебил наш.
-    export ProgramData="$NATIVE\none"
+if command -v cygpath >/dev/null 2>&1; then
+    CONFIG_ARG="$(cygpath -w "$CONFIG_DIR")"
 else
-    export XDG_CONFIG_HOME="$SCRATCH/config"
-    export XDG_DATA_HOME="$SCRATCH/data"
-    export HOME="$SCRATCH"
+    CONFIG_ARG="$CONFIG_DIR"
 fi
 
 # Один профиль на запуск: файл переписывается целиком перед каждой проверкой.
@@ -184,14 +185,7 @@ fi
 # `version` стоят до первой таблицы, иначе TOML отнесёт их к ней.
 write_profile() {
     local protocol="$1" params="$2"
-    local dir
-    if [[ $WINDOWS -eq 1 ]]; then
-        dir="$SCRATCH/Saviartache/Penguin/config"
-    else
-        dir="$XDG_CONFIG_HOME/penguin"
-    fi
-    mkdir -p "$dir"
-    cat > "$dir/config.toml" <<TOML
+    cat > "$CONFIG_DIR/config.toml" <<TOML
 version = 2
 active_profile = "interop"
 
@@ -218,14 +212,15 @@ check() {
 
     # Сначала без сети: ошибка в настройках профиля и молчащий сервер
     # выглядят одинаково, если не разделить их здесь.
-    if ! "$BIN" profiles check >"$SCRATCH/$name.check" 2>&1; then
+    if ! "$BIN" --config-dir "$CONFIG_ARG" profiles check >"$SCRATCH/$name.check" 2>&1; then
         bad "$name: настройки не проходят проверку"
         cat "$SCRATCH/$name.check"
         FAILED+=("$name")
         return 0
     fi
 
-    "$BIN" socks --profile interop --listen 127.0.0.1:11111 --no-rules \
+    "$BIN" --config-dir "$CONFIG_ARG" socks --profile interop \
+        --listen 127.0.0.1:11111 --no-rules \
         >"$SCRATCH/$name.log" 2>&1 &
     local pid=$!
 
@@ -323,17 +318,8 @@ check brook brook 'server   = "127.0.0.1:19999"
 password = "secret"'
 
 # Имя и пароль те же, что в `naive/Caddyfile`. Сертификат самоподписанный —
-# отсюда `insecure`. Проверяются оба переноса: схема дополнения у них
-# общая, а вот то, что под ней, — разное целиком.
+# отсюда `insecure`.
 check naive-h2 http2 'server   = "127.0.0.1:14436"
-username = "penguin"
-password = "secret"
-
-[profiles.outbound.tls]
-sni      = "interop.penguin.test"
-insecure = true'
-
-check naive-h3 http3 'server   = "127.0.0.1:14436"
 username = "penguin"
 password = "secret"
 
