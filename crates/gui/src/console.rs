@@ -34,10 +34,12 @@
 //! и потому прочерк здесь дефис ([`crate::screens::compact`]), а обрезанный
 //! хвост помечен тильдой ([`CUT`]).
 
+use iced::gradient::Linear;
 use iced::theme::Palette;
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{Space, container, text};
-use iced::{Color, Element, Length, Padding};
+use iced::{Background, Color, Element, Length, Padding, Radians};
+use uikit::color::with_alpha;
 use uikit::layout::{Flex, Sizable, Size, px};
 use uikit::style::tokens::{ink, type_scale};
 
@@ -100,6 +102,13 @@ const DASH: char = '─';
 /// Один пиксел: столбик шириной в несколько пикселов, разделённый большим
 /// зазором, перестаёт читаться как столбик и становится точкой.
 const BAR_GAP: f32 = 1.0;
+
+/// Насколько столбик прозрачнее у основания, чем на вершине.
+///
+/// Значение читается по вершине — там цвет держится в полную силу. Основание
+/// уводится в прозрачность: сплошные плашки в тёмной консоли выглядят
+/// частоколом и спорят с текстом вокруг.
+const BAR_ROOT: f32 = 0.3;
 
 /// Толщина оси — черты под столбиками.
 ///
@@ -360,11 +369,12 @@ fn bar<'a, Message: 'a>(color: Color, share: f32) -> Element<'a, Message> {
     // не шло» обязан быть виден основанием.
     let filled = ((share.clamp(0.0, 1.0) * f32::from(STEPS)).round() as u16).clamp(1, STEPS);
 
+    let fill = bar_fill(color);
     let body = container(Space::new())
         .width(Length::Fill)
         .height(Length::FillPortion(filled))
         .style(move |_: &iced::Theme| container::Style {
-            background: Some(color.into()),
+            background: Some(fill),
             // По сетке пикселов: столбик в четыре пиксела шириной, размазанный
             // между пятью, теряет и цвет, и края.
             snap: true,
@@ -380,6 +390,22 @@ fn bar<'a, Message: 'a>(color: Color, share: f32) -> Element<'a, Message> {
         column = column.push(Space::new().height(Length::FillPortion(STEPS - filled)));
     }
     column.push(body).into()
+}
+
+/// Заливка столбика: цвет в полную силу на вершине, [`BAR_ROOT`] от него у
+/// основания.
+///
+/// Градиент считается по границам самого столбика, а не графика: у `iced`
+/// заливка привязана к квадру, которым нарисована. Смещение `0.0` лежит там,
+/// откуда указывает угол, поэтому половина оборота — вниз — ставит его на
+/// вершину.
+fn bar_fill(color: Color) -> Background {
+    Background::Gradient(
+        Linear::new(Radians(std::f32::consts::PI))
+            .add_stop(0.0, color)
+            .add_stop(1.0, with_alpha(color, color.a * BAR_ROOT))
+            .into(),
+    )
 }
 
 /// Заполнитель на всю оставшуюся пустоту: точки, черта, ровная линия.
@@ -462,6 +488,22 @@ mod tests {
             Line::Graph(vec![0.0, 0.5, 1.0]),
             Line::Pair("СОЕДИНЕНИЙ".to_owned(), "0".to_owned()),
         ]
+    }
+
+    #[test]
+    fn a_bar_fades_from_its_tip_down() {
+        // Перепутанный угол развернул бы градиент, и полная сила цвета
+        // оказалась бы у основания — там, где значения нет.
+        let Background::Gradient(iced::Gradient::Linear(fill)) = bar_fill(palette().primary) else {
+            panic!("столбик залит не градиентом");
+        };
+        let stops: Vec<_> = fill.stops.iter().flatten().collect();
+
+        assert_eq!(fill.angle, Radians(std::f32::consts::PI));
+        assert_eq!(stops.len(), 2);
+        assert_eq!(stops[0].offset, 0.0);
+        assert_eq!(stops[1].offset, 1.0);
+        assert!(stops[1].color.a < stops[0].color.a);
     }
 
     #[test]
