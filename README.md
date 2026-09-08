@@ -119,12 +119,17 @@ cargo run -p penguin-app
 спрашивает системным окном. Склонированный без submodule'а чинится через
 `git submodule update --init --recursive`.
 
-На Linux окну нужны системные библиотеки значка в лотке — без них не соберётся
-`penguin-gui`:
+На Linux значку в лотке нужен gtk — без его заголовков `penguin-gui` не
+соберётся:
 
 ```bash
-sudo apt install libgtk-3-dev libappindicator3-dev # или libayatana-appindicator3-dev
+sudo apt install libgtk-3-dev
 ```
+
+Сам appindicator в сборке не участвует: он грузится на запуске, и на машине, где
+клиент работает, должен стоять `libayatana-appindicator3-1` или
+`libappindicator3-1`. Без него окно работает как прежде — не будет только
+значка.
 
 ```bash
 cargo run -p penguin-app -- doctor

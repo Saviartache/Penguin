@@ -78,13 +78,18 @@ jobs:
       # Заголовки X11, Wayland и EGL: `x11-dl`, `wayland-sys` и `khronos-egl`
       # ищут их через pkg-config при сборке, даже когда грузят библиотеки уже
       # на запуске. Без них не собирается оконный бэкенд `iced`.
+      #
+      # gtk3 — значок в лотке (фича `tray` кита): на Linux он живёт в цикле
+      # gtk, и `gtk-sys` ищет заголовки через pkg-config. Сам appindicator в
+      # сборке не нужен: `libappindicator-sys` грузит его на запуске, и
+      # заголовков ему не требуется.
       - name: зависимости системы
         if: matrix.system == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev \
-            libegl1-mesa-dev libgl1-mesa-dev
+            libegl1-mesa-dev libgl1-mesa-dev libgtk-3-dev
 
       # `scripts/fetch-wintun.sh` распаковывает архив драйвера, а в Git Bash
       # распаковщика нет.
