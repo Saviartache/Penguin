@@ -5,6 +5,7 @@
 //! | Запуск | Роль |
 //! |---|---|
 //! | двойной щелчок, `penguin` | окно |
+//! | `penguin --tray` | окно, свёрнутое в значок лотка |
 //! | `penguin doctor`, `penguin socks`, … | терминал |
 //! | `penguin service …` | управление службой |
 //! | `penguin --service` | служба, запущенная диспетчером |
@@ -53,6 +54,14 @@ pub struct Cli {
     /// Держать службу на переднем плане — так её запускают при отладке.
     #[arg(long, hide = true)]
     pub foreground: bool,
+
+    /// Открыть окно свёрнутым в значок лотка.
+    ///
+    /// С этим флагом программу запускает автозапуск: человек включал его,
+    /// чтобы клиент был под рукой, а не чтобы окно вставало поверх рабочего
+    /// стола при каждом входе в систему.
+    #[arg(long)]
+    pub tray: bool,
 
     /// Что делать. Без команды — открыть окно.
     #[command(subcommand)]
@@ -153,6 +162,17 @@ mod tests {
         let cli = Cli::try_parse_from(["penguin"]).expect("разбирается");
         assert!(cli.command.is_none());
         assert!(!cli.service);
+    }
+
+    #[test]
+    fn the_tray_flag_still_means_the_window() {
+        // Флаг ставит автозапуск, и роль от него меняться не должна: это то же
+        // окно, только спрятанное.
+        let cli = Cli::try_parse_from(["penguin", "--tray"]).expect("разбирается");
+        assert!(cli.tray);
+        assert!(cli.command.is_none());
+        assert!(!cli.needs_elevation());
+        assert!(!cli.writes_to_console());
     }
 
     #[test]

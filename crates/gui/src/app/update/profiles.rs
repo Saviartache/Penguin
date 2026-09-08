@@ -187,7 +187,7 @@ mod tests {
     use super::*;
 
     fn app_with_profiles(ids: &[&str]) -> App {
-        let (mut app, _task) = App::new(uikit::ThemeType::Dark);
+        let (mut app, _task) = App::new(uikit::ThemeType::Dark, false);
         for id in ids {
             app.state_mut().config.profiles.push(Profile::new(
                 *id,

@@ -255,7 +255,7 @@ mod tests {
     use super::*;
 
     fn app_with_rules(rules: serde_json::Value) -> App {
-        let (mut app, _task) = App::new(uikit::ThemeType::Dark);
+        let (mut app, _task) = App::new(uikit::ThemeType::Dark, false);
         app.state_mut().config.routing.rules =
             serde_json::from_value::<Vec<RuleConfig>>(rules).expect("правила разбираются");
         app

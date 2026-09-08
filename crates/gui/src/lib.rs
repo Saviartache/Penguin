@@ -19,12 +19,19 @@ mod i18n;
 mod ipc;
 mod screens;
 mod theme;
+mod tray;
 mod ui;
 
 use penguin_config::schema::app::Language;
 
 /// Открывает окно и работает, пока его не закроют.
-pub fn run() -> iced::Result {
+///
+/// `hidden` — открыться сразу в значке лотка, окна на экране не показывая. Так
+/// программу запускает автозапуск: человек включал его, чтобы клиент был под
+/// рукой, а не чтобы окно вставало поверх рабочего стола при каждом входе. Если
+/// значка в системе не оказалось, окно всё равно покажется — иначе его уже
+/// ничем не достать (`app::App::window_opened`).
+pub fn run(hidden: bool) -> iced::Result {
     let settings = penguin_config::ConfigStore::discover()
         .ok()
         .and_then(|store| store.load().ok());
@@ -42,7 +49,7 @@ pub fn run() -> iced::Result {
     // её захватывает замыкание загрузки состояния; всё остальное приезжает от
     // службы.
     iced::application(
-        move || app::App::new(theme),
+        move || app::App::new(theme, hidden),
         app::App::update,
         app::App::view,
     )
@@ -68,6 +75,10 @@ pub fn run() -> iced::Result {
         // рисует сам.
         size: uikit::window::frame::outer(app::COMPACT),
         icon: window_icon(),
+        // Запуск в лоток: окно создаётся, но на экране его нет. Не показать и
+        // потом спрятать — мигнувшее на весь экран окно человек всё равно
+        // увидит, а он просил обратного.
+        visible: !hidden,
         // Размером владеет `Morph`, и владеет им один. Системное
         // растягивание завело бы второй источник размера, и они начали бы
         // спорить: окно раздувалось бы и съёживалось на глазах.
@@ -109,6 +120,9 @@ pub fn run() -> iced::Result {
 /// называет сама программа, и без этого они показывают безымянный прямоугольник.
 ///
 /// `None` — картинка не разобралась. Окно из-за иконки не открывать нельзя.
-fn window_icon() -> Option<iced::window::Icon> {
+///
+/// Она же уходит в лоток ([`tray`]): значок программы там — та же картинка, что
+/// у окна, и второй ей взяться неоткуда.
+pub(crate) fn window_icon() -> Option<iced::window::Icon> {
     iced::window::icon::from_file_data(include_bytes!("../../../assets/icon.ico"), None).ok()
 }

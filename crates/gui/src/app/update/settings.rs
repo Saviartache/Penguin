@@ -97,7 +97,7 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        let (app, _task) = App::new(uikit::ThemeType::Dark);
+        let (app, _task) = App::new(uikit::ThemeType::Dark, false);
         app
     }
 

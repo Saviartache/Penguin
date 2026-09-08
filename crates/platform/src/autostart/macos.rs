@@ -99,14 +99,26 @@ fn agent(executable: &Path) -> String {
          \x20 <string>{LABEL}</string>\n\
          \x20 <key>ProgramArguments</key>\n\
          \x20 <array>\n\
-         \x20   <string>{}</string>\n\
+         {}\
          \x20 </array>\n\
          \x20 <key>RunAtLoad</key>\n\
          \x20 <true/>\n\
          </dict>\n\
          </plist>\n",
-        escape(&executable.display().to_string())
+        arguments(executable)
     )
+}
+
+/// Строки `ProgramArguments`: сама программа и то, с чем её запускают.
+fn arguments(executable: &Path) -> String {
+    std::iter::once(executable.display().to_string())
+        .chain(
+            super::ARGUMENTS
+                .iter()
+                .map(|argument| (*argument).to_owned()),
+        )
+        .map(|argument| format!("\x20   <string>{}</string>\n", escape(&argument)))
+        .collect()
 }
 
 /// Экранирует то, что в XML значит не себя.
@@ -132,14 +144,22 @@ mod tests {
 
     #[test]
     fn the_agent_names_the_window_not_the_service() {
-        // Аргументов нет вовсе: без них программа открывает окно, а это и
-        // есть то, чего человек хочет после входа.
+        // Служба поднимается сама и агента не касается: здесь запускается
+        // окно, и только оно.
         let text = agent(Path::new("/usr/local/bin/penguin"));
         assert!(!text.contains("--service"), "{text}");
         assert!(
             text.contains("<string>/usr/local/bin/penguin</string>"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_agent_starts_the_window_in_the_tray() {
+        // Без флага окно вставало бы поверх рабочего стола при каждом входе —
+        // а автозапуск включают не за этим.
+        let text = agent(Path::new("/usr/local/bin/penguin"));
+        assert!(text.contains("<string>--tray</string>"), "{text}");
     }
 
     #[test]

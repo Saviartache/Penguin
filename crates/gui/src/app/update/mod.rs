@@ -52,10 +52,7 @@ fn handle_window(app: &mut App, message: WindowMessage) -> Task<Message> {
         // Окно открылось: запоминаем его настоящий идентификатор и исходное
         // положение. До этого команды окну уходили в никуда — настоящего id
         // ещё не было.
-        WindowMessage::Opened(id, position, size) => {
-            app.window_opened(id, position, size);
-            Task::none()
-        }
+        WindowMessage::Opened(id, position, size) => app.window_opened(id, position, size),
         // Только заряжаем: тащить начнёт `on_cursor_moved`, когда курсор
         // уедет дальше порога. Начать перетаскивание прямо на нажатии значит
         // утащить окно при щелчке по переключателю темы в той же шапке.
@@ -65,9 +62,12 @@ fn handle_window(app: &mut App, message: WindowMessage) -> Task<Message> {
             Task::none()
         }
         WindowMessage::CursorMoved(position) => app.chrome_mut().on_cursor_moved(position),
-        // Свернуть, а не спрятать: окно уходит на панель задач, откуда его
-        // достают одним щелчком. Тоннель при этом остаётся как был.
-        WindowMessage::Minimize => window::minimize(app.window(), true),
+        // Свернуть — в значок лотка, а без значка на панель задач. Тоннель при
+        // этом остаётся как был: убрать окно с глаз и выключить тоннель — не
+        // одно и то же.
+        WindowMessage::Minimize => app.hide(),
+        WindowMessage::Show => app.show(),
+        WindowMessage::Toggle => app.toggle_visibility(),
         // Закрыть означает закрыть всё. Тоннель держит служба, отдельный
         // процесс, и окно, закрывшееся само по себе, оставило бы после себя
         // TUN-адаптер, маршруты и трафик через нас — программу, которой на

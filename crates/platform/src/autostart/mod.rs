@@ -22,6 +22,14 @@ use crate::error::PlatformResult;
 #[cfg(windows)]
 const ENTRY_NAME: &str = "Penguin";
 
+/// С чем программа поднимается при входе.
+///
+/// Свёрнутой в значок лотка: автозапуск включают, чтобы клиент был под рукой, а
+/// не чтобы окно вставало поверх рабочего стола при каждом входе. Достать его
+/// оттуда — один щелчок по значку.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+const ARGUMENTS: &[&str] = &["--tray"];
+
 /// Включает автозапуск.
 pub fn enable(executable: &std::path::Path) -> PlatformResult<()> {
     set_enabled(Some(executable))

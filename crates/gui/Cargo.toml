@@ -20,7 +20,12 @@ penguin-ipc.workspace = true
 penguin-platform.workspace = true
 # Кит подключён submodule'ом в vendor/rust-ui-kit; пакет `rust-ui-kit`,
 # библиотека `uikit` — оба имени заданы китом и не меняются.
-uikit.workspace = true
+#
+# `tray` — значок в лотке: в умолчания кита фича не входит, потому что тянет
+# `tray-icon`, а на Linux ещё и `gtk`. Клиенту она нужна: окно, спрятанное в
+# лоток, — это то, чем программа остаётся после входа в систему. Собирать её на
+# Linux нужно с `libgtk-3-dev` и `libappindicator3-dev`.
+uikit = { workspace = true, features = ["tray"] }
 # `iced` берётся напрямую только для того, что кит не переэкспортирует
 # (билдер `iced::application`, `Task`, `Subscription`). Версия — общая с китом.
 # В workspace `iced` подключён с `default-features = false` (так его просит

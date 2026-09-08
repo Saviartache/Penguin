@@ -183,4 +183,7 @@ pub static STRINGS: Strings = Strings {
     capture_default_route: "Send all system traffic through the tunnel",
     dns_hijack: "Intercept the system's name lookups",
     verbose_log: "Write a verbose service log",
+
+    tray_show: "Show window",
+    tray_quit: "Quit",
 };

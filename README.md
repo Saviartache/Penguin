@@ -119,6 +119,13 @@ cargo run -p penguin-app
 спрашивает системным окном. Склонированный без submodule'а чинится через
 `git submodule update --init --recursive`.
 
+На Linux окну нужны системные библиотеки значка в лотке — без них не соберётся
+`penguin-gui`:
+
+```bash
+sudo apt install libgtk-3-dev libappindicator3-dev # или libayatana-appindicator3-dev
+```
+
 ```bash
 cargo run -p penguin-app -- doctor
 cargo run -p penguin-app -- rules explain steamcontent.com:443 --process steam.exe

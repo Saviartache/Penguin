@@ -48,6 +48,10 @@ pub use self::message::{Message, Screen};
 pub use self::state::State;
 use crate::screens;
 
+/// Как программа называется на экране: заголовок окна, шапка и подсказка у
+/// значка в лотке — одно имя на все три места.
+pub const TITLE: &str = "Ostriacki Pingwin";
+
 /// Размер в покое.
 ///
 /// Квадрат с ладонь: панель, строка состояния и кнопка — больше в клиенте,
@@ -92,11 +96,25 @@ pub struct App {
     /// временный `Id::unique()` — заведомо не тот, но нужный, чтобы `view`
     /// собрал шапку уже на первом кадре.
     window: window::Id,
+    /// Значок в лотке.
+    ///
+    /// `None` — лотка в системе нет: тогда окно сворачивается на панель задач,
+    /// как до всякого лотка. Заводится он не здесь, а на [`Self::window_opened`]:
+    /// значку нужен работающий цикл событий, а замыкание загрузки `iced`
+    /// вызывает раньше, чем цикл запустится.
+    tray: Option<uikit::tray::Tray>,
+    /// Окно спрятано в лоток.
+    ///
+    /// Не то же, что «свёрнуто»: свёрнутое окно есть на панели задач, а
+    /// спрятанного нет нигде, кроме значка.
+    hidden: bool,
 }
 
 impl App {
     /// Создаёт окно и первую команду.
-    pub fn new(theme: ThemeType) -> (Self, Task<Message>) {
+    ///
+    /// `hidden` — окно открывается сразу спрятанным в лоток (`crate::run`).
+    pub fn new(theme: ThemeType, hidden: bool) -> (Self, Task<Message>) {
         let mut state = State {
             palette: theme.to_iced_theme().palette(),
             ..State::default()
@@ -128,6 +146,8 @@ impl App {
             // больше не нужна: настоящий идентификатор для неё всё равно ещё
             // неизвестен.
             window: window::Id::unique(),
+            tray: None,
+            hidden,
         };
 
         (app, update::bootstrap())
@@ -135,7 +155,7 @@ impl App {
 
     /// Заголовок окна.
     pub fn title(&self) -> String {
-        "Ostriacki Pingwin".to_owned()
+        TITLE.to_owned()
     }
 
     /// Разбирает сообщение.
@@ -145,7 +165,7 @@ impl App {
 
     /// Собирает окно.
     pub fn view(&self) -> Element<'_, Message> {
-        let header = uikit::window::header(self.window, "Ostriacki Pingwin")
+        let header = uikit::window::header(self.window, TITLE)
             .on_close(Message::Window(message::WindowMessage::Close))
             .on_minimize(Message::Window(message::WindowMessage::Minimize))
             // Разворачивать окну нечего: размером владеет `Morph`, и во весь
@@ -226,6 +246,18 @@ impl App {
                 )),
                 _ => None,
             }),
+            // Значок в лотке. Подписка заводится и тогда, когда значка нет:
+            // событий тогда просто не будет, а лишняя ветка в `subscription`
+            // стоила бы дороже.
+            uikit::tray::events().map(|event| {
+                Message::Window(match event {
+                    uikit::tray::Event::Item(id) if id == crate::tray::QUIT => {
+                        message::WindowMessage::Close
+                    }
+                    uikit::tray::Event::Item(_) => message::WindowMessage::Show,
+                    uikit::tray::Event::Activated => message::WindowMessage::Toggle,
+                })
+            }),
         ];
 
         // Поток событий демона — только когда окно само со службой не возится.
@@ -253,9 +285,55 @@ impl App {
     }
 
     /// Запоминает открытое окно: его идентификатор и, для `Morph`, положение.
-    pub fn window_opened(&mut self, id: window::Id, position: Option<Point>, size: Size) {
+    ///
+    /// Здесь же заводится значок в лотке: цикл событий уже работает, а до него
+    /// значка не бывает (см. [`uikit::tray`]). Если значка не вышло, а окно
+    /// открывалось спрятанным, его приходится показать: доставать его больше
+    /// нечем.
+    pub fn window_opened(
+        &mut self,
+        id: window::Id,
+        position: Option<Point>,
+        size: Size,
+    ) -> Task<Message> {
         self.window = id;
         self.morph.on_opened(position, size);
+        self.tray = crate::tray::create();
+
+        if self.hidden && self.tray.is_none() {
+            return self.show();
+        }
+        Task::none()
+    }
+
+    /// Прячет окно в лоток — или сворачивает на панель задач, если лотка нет.
+    pub fn hide(&mut self) -> Task<Message> {
+        if self.tray.is_none() {
+            return window::minimize(self.window, true);
+        }
+
+        self.hidden = true;
+        window::set_mode(self.window, window::Mode::Hidden)
+    }
+
+    /// Достаёт окно из лотка.
+    pub fn show(&mut self) -> Task<Message> {
+        self.hidden = false;
+        Task::batch([
+            window::set_mode(self.window, window::Mode::Windowed),
+            // Показать мало: окно вернулось бы под то, поверх чего человек
+            // работал, и щелчок по значку выглядел бы несработавшим.
+            window::gain_focus(self.window),
+        ])
+    }
+
+    /// Щелчок по значку: спрятать или показать.
+    pub fn toggle_visibility(&mut self) -> Task<Message> {
+        if self.hidden {
+            self.show()
+        } else {
+            self.hide()
+        }
     }
 
     /// Состояние окна.

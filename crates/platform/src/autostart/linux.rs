@@ -65,10 +65,11 @@ fn entry(executable: &Path) -> String {
         "[Desktop Entry]\n\
          Type=Application\n\
          Name=Penguin\n\
-         Exec=\"{}\"\n\
+         Exec=\"{}\" {}\n\
          Terminal=false\n\
          X-GNOME-Autostart-enabled=true\n",
-        executable.display()
+        executable.display(),
+        super::ARGUMENTS.join(" ")
     )
 }
 
@@ -92,6 +93,14 @@ mod tests {
             text.contains("Exec=\"/home/пингвин/Мои программы/penguin\""),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_entry_starts_the_window_in_the_tray() {
+        // Без флага окно вставало бы поверх рабочего стола при каждом входе —
+        // а автозапуск включают не за этим.
+        let text = entry(Path::new("/usr/bin/penguin"));
+        assert!(text.contains("Exec=\"/usr/bin/penguin\" --tray"), "{text}");
     }
 
     #[test]

@@ -69,7 +69,7 @@ fn main() -> Result<()> {
         }
 
         // --- окно ---
-        None => penguin_gui::run().context("окно не открылось"),
+        None => penguin_gui::run(cli.tray).context("окно не открылось"),
     }
 }
 

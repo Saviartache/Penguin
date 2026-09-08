@@ -407,6 +407,12 @@ pub struct Strings {
     pub dns_hijack: &'static str,
     /// Подробность журнала службы.
     pub verbose_log: &'static str,
+
+    // --- значок в лотке ---
+    /// Пункт меню значка: достать окно из лотка.
+    pub tray_show: &'static str,
+    /// Пункт меню значка: выйти из программы.
+    pub tray_quit: &'static str,
 }
 
 /// Значения режимов в том порядке, в каком они показываются.
@@ -625,6 +631,8 @@ mod tests {
                 table.capture_default_route,
                 table.dns_hijack,
                 table.verbose_log,
+                table.tray_show,
+                table.tray_quit,
             ];
 
             for label in all.into_iter().chain(table.screens).chain(table.modes) {

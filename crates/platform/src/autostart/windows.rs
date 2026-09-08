@@ -22,8 +22,9 @@ pub(super) fn write(executable: &Path) -> PlatformResult<()> {
     let key = open(KEY_WRITE)?;
 
     // Путь в кавычках: без них пробел в имени каталога превращает одну
-    // команду в две, и запускается не то.
-    let value: Vec<u16> = format!("\"{}\"", executable.display())
+    // команду в две, и запускается не то. Аргументы — за кавычками, иначе
+    // командой окажется файл с таким длинным именем.
+    let value: Vec<u16> = command(executable)
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -113,6 +114,19 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Что попадает в ветку автозапуска.
+///
+/// Свободная функция с тестом: потерянные кавычки означают запуск не того, а
+/// потерянный аргумент — окно поверх рабочего стола при каждом входе.
+fn command(executable: &Path) -> String {
+    let mut command = format!("\"{}\"", executable.display());
+    for argument in super::ARGUMENTS {
+        command.push(' ');
+        command.push_str(argument);
+    }
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{disable, enable, is_enabled};
@@ -132,10 +146,10 @@ mod tests {
         let value = read().expect("значение читается");
         // Кавычки обязательны: без них пробел в пути превращает одну команду
         // в две, и запускается не то.
-        assert!(
-            value.starts_with('"') && value.ends_with('"'),
-            "путь без кавычек: {value}"
-        );
+        assert!(value.starts_with('"'), "путь без кавычек: {value}");
+        // Окно поднимается свёрнутым в значок: автозапуск включают не ради
+        // окна поверх рабочего стола при каждом входе.
+        assert!(value.ends_with(" --tray"), "запуск без значка: {value}");
 
         disable().expect("выключается");
         assert!(!is_enabled(), "запись осталась");

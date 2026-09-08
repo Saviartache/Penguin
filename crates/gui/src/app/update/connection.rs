@@ -347,7 +347,7 @@ mod tests {
 
     fn app() -> App {
         // Приложение создаётся без окна: `update` от него не зависит.
-        let (app, _task) = App::new(uikit::ThemeType::Dark);
+        let (app, _task) = App::new(uikit::ThemeType::Dark, false);
         app
     }
 

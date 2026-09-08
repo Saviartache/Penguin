@@ -188,4 +188,7 @@ pub static STRINGS: Strings = Strings {
     capture_default_route: "Заворачивать в тоннель весь трафик системы",
     dns_hijack: "Перехватывать запросы имён у системы",
     verbose_log: "Писать подробный журнал службы",
+
+    tray_show: "Показать окно",
+    tray_quit: "Выход",
 };
