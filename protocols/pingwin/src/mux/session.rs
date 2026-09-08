@@ -1,11 +1,15 @@
 //! Сессия: разбор кадров, очереди потоков и общая запись.
 //!
 //! ```text
-//!   поток 1 ─┐                             ┌─► очередь 1 ─► приложение
-//!   поток 2 ─┼─► замок ─► запись ─► сокет  ┼─► очередь 2 ─► приложение
-//!   поток 3 ─┘                             └─► очередь 3 ─► приложение
-//!                        сокет ─► чтение ─► задача разбора
+//!   поток 1 ─┐                                  ┌─► очередь 1 ─► приложение
+//!   поток 2 ─┼─► очередь ─► задача записи ─► сокет ─► задача разбора ─┤
+//!   поток 3 ─┘                                  └─► очередь 3 ─► приложение
 //! ```
+//!
+//! Две задачи на сессию, и обе владеют своей половиной сокета единолично.
+//! Пишущая — не роскошь: запись, начатая прямо из потока приложения,
+//! отменяется вместе с ним и оставляет на проводе половину записи. Подробнее —
+//! в документе [`write_loop`].
 //!
 //! # Кто кого держит
 //!
@@ -36,7 +40,7 @@ use penguin_proto::stream::ProxyStream;
 use penguin_transport::addr::socks;
 use penguin_transport::aead::{Algorithm, Cipher};
 use tokio::io::{ReadHalf, WriteHalf};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::error::{PingwinError, PingwinResult};
@@ -44,6 +48,7 @@ use crate::records::{RecordReader, RecordWriter};
 use crate::wire::frame;
 use crate::wire::keys::SessionKeys;
 use crate::wire::padding::Padding;
+use crate::wire::record;
 
 /// Соединение, поверх которого живёт сессия.
 pub type Carrier = Box<dyn ProxyStream>;
@@ -56,13 +61,28 @@ pub type Carrier = Box<dyn ProxyStream>;
 pub const FIRST_SID: u32 = 1;
 
 /// Сколько кусков держать для потока, пока их не забрали.
-const QUEUE: usize = 16;
-
-/// Сколько ждать подтверждения открытия потока.
 ///
-/// Оборванное соединение, о котором не пришло `RST`, иначе висит до
-/// системного срока — а это минуты.
-const OPEN_DEADLINE: Duration = Duration::from_secs(10);
+/// Это и есть окно приёма, хотя окном нигде не называется: заполнилась
+/// очередь — задача разбора встала на ней, перестала читать сокет, и
+/// собеседник упёрся в окно TCP.
+///
+/// Сто двадцать восемь кусков — два мегабайта на поток в пределе и ноль, пока
+/// поток простаивает.
+const QUEUE: usize = 128;
+
+/// Сколько кадров ждут отправки, прежде чем пишущий начнёт притормаживать.
+///
+/// Число маленькое намеренно, и это не экономия памяти. Всё, что мы отдали
+/// ядру, стоит в очереди отправки и ждёт своей очереди в сети; чем длиннее
+/// эта очередь, тем позже уходит **следующий** кадр — чей угодно, хоть
+/// нажатия в ssh. Замер на живой линии: набив очередь на семьсот килобайт,
+/// мы подняли задержку соединения с девяноста пяти миллисекунд до
+/// четырёхсот двадцати. TCP считает скорость как окно, делённое на задержку,
+/// — то есть длинная очередь portит и то, и другое разом.
+///
+/// Шестнадцать кадров — это четверть мегабайта в полёте. Хватает, чтобы
+/// сокет не простаивал, и мало, чтобы очередь не превращалась в задержку.
+const OUTGOING: usize = 16;
 
 /// Как часто спрашивать собеседника, жив ли он.
 const PING_EVERY: Duration = Duration::from_secs(30);
@@ -174,13 +194,15 @@ pub enum Incoming {
 /// Сессия Pingwin.
 pub struct Session {
     role: Role,
-    writer: Mutex<RecordWriter<WriteHalf<Carrier>>>,
     /// Очереди потоков.
     streams: StdMutex<HashMap<u32, mpsc::Sender<Msg>>>,
     /// Очереди датаграммных каналов.
     datagrams: StdMutex<HashMap<u32, mpsc::Sender<(Bytes, SocketAddress)>>>,
-    /// Кто ждёт подтверждения открытия.
-    pending: StdMutex<HashMap<u32, oneshot::Sender<Result<(), String>>>>,
+    /// Кадры, ждущие отправки.
+    ///
+    /// Единственный путь наружу: сокетом владеет отдельная задача, и никто,
+    /// кроме неё, в него не пишет. Почему так — в документе [`write_loop`].
+    outgoing: mpsc::Sender<Vec<u8>>,
     /// Номер следующего потока. Нумерует только клиент.
     next_sid: AtomicU32,
     /// Почему сессия умерла. Пусто — жива.
@@ -239,12 +261,12 @@ impl Session {
         let reader = RecordReader::new(read_half, Cipher::new(algorithm, recv_key)?);
 
         let (incoming_tx, incoming_rx) = mpsc::channel(QUEUE);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(OUTGOING);
         let session = Arc::new(Self {
             role,
-            writer: Mutex::new(writer),
             streams: StdMutex::new(HashMap::new()),
             datagrams: StdMutex::new(HashMap::new()),
-            pending: StdMutex::new(HashMap::new()),
+            outgoing: outgoing_tx,
             next_sid: AtomicU32::new(FIRST_SID),
             death: StdMutex::new(None),
             last_seen: AtomicU64::new(0),
@@ -261,12 +283,17 @@ impl Session {
             let weak = Arc::downgrade(&session);
             async move { read_loop(weak, reader, incoming_tx, early).await }
         });
+        let writing = tokio::spawn({
+            let weak = Arc::downgrade(&session);
+            async move { write_loop(weak, writer, outgoing_rx).await }
+        });
         let pinging = tokio::spawn({
             let weak = Arc::downgrade(&session);
             async move { ping_loop(weak).await }
         });
         if let Ok(mut tasks) = session.tasks.lock() {
             tasks.push(reading);
+            tasks.push(writing);
             tasks.push(pinging);
         }
 
@@ -285,18 +312,25 @@ impl Session {
 
     /// Открывает поток до `target`. Только у клиента.
     ///
-    /// Ждёт подтверждения: без него ошибка «адрес недостижим» приехала бы не
-    /// вместо данных, а посреди них, и приложение приняло бы её за обрыв.
+    /// Подтверждения **не ждёт**. Раньше ждал — и это стоило целого оборота на
+    /// каждом соединении: приложение не могло послать ни байта, пока сервер не
+    /// сходит к цели и не ответит. На линии со ста миллисекундами задержки
+    /// открытие вкладки браузера теряло на этом секунду.
+    ///
+    /// Отказ от этого ничего не ломает: `OPEN_ERR` от сервера приезжает в ту
+    /// же очередь, что и данные, и превращается в ошибку первого же чтения или
+    /// записи — то есть приходит туда, где приложение и так проверяет исход.
+    /// Так же устроен любой мультиплексор, который не платит оборотом за
+    /// открытие: запрос и первые данные уезжают одной посылкой.
     pub async fn open_tcp(
         self: &Arc<Self>,
         target: &SocketAddress,
     ) -> PingwinResult<super::PingwinStream> {
         let sid = self.take_sid();
-        let (incoming, wait) = self.register_stream(sid);
+        let incoming = self.register_stream(sid);
         let mut request = Vec::new();
         socks::encode(target, &mut request)?;
         self.send(frame::OPEN, sid, &request).await?;
-        self.await_open(sid, wait, target).await?;
         Ok(super::PingwinStream::new(Arc::clone(self), sid, incoming))
     }
 
@@ -304,56 +338,53 @@ impl Session {
     ///
     /// Зовётся сразу после [`Self::start`] и **до** того, как сессию увидит
     /// кто-то ещё: иначе соседнее соединение успеет взять тот же номер, и два
-    /// потока станут делить одну очередь. Отдельным шагом, а не внутри
-    /// [`Self::adopt_early`], ровно поэтому — тот ждёт ответа сервера, и к
-    /// этому времени занимать номер уже поздно.
+    /// потока станут делить одну очередь.
     pub fn reserve(&self, sid: u32) {
         self.next_sid
             .fetch_max(sid.saturating_add(1), Ordering::Relaxed);
     }
 
     /// Заводит поток, чей `OPEN` уже уехал вместе с приветствием.
-    pub async fn adopt_early(
-        self: &Arc<Self>,
-        sid: u32,
-        target: &SocketAddress,
-    ) -> PingwinResult<super::PingwinStream> {
+    pub fn adopt_early(self: &Arc<Self>, sid: u32) -> super::PingwinStream {
         self.reserve(sid);
-        let (incoming, wait) = self.register_stream(sid);
-        self.await_open(sid, wait, target).await?;
-        Ok(super::PingwinStream::new(Arc::clone(self), sid, incoming))
+        let incoming = self.register_stream(sid);
+        super::PingwinStream::new(Arc::clone(self), sid, incoming)
     }
 
     /// Открывает датаграммный канал. Только у клиента.
+    ///
+    /// Подтверждения не ждёт — по той же причине, что и [`Self::open_tcp`].
     pub async fn open_udp(self: &Arc<Self>) -> PingwinResult<super::PingwinDatagram> {
         let sid = self.take_sid();
         let (tx, incoming) = mpsc::channel(QUEUE);
         if let Ok(mut datagrams) = self.datagrams.lock() {
             datagrams.insert(sid, tx);
         }
-        let wait = self.register_pending(sid);
         self.send(frame::UDP_BIND, sid, &[]).await?;
-        self.await_open(sid, wait, &SocketAddress::domain("udp", 0))
-            .await?;
         Ok(super::PingwinDatagram::new(Arc::clone(self), sid, incoming))
     }
 
-    /// Отправляет один кадр.
+    /// Ставит кадр в очередь на отправку.
+    ///
+    /// Сокета отсюда не видно: им владеет [`write_loop`], и это не украшение
+    /// архитектуры, а лечение конкретной ошибки. Пока запись шла прямо
+    /// отсюда, отменённая задача — брошенный поток, оборванная загрузка —
+    /// роняла `write_all` посреди записи, и на проводе оставалась её
+    /// половина. Дальше не сходилась метка **следующей** записи, и умирала
+    /// вся сессия: одно закрытое окно браузера обрывало все остальные.
+    ///
+    /// Постановка в очередь такой беды не знает: она либо случилась целиком,
+    /// либо не случилась вовсе.
     pub(crate) async fn send(&self, cmd: u8, sid: u32, data: &[u8]) -> PingwinResult<()> {
         if let Some(reason) = self.death_reason() {
             return Err(PingwinError::disconnected(reason));
         }
-        let mut frames = Vec::with_capacity(frame::HEADER_LEN + data.len());
-        frame::write(&mut frames, cmd, sid, data)?;
 
-        let mut writer = self.writer.lock().await;
-        match writer.write(&mut frames).await {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                self.die(err.to_string());
-                Err(err)
-            }
-        }
+        let framed = frame::encode(cmd, sid, data)?;
+        self.outgoing
+            .send(framed)
+            .await
+            .map_err(|_| PingwinError::disconnected("сессия закрылась"))
     }
 
     /// Убирает поток из таблиц. Зовётся при закрытии с обеих сторон.
@@ -363,9 +394,6 @@ impl Session {
         }
         if let Ok(mut datagrams) = self.datagrams.lock() {
             datagrams.remove(&sid);
-        }
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(&sid);
         }
     }
 
@@ -383,6 +411,11 @@ impl Session {
     }
 
     /// Закрывает сессию: гасит задачи и закрывает соединение.
+    ///
+    /// Соединение закрывается тем, что задачи бросают свои половины сокета:
+    /// обе половины исчезают — исчезает и сокет. Отдельного `shutdown` здесь
+    /// нет и быть не может, потому что писать в сокет отсюда некому: им
+    /// владеет [`write_loop`].
     pub async fn close(&self) {
         if self.closed.swap(true, Ordering::SeqCst) {
             return;
@@ -396,62 +429,18 @@ impl Session {
         for task in tasks {
             task.abort();
         }
-        let mut writer = self.writer.lock().await;
-        let _ = writer.shutdown().await;
     }
 
     fn take_sid(&self) -> u32 {
         self.next_sid.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn register_stream(
-        &self,
-        sid: u32,
-    ) -> (mpsc::Receiver<Msg>, oneshot::Receiver<Result<(), String>>) {
+    fn register_stream(&self, sid: u32) -> mpsc::Receiver<Msg> {
         let (tx, rx) = mpsc::channel(QUEUE);
         if let Ok(mut streams) = self.streams.lock() {
             streams.insert(sid, tx);
         }
-        (rx, self.register_pending(sid))
-    }
-
-    fn register_pending(&self, sid: u32) -> oneshot::Receiver<Result<(), String>> {
-        let (tx, rx) = oneshot::channel();
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(sid, tx);
-        }
         rx
-    }
-
-    async fn await_open(
-        &self,
-        sid: u32,
-        wait: oneshot::Receiver<Result<(), String>>,
-        target: &SocketAddress,
-    ) -> PingwinResult<()> {
-        match tokio::time::timeout(OPEN_DEADLINE, wait).await {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(reason))) => {
-                self.forget(sid);
-                Err(PingwinError::Refused {
-                    target: target.to_wire(),
-                    reason,
-                })
-            }
-            Ok(Err(_closed)) => {
-                self.forget(sid);
-                Err(PingwinError::disconnected(
-                    self.death_reason()
-                        .unwrap_or_else(|| "сессия закрылась".to_owned()),
-                ))
-            }
-            Err(_elapsed) => {
-                self.forget(sid);
-                Err(PingwinError::disconnected(
-                    "сервер не подтвердил открытие потока",
-                ))
-            }
-        }
     }
 
     fn death_reason(&self) -> Option<String> {
@@ -467,11 +456,6 @@ impl Session {
             Err(_) => return,
         }
 
-        if let Ok(mut pending) = self.pending.lock() {
-            for (_, waiting) in pending.drain() {
-                let _ = waiting.send(Err(reason.clone()));
-            }
-        }
         if let Ok(mut streams) = self.streams.lock() {
             for (_, queue) in streams.drain() {
                 let _ = queue.try_send(Msg::Failed(reason.clone()));
@@ -509,9 +493,15 @@ impl Session {
             frame::PING => self.reply_pong(),
             frame::OPEN => self.on_open(header.sid, body, incoming).await,
             frame::UDP_BIND => self.on_udp_bind(header.sid, incoming).await,
-            frame::OPEN_OK => self.answer_open(header.sid, Ok(())),
+            // Подтверждения никто не ждёт: поток отдан приложению сразу, а
+            // `OPEN_OK` — только знак, что цель ответила.
+            frame::OPEN_OK => {}
+            // Отказ приезжает туда же, куда приехали бы данные, и становится
+            // ошибкой первого же чтения.
             frame::OPEN_ERR => {
-                self.answer_open(header.sid, Err(String::from_utf8_lossy(body).into_owned()));
+                let reason = String::from_utf8_lossy(body).into_owned();
+                self.push(header.sid, Msg::Failed(reason)).await;
+                self.forget(header.sid);
             }
             frame::DATA => {
                 self.push(header.sid, Msg::Data(Bytes::copy_from_slice(body)))
@@ -615,17 +605,6 @@ impl Session {
         }
     }
 
-    fn answer_open(&self, sid: u32, answer: Result<(), String>) {
-        let waiting = self
-            .pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.remove(&sid));
-        if let Some(waiting) = waiting {
-            let _ = waiting.send(answer);
-        }
-    }
-
     /// Кладёт сообщение в очередь потока.
     ///
     /// Ждёт места намеренно (см. документ модуля): выбросить кусок потока —
@@ -650,6 +629,62 @@ impl Session {
     }
 }
 
+/// Единственный, кто пишет в сокет.
+///
+/// # Зачем отдельная задача
+///
+/// Ради двух вещей сразу, и первая — правильность. Запись, начатая прямо из
+/// потока приложения, отменяется вместе с ним: брошенная вкладка роняет
+/// `write_all` посреди записи, на проводе остаётся её половина, и у
+/// собеседника не сходится метка **следующей** записи. Одно закрытое окно
+/// обрывало всю сессию. Задача, которой никто не владеет, отмениться не может.
+///
+/// Вторая — скорость. Пока предыдущая запись уходит в сокет, кадры копятся, и
+/// следующая забирает их все разом. Нагрузка сама собирается в пачки ровно
+/// тогда, когда её много, и не добавляет ни миллисекунды ожидания, когда её
+/// мало: если в очереди один кадр, он уходит один.
+///
+/// Кадр при этом не режется границей записи — разбор внутри записи идёт кадр
+/// за кадром, и половина кадра в конце для него обрыв, а не «конец пачки».
+async fn write_loop(
+    session: Weak<Session>,
+    mut writer: RecordWriter<WriteHalf<Carrier>>,
+    mut outgoing: mpsc::Receiver<Vec<u8>>,
+) {
+    let mut batch: Vec<u8> = Vec::with_capacity(record::MAX_PLAIN);
+    // Кадр, который не влез в предыдущую пачку и открывает следующую.
+    let mut carry: Option<Vec<u8>> = None;
+
+    loop {
+        let first = match carry.take() {
+            Some(frame) => frame,
+            None => match outgoing.recv().await {
+                Some(frame) => frame,
+                None => break,
+            },
+        };
+
+        batch.clear();
+        batch.extend_from_slice(&first);
+        while let Ok(next) = outgoing.try_recv() {
+            if batch.len() + next.len() > record::MAX_PLAIN {
+                carry = Some(next);
+                break;
+            }
+            batch.extend_from_slice(&next);
+        }
+
+        if let Err(err) = writer.write(&mut batch).await {
+            if let Some(session) = session.upgrade() {
+                session.die(err.to_string());
+            }
+            return;
+        }
+    }
+
+    let _ = writer.shutdown().await;
+}
+
 async fn read_loop(
     session: Weak<Session>,
     mut reader: RecordReader<ReadHalf<Carrier>>,
@@ -669,7 +704,18 @@ async fn read_loop(
             return;
         };
         match record {
-            Ok(plain) => alive.dispatch_record(&plain, &incoming).await,
+            Ok(plain) => {
+                // Отметка живости ставится **до** разбора, а не внутри него.
+                // Разбор умеет ждать: очередь потока, из которого приложение
+                // читает медленно, придерживает его сколько угодно долго. Со
+                // старой отметкой такое ожидание выглядело молчанием
+                // собеседника, и проверка живости убивала сессию посреди
+                // работающей загрузки.
+                alive
+                    .last_seen
+                    .store(alive.born.elapsed().as_secs(), Ordering::Relaxed);
+                alive.dispatch_record(&plain, &incoming).await;
+            }
             Err(err) => {
                 alive.die(err.to_string());
                 return;

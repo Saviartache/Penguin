@@ -184,6 +184,156 @@ async fn the_second_stream_reuses_the_same_session() {
     assert_eq!(&two, b"two");
 }
 
+/// Сколько байт перекачивает один поток за секунду на петле.
+///
+/// Печатается, а не проверяется порогом: цифра зависит от машины, и падающий
+/// на чужом ноутбуке тест — худший способ следить за скоростью. Смотреть на
+/// неё стоит после каждой правки пути данных: на петле она измеряет наш код и
+/// ничего больше.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn how_fast_one_stream_goes_on_loopback() {
+    const BYTES: usize = 64 * 1024 * 1024;
+
+    let sink = start_sink().await;
+    let (server, key, _running) = start_server(None).await;
+    let client = client(server, &key, true);
+
+    let mut stream = client
+        .connect_tcp(&SocketAddress::ip(sink.ip(), sink.port()))
+        .await
+        .expect("поток открылся");
+
+    let chunk = vec![0x5Au8; 256 * 1024];
+    let started = std::time::Instant::now();
+    let mut sent = 0;
+    while sent < BYTES {
+        stream.write_all(&chunk).await.expect("записалось");
+        sent += chunk.len();
+    }
+    stream.flush().await.expect("сбросилось");
+    let took = started.elapsed();
+
+    let speed = sent as f64 / took.as_secs_f64() / 1_000_000.0;
+    println!("    скорость одного потока на петле: {speed:.0} МБ/с");
+    assert!(
+        speed > 1.0,
+        "меньше мегабайта в секунду на петле — это поломка"
+    );
+}
+
+/// То же самое в обратную сторону: скачивание.
+///
+/// Путь у него другой — задача разбора, очередь потока, `poll_read`, — и
+/// мерить надо оба: отдача может летать, пока приём стоит.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn how_fast_one_stream_downloads_on_loopback() {
+    const BYTES: usize = 64 * 1024 * 1024;
+
+    let source = start_source(BYTES).await;
+    let (server, key, _running) = start_server(None).await;
+    let client = client(server, &key, true);
+
+    let mut stream = client
+        .connect_tcp(&SocketAddress::ip(source.ip(), source.port()))
+        .await
+        .expect("поток открылся");
+    stream.write_all(b"go").await.expect("записалось");
+
+    let started = std::time::Instant::now();
+    let mut buffer = vec![0u8; 256 * 1024];
+    let mut got = 0;
+    while got < BYTES {
+        match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => got += read,
+        }
+    }
+    let took = started.elapsed();
+
+    let speed = got as f64 / took.as_secs_f64() / 1_000_000.0;
+    println!(
+        "    скорость скачивания на петле: {speed:.0} МБ/с ({} МБ)",
+        got / 1_000_000
+    );
+    assert!(
+        speed > 1.0,
+        "меньше мегабайта в секунду на петле — это поломка"
+    );
+}
+
+/// Сервер, который на любой запрос выливает `bytes` байт.
+async fn start_source(bytes: usize) -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
+    let addr = listener.local_addr().expect("адрес");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut hello = [0u8; 8];
+                let _ = socket.read(&mut hello).await;
+                let chunk = vec![0x5Au8; 256 * 1024];
+                let mut sent = 0;
+                while sent < bytes {
+                    if socket.write_all(&chunk).await.is_err() {
+                        return;
+                    }
+                    sent += chunk.len();
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Сервер, который читает и выбрасывает: мерить скорость эхо мешает.
+async fn start_sink() -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
+    let addr = listener.local_addr().expect("адрес");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 256 * 1024];
+                while socket.read(&mut buffer).await.is_ok_and(|read| read > 0) {}
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_streams_at_once_do_not_scramble_the_records() {
+    // Записи шифруются считаемым нонсом: порядок, в котором они уходят в
+    // сокет, обязан совпадать с порядком, в котором их запечатали. Стоит
+    // двум потокам разъехаться — и метка не сойдётся, а сессия умрёт целиком.
+    // Проверка нагружает запись с четырёх сторон разом: по одному потоку эта
+    // ошибка не воспроизводится никогда.
+    let echo = start_echo().await;
+    let (server, key, _running) = start_server(None).await;
+    let client = Arc::new(client(server, &key, true));
+    let target = SocketAddress::ip(echo.ip(), echo.port());
+
+    let mut tasks = Vec::new();
+    for index in 0u8..8 {
+        let client = Arc::clone(&client);
+        let target = target.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut stream = client.connect_tcp(&target).await.expect("поток открылся");
+            // Куски разной длины, и заведомо больше одной записи: короткие
+            // сложились бы в одну и скрыли бы как раз то, что проверяется.
+            let payload = vec![index; 200_000 + usize::from(index) * 3000];
+            for _ in 0..8 {
+                stream.write_all(&payload).await.expect("записалось");
+                let mut answer = vec![0u8; payload.len()];
+                stream.read_exact(&mut answer).await.expect("прочиталось");
+                assert_eq!(answer, payload, "поток {index} получил чужие байты");
+            }
+        }));
+    }
+
+    for task in tasks {
+        task.await.expect("поток отработал без паники");
+    }
+}
+
 #[tokio::test]
 async fn a_stream_works_without_early_data_too() {
     // 0-RTT можно выключить: рукопожатие тогда обычное, в один оборот.
@@ -225,9 +375,11 @@ async fn a_datagram_goes_out_and_comes_back() {
 }
 
 #[tokio::test]
-async fn an_unreachable_target_is_refused_by_name() {
-    // Отказ обязан прийти отказом, а не молчанием: иначе приложение сочтёт
-    // его обрывом и будет пробовать снова.
+async fn an_unreachable_target_says_so_on_the_first_read() {
+    // Поток открывается сразу, не дожидаясь ответа сервера: за подтверждение
+    // пришлось бы платить оборотом на каждом соединении. Отказ поэтому
+    // приезжает туда же, куда приехали бы данные, — в первое чтение. Молчания
+    // здесь быть не должно: приложение сочло бы его обрывом и пробовало снова.
     let (server, key, _running) = start_server(None).await;
     let client = client(server, &key, true);
 
@@ -236,15 +388,21 @@ async fn an_unreachable_target_is_refused_by_name() {
     let addr = closed.local_addr().expect("адрес");
     drop(closed);
 
-    let answer = client
+    let mut stream = client
         .connect_tcp(&SocketAddress::ip(addr.ip(), addr.port()))
-        .await;
-    let Err(err) = answer else {
-        panic!("поток открылся до закрытого порта");
-    };
+        .await
+        .expect("поток открывается не дожидаясь ответа");
+
+    let mut answer = [0u8; 64];
+    let err = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut answer))
+        .await
+        .expect("отказ не пришёл за десять секунд")
+        .expect_err("цели нет, чтения быть не может");
     assert!(
-        matches!(err, ProtocolError::Unreachable(_)),
-        "ожидали «недостижим», получили {err:?}"
+        err.to_string().contains("отказ")
+            || err.to_string().contains("refused")
+            || err.to_string().contains("Connection refused"),
+        "причина отказа потерялась: {err}"
     );
 }
 

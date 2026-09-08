@@ -11,7 +11,7 @@
 //! договариваться о нём между всеми, кто пишет в сессию, — а пишут в неё все
 //! потоки сразу.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use penguin_transport::aead::Cipher;
 
@@ -19,16 +19,26 @@ use crate::error::{PingwinError, PingwinResult};
 use crate::wire::padding::{self, Padding};
 use crate::wire::record;
 
+/// Сколько читать из сокета за раз.
+///
+/// Без буфера каждая запись — это два системных вызова (заголовок и тело), и
+/// на быстрой загрузке их получаются десятки тысяч в секунду. Четыре записи
+/// за раз — это одно чтение вместо восьми.
+const READ_BUFFER: usize = 4 * record::MAX_BODY;
+
 /// Читающая половина.
 pub struct RecordReader<R> {
-    io: R,
+    io: BufReader<R>,
     cipher: Cipher,
 }
 
 impl<R: AsyncRead + Unpin> RecordReader<R> {
     /// Оборачивает читающую половину соединения.
     pub fn new(io: R, cipher: Cipher) -> Self {
-        Self { io, cipher }
+        Self {
+            io: BufReader::with_capacity(READ_BUFFER, io),
+            cipher,
+        }
     }
 
     /// Читает следующую запись данных и расшифровывает её.

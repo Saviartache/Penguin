@@ -1,10 +1,17 @@
-//! Направление: одна сессия на профиль, потоки внутри неё.
+//! Направление: несколько несущих соединений, потоки внутри них.
 //!
-//! # Почему сессия одна
+//! # Почему несущих несколько, а не одна
 //!
-//! Рукопожатие стоит одного оборота, а вкладок в браузере — сотня. Поднимать
-//! соединение на каждую значило бы платить этот оборот сто раз и показать
-//! наблюдателю сто одинаковых приветствий подряд — приметы яснее не бывает.
+//! Одна была бы дешевле: рукопожатие платится один раз, а вкладок в браузере
+//! сотня. Но у одного соединения TCP одно окно перегрузки и одна история
+//! потерь на всех. Замер на живой линии: несущая, однажды поймавшая потери,
+//! оседала на `cwnd` в сто сорок сегментов и держала четверть того, что та же
+//! линия давала свежему соединению, — и вытащить её оттуда нечем, пока она
+//! жива. Четыре несущих дают четыре независимых окна: беда одной не
+//! останавливает остальные.
+//!
+//! Больше четырёх — уже приметно: сто одинаковых приветствий подряд видно
+//! не хуже, чем один странный протокол.
 //!
 //! # Что происходит с первым потоком
 //!
@@ -13,11 +20,11 @@
 //! свойство, которого нет ни у одного протокола поверх TLS: до первого байта
 //! ответа проходит один оборот, а не три.
 //!
-//! Сессия, умершая по любой причине, здесь не воскрешается: она пересоздаётся
-//! на следующем же соединении. Решать, когда пробовать снова, — дело
-//! `supervisor`, а не протокола.
+//! Умершая несущая здесь не воскрешается: она выбрасывается из списка, а на
+//! её месте поднимается новая — на следующем же соединении.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use penguin_core::address::{Address, SocketAddress};
@@ -52,10 +59,29 @@ pub struct PingwinOutbound {
     cover: Address,
     algorithm: Algorithm,
     desync: Desync,
-    /// Живая сессия. Замок держится на время рукопожатия: без него сотня
-    /// разом стартовавших соединений подняла бы сотню сессий.
-    session: Mutex<Option<Arc<Session>>>,
+    /// Живые несущие. Мёртвые выбрасываются при первом же обращении.
+    sessions: Mutex<Vec<Arc<Session>>>,
+    /// Сколько несущих поднимается прямо сейчас.
+    ///
+    /// Без этого счётчика сотня соединений, стартовавших разом, увидела бы
+    /// пустой список и подняла бы сотню несущих вместо четырёх.
+    building: AtomicUsize,
 }
+
+/// Сколько несущих держать на профиль.
+///
+/// Четыре — это четыре независимых окна перегрузки и заметный запас против
+/// потерь на одной из них. Пятая уже не окупается: выигрыш падает, а
+/// одинаковых приветствий к серверу становится больше, чем бывает у браузера.
+const CARRIERS: usize = 4;
+
+/// Со скольких потоков несущая считается занятой.
+///
+/// Восемь — примерно столько соединений браузер открывает к одному сайту.
+/// Меньше — и пул рос бы на ровном месте, платя рукопожатием там, где хватило
+/// бы готовой несущей; больше — и вся страница ехала бы через одно окно
+/// перегрузки.
+const STREAMS_PER_CARRIER: usize = 8;
 
 impl std::fmt::Debug for PingwinOutbound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,39 +112,71 @@ impl PingwinOutbound {
             dialer,
             host,
             port,
-            session: Mutex::new(None),
+            sessions: Mutex::new(Vec::new()),
+            building: AtomicUsize::new(0),
         })
     }
 
-    /// Живая сессия, если она есть.
-    async fn live(&self) -> Option<Arc<Session>> {
-        let session = self.session.lock().await;
-        session
-            .as_ref()
-            .filter(|session| !session.is_dead())
+    /// Наименее загруженная живая несущая; заодно выбрасывает мёртвые.
+    async fn pick(&self) -> Option<Arc<Session>> {
+        let mut sessions = self.sessions.lock().await;
+        sessions.retain(|session| !session.is_dead());
+        sessions
+            .iter()
+            .min_by_key(|session| session.stream_count())
             .map(Arc::clone)
     }
 
-    /// Поднимает новую сессию, увозя `first` вместе с приветствием.
+    /// Стоит ли поднимать ещё одну несущую.
     ///
-    /// Возвращает сессию и — если `first` был назван — уже открытый поток.
+    /// Не «пока их меньше четырёх», а «пока имеющиеся заняты». Разница в целом
+    /// обороте: вторая вкладка браузера, открытая сразу за первой, должна
+    /// уехать по уже поднятой несущей за микросекунды, а не платить своим
+    /// рукопожатием. Новая заводится только тогда, когда на самой свободной
+    /// уже [`STREAMS_PER_CARRIER`] потоков, — то есть когда нагрузка правда
+    /// есть.
+    ///
+    /// Считаются и те, что сейчас поднимаются: без этого сотня соединений,
+    /// стартовавших разом, увидела бы пустой список и подняла бы сотню
+    /// несущих.
+    async fn wants_more(&self) -> bool {
+        let (live, busiest_is_loaded) = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.retain(|session| !session.is_dead());
+            let freest = sessions
+                .iter()
+                .map(|session| session.stream_count())
+                .min()
+                .unwrap_or(usize::MAX);
+            (sessions.len(), freest >= STREAMS_PER_CARRIER)
+        };
+
+        if live + self.building.load(Ordering::Relaxed) >= CARRIERS {
+            return false;
+        }
+        live == 0 || busiest_is_loaded
+    }
+
+    /// Поднимает несущую, увозя `first` вместе с приветствием.
     async fn establish(
         &self,
         first: Option<&SocketAddress>,
     ) -> PingwinResult<(Arc<Session>, Option<PingwinStream>)> {
-        let mut slot = self.session.lock().await;
+        self.building.fetch_add(1, Ordering::Relaxed);
+        let raised = self.raise(first).await;
+        self.building.fetch_sub(1, Ordering::Relaxed);
 
-        // Пока ждали замок, сессию мог поднять кто-то другой.
-        if let Some(session) = slot.as_ref().filter(|session| !session.is_dead()) {
-            let session = Arc::clone(session);
-            drop(slot);
-            let stream = match first {
-                Some(target) => Some(session.open_tcp(target).await?),
-                None => None,
-            };
-            return Ok((session, stream));
-        }
+        let (session, stream) = raised?;
+        self.sessions.lock().await.push(Arc::clone(&session));
+        Ok((session, stream))
+    }
 
+    /// Само рукопожатие. Отдельно от [`Self::establish`] затем, чтобы счётчик
+    /// строящихся уменьшался при любом исходе, включая ошибку.
+    async fn raise(
+        &self,
+        first: Option<&SocketAddress>,
+    ) -> PingwinResult<(Arc<Session>, Option<PingwinStream>)> {
         let early = match (self.config.zero_rtt, first) {
             (true, Some(target)) => Some(Session::early_open(target)?),
             _ => None,
@@ -128,6 +186,20 @@ impl PingwinOutbound {
         let mut tcp = penguin_proto::connect::dial(self.dialer.as_ref(), &self.host, self.port)
             .await
             .map_err(|err| PingwinError::disconnected(err.to_string()))?;
+
+        // Без этого ядро придерживает мелкие посылки, ожидая, что за ними
+        // придут ещё (алгоритм Нейгла), а собеседник придерживает
+        // подтверждение, ожидая данных в ответ. На разговоре «запрос — ответ»
+        // эти два ожидания встречаются и дают сорок миллисекунд простоя на
+        // каждом обмене. Мультиплексору такое противопоказано: у него посылка
+        // — это кадр, и кадры почти всегда мелкие.
+        //
+        // Раньше это делалось только при включённом обходе DPI — там `NODELAY`
+        // нужен, чтобы куски не склеились, — и потому обычный профиль работал
+        // заметно медленнее профиля с обходом. Смешнее ошибки не придумаешь.
+        if let Err(err) = tcp.set_nodelay(true) {
+            tracing::debug!(%err, "не вышло выключить склейку мелких посылок");
+        }
 
         let established = deadline::handshake("рукопожатие pingwin", async {
             handshake::connect(
@@ -154,33 +226,29 @@ impl PingwinOutbound {
             established.algorithm,
             None,
         )?;
-        // Номер первого потока занимается **до** того, как сессию увидит
-        // кто-то ещё: соседнее соединение, дождавшееся замка, иначе взяло бы
-        // тот же номер — кадр `OPEN` для него уже уехал, а очередь ещё не
-        // заведена.
+        // Номер первого потока занимается до того, как сессию увидит кто-то
+        // ещё: кадр `OPEN` для него уже уехал, а очередь ещё не заведена.
         if let Some((sid, _)) = &early {
             session.reserve(*sid);
         }
-        *slot = Some(Arc::clone(&session));
-        drop(slot);
 
         tracing::debug!(
             server = %self.config.server,
             zero_rtt = established.early_sent,
-            "сессия pingwin поднята"
+            "несущая pingwin поднята"
         );
 
         let stream = match (early, first) {
-            (Some((sid, _)), Some(target)) => Some(session.adopt_early(sid, target).await?),
+            (Some((sid, _)), Some(_)) => Some(session.adopt_early(sid)),
             (None, Some(target)) => Some(session.open_tcp(target).await?),
             _ => None,
         };
         Ok((session, stream))
     }
 
-    /// Сессия для операции, которой первый поток не нужен.
+    /// Несущая для операции, которой первый поток не нужен.
     async fn session(&self) -> PingwinResult<Arc<Session>> {
-        if let Some(session) = self.live().await {
+        if let Some(session) = self.pick().await {
             return Ok(session);
         }
         Ok(self.establish(None).await?.0)
@@ -212,12 +280,24 @@ impl Outbound for PingwinOutbound {
         &self,
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
-        if let Some(session) = self.live().await {
+        // Пока несущих меньше, чем нужно, каждое новое соединение поднимает
+        // ещё одну — и уезжает на ней первым потоком, вместе с приветствием.
+        // Так пул набирается ровно тогда, когда нагрузка появилась, и не
+        // стоит ни одного лишнего оборота: без пула этот поток всё равно ждал
+        // бы рукопожатия.
+        if self.wants_more().await {
+            let (_, stream) = self.establish(Some(target)).await?;
+            let stream = stream.ok_or_else(|| {
+                PingwinError::disconnected("несущая поднялась без запрошенного потока")
+            })?;
+            return Ok(Box::new(stream));
+        }
+
+        if let Some(session) = self.pick().await {
             match session.open_tcp(target).await {
                 Ok(stream) => return Ok(Box::new(stream)),
-                // Сессия умерла между проверкой и попыткой — обычное дело
-                // после долгого простоя. Поднимаем новую и пробуем ещё раз;
-                // если и она не поднялась, ошибка уедет наверх как есть.
+                // Несущая умерла между выбором и попыткой — обычное дело
+                // после долгого простоя. Поднимаем новую и пробуем ещё раз.
                 Err(_) if session.is_dead() => {}
                 Err(err) => return Err(err.into()),
             }
@@ -225,7 +305,7 @@ impl Outbound for PingwinOutbound {
 
         let (_, stream) = self.establish(Some(target)).await?;
         let stream = stream.ok_or_else(|| {
-            PingwinError::disconnected("сессия поднялась без запрошенного потока")
+            PingwinError::disconnected("несущая поднялась без запрошенного потока")
         })?;
         Ok(Box::new(stream))
     }
@@ -236,8 +316,8 @@ impl Outbound for PingwinOutbound {
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        let session = self.session.lock().await.take();
-        if let Some(session) = session {
+        let sessions = std::mem::take(&mut *self.sessions.lock().await);
+        for session in sessions {
             session.close().await;
         }
         Ok(())
