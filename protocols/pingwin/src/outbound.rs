@@ -29,7 +29,7 @@
 //! её месте поднимается новая — на следующем же соединении.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -65,7 +65,13 @@ pub struct PingwinOutbound {
     server_public: [u8; 32],
     cover: Address,
     algorithm: Algorithm,
+    /// Обход DPI, если его выбрал человек.
     desync: Desync,
+    /// Он же на случай, когда человек ничего не выбрал, а путь до сервера
+    /// разбирают: ложная посылка впереди настоящего приветствия.
+    fallback: Desync,
+    /// Выяснилось, что без обхода не проходит. Ставится один раз и навсегда.
+    forced: AtomicBool,
     /// Живые несущие. Мёртвые выбрасываются при первом же обращении.
     sessions: Mutex<Vec<Arc<Session>>>,
     /// Сколько несущих поднимается прямо сейчас.
@@ -98,6 +104,21 @@ const STREAMS_PER_CARRIER: usize = 8;
 /// на «Проверить».
 const RTT_LIMIT: Duration = Duration::from_secs(5);
 
+/// Стоит ли пробовать ещё раз, но с ложной посылкой.
+///
+/// Только те отказы, которые бывают от вмешательства по дороге: молчание,
+/// обрыв, ошибка сокета. Не тот пароль или не тот ключ сюда не попадают —
+/// обходом DPI они не лечатся.
+fn worth_retrying(err: &PingwinError) -> bool {
+    match err {
+        PingwinError::Disconnected(_) | PingwinError::Io(_) => true,
+        PingwinError::Transport(err) => {
+            matches!(err, penguin_transport::TransportError::Timeout(_))
+        }
+        _ => false,
+    }
+}
+
 impl std::fmt::Debug for PingwinOutbound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PingwinOutbound")
@@ -122,6 +143,8 @@ impl PingwinOutbound {
             cover: config.cover_name()?,
             algorithm: config.algorithm()?,
             desync: config.desync()?,
+            fallback: PingwinConfig::rescue_desync()?,
+            forced: AtomicBool::new(false),
             id,
             config,
             dialer,
@@ -200,8 +223,60 @@ impl PingwinOutbound {
 
     /// Само рукопожатие. Отдельно от [`Self::establish`] затем, чтобы счётчик
     /// строящихся уменьшался при любом исходе, включая ошибку.
+    /// Поднимает несущую, а если её задушили по дороге — пробует ещё раз с
+    /// ложной посылкой.
+    ///
+    /// Ровно эта проверка на живой линии и понадобилась: TCP до сервера
+    /// доходит, прикрытие отвечает `200`, а наше приветствие TLS до сервера не
+    /// добирается — оборудование провайдера разбирает его и рвёт соединение.
+    /// Ложное приветствие впереди настоящего это лечит
+    /// ([`penguin_transport::desync`]).
+    ///
+    /// Пробуется это только тогда, когда обход **не** выбран человеком. Выбрал
+    /// — значит знает свою сеть лучше, и подменять его выбор нельзя. Узнав, что
+    /// без обхода не проходит, направление запоминает это на всю свою жизнь:
+    /// платить лишней попыткой на каждой несущей незачем.
+    ///
+    /// Отказ опознания сюда не попадает: не тот пароль обходом DPI не лечится,
+    /// и вторая попытка только удвоила бы ожидание.
     async fn raise(
         &self,
+        first: Option<&SocketAddress>,
+    ) -> PingwinResult<(Arc<Session>, Option<PingwinStream>)> {
+        if self.forced.load(Ordering::Relaxed) {
+            return self.raise_with(&self.fallback, first).await;
+        }
+
+        let failure = match self.raise_with(&self.desync, first).await {
+            Ok(raised) => return Ok(raised),
+            Err(err) => err,
+        };
+
+        if !self.desync.is_disabled() || !worth_retrying(&failure) {
+            return Err(failure);
+        }
+
+        tracing::info!(
+            %failure,
+            "рукопожатие не прошло — пробуем с ложной посылкой"
+        );
+        match self.raise_with(&self.fallback, first).await {
+            Ok(raised) => {
+                self.forced.store(true, Ordering::Relaxed);
+                tracing::info!(
+                    "путь до сервера разбирают по дороге: дальше идём с ложной посылкой"
+                );
+                Ok(raised)
+            }
+            // Не помогло — наверх уходит первая ошибка: она про настройки и
+            // сеть, а вторая — про обход, которого человек не просил.
+            Err(_) => Err(failure),
+        }
+    }
+
+    async fn raise_with(
+        &self,
+        desync: &Desync,
         first: Option<&SocketAddress>,
     ) -> PingwinResult<(Arc<Session>, Option<PingwinStream>)> {
         let early = match (self.config.zero_rtt, first) {
@@ -237,7 +312,7 @@ impl PingwinOutbound {
                     cover: &self.cover,
                     fingerprint: self.config.fingerprint,
                     algorithm: self.algorithm,
-                    desync: &self.desync,
+                    desync,
                     early: early_frames.as_deref().unwrap_or_default(),
                 },
             )

@@ -489,6 +489,57 @@ async fn a_server_that_does_not_answer_is_reported_at_connect_time() {
 }
 
 #[tokio::test]
+async fn a_hello_killed_on_the_way_is_retried_with_a_decoy() {
+    // Так это и выглядело на живой линии: TCP до сервера доходит, прикрытие
+    // отвечает, а наше приветствие рвут по дороге. Направление обязано
+    // догадаться само — иначе человек видит «не работает» и ничего больше.
+    let killer = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
+    let addr = killer.local_addr().expect("адрес");
+    let flights = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+
+    let seen = Arc::clone(&flights);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = killer.accept().await {
+            let seen = Arc::clone(&seen);
+            tokio::spawn(async move {
+                // Ждём первую посылку и считаем в ней приветствия: одно —
+                // обычная попытка, два — попытка с ложным впереди.
+                let mut buffer = vec![0u8; 64 * 1024];
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let read = socket.read(&mut buffer).await.unwrap_or(0);
+                let hellos = buffer[..read]
+                    .windows(3)
+                    .filter(|head| head[0] == 0x16 && head[1] == 0x03 && head[2] == 0x01)
+                    .count();
+                if let Ok(mut seen) = seen.lock() {
+                    seen.push(hellos);
+                }
+                // И рвём — как это делает оборудование по дороге.
+                drop(socket);
+            });
+        }
+    });
+
+    let config = PingwinConfig {
+        server: addr.to_string(),
+        key: penguin_core::base64::encode(&[7u8; 32]),
+        password: "secret".to_owned(),
+        ..PingwinConfig::default()
+    };
+    let client = PingwinOutbound::new(OutboundId::new("test"), config, Arc::new(Direct))
+        .expect("направление собирается");
+
+    // Обе попытки провалятся — сервера там нет вовсе; проверяем не исход, а
+    // то, что вторая попытка была и была с ложным приветствием.
+    let _ = client.warm_up().await;
+
+    let seen = flights.lock().expect("замок").clone();
+    assert_eq!(seen.len(), 2, "второй попытки не было: {seen:?}");
+    assert_eq!(seen[0], 1, "в первой попытке ложное приветствие лишнее");
+    assert_eq!(seen[1], 2, "во второй попытке нет ложного приветствия");
+}
+
+#[tokio::test]
 async fn a_wrong_password_does_not_connect() {
     let (server, key, _running) = start_server(None).await;
     let config = PingwinConfig {
