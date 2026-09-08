@@ -11,9 +11,10 @@
 //!   именем программы — имя стоит в заголовке окна, и второй раз его читать
 //!   незачем;
 //! - под ней состояние — словом и цветом;
-//! - дальше график: он забирает всю высоту, не занятую текстом. Раньше на этом
-//!   месте была пустота — та самая, из-за которой окно выглядело недозаполненным;
-//! - над графиком его подпись, под ним его цифры: скорость приёма и отдачи,
+//! - дальше поток данных: он забирает всю высоту, не занятую текстом. Раньше на
+//!   этом месте была пустота — та самая, из-за которой окно выглядело
+//!   недозаполненным;
+//! - над потоком его подпись, под ним его цифры: скорость приёма и отдачи,
 //!   число соединений. Ими консоль и заканчивается, у самого нижнего края.
 //!
 //! Конфигурация и трафик показываются вместе, а не по очереди: переключение
@@ -21,12 +22,13 @@
 
 use iced::Element;
 use iced::widget::text;
+use penguin_core::state::TunnelState;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
 use uikit::style::tokens::type_scale;
 use uikit::widgets::Button;
 
 use crate::app::message::{HomeMessage, Message};
-use crate::app::state::{GRAPH_POINTS, State};
+use crate::app::state::State;
 use crate::console::{self, Line, Reveal};
 use crate::screens::tunnel::{Tone, describe, describe_button};
 
@@ -43,6 +45,12 @@ const BUTTON_HEIGHT: f32 = 40.0;
 /// единственная строка, где ровный край консоли ломался (см.
 /// [`crate::console`], правило про глифы).
 const NONE: &str = "-";
+
+/// Ход потока у поднятого тоннеля, который сейчас молчит.
+///
+/// Пятая часть полного: движение должно быть заметно — тоннель поднят, — но так,
+/// чтобы первый же обмен было видно как ускорение, а не как «что-то изменилось».
+const IDLE_FLOW: f32 = 0.2;
 
 /// Собирает компактный экран.
 pub fn view(state: &State) -> Element<'_, Message> {
@@ -63,34 +71,44 @@ fn screen(state: &State) -> Element<'_, Message> {
     let mut lines = config(state);
 
     lines.push(status(state));
-    // Заголовок раздела стоит над графиком и служит ему подписью: цифры под ним
-    // и так читаются как его же. График забирает всю высоту, которую не занял
+    // Заголовок раздела стоит над потоком и служит ему подписью: цифры под ним
+    // и так читаются как его же. Поток забирает всю высоту, которую не занял
     // текст, — он же и прижимает цифры к нижнему краю.
     lines.push(Line::Section(crate::i18n::s().traffic.to_uppercase()));
-    lines.push(Line::Graph(history(state)));
+    lines.push(Line::Stream(load(state)));
     lines.extend(traffic(state));
 
     console::console(&state.palette, &lines, reveal(state))
 }
 
-/// История скорости долями от наибольшей — столбик на отсчёт.
+/// Загрузка потока: свежая скорость долей от наибольшей за окно истории.
 ///
-/// Дополняется нулями слева до полной длины истории: без этого первые полминуты
-/// после подключения график рос бы вправо, растягивая каждый столбик на треть
-/// окна, а его высота ничего не значила бы — она считается от наибольшего
-/// отсчёта, а не от края.
-fn history(state: &State) -> Vec<f32> {
+/// Состояний ровно два. Тоннель не поднят — ноль: полотно стоит и только
+/// переливается, говоря лишь то, что окно живо. Поднят — полотно идёт, и тем
+/// быстрее, чем плотнее сейчас обмен.
+///
+/// Поэтому у поднятого тоннеля есть свой пол ([`IDLE_FLOW`]): молчащий тоннель
+/// — это всё-таки поднятый тоннель, и стоять его полотно не должно.
+///
+/// Шкала — наибольший отсчёт окна, а не предел канала: предела никто не знает,
+/// и доля от него была бы долей от выдуманного числа.
+///
+/// Ноль берётся из состояния, а не из последнего отсчёта: когда тоннель падает,
+/// новых замеров больше не приходит, и в истории так и остаётся последняя
+/// ненулевая скорость — поток разогнался бы на связи, которой уже нет.
+fn load(state: &State) -> f32 {
     let connection = &state.connection;
-    let scale = connection.graph_scale() as f32;
+    if !matches!(connection.tunnel_now(), TunnelState::Connected { .. }) {
+        return 0.0;
+    }
 
-    let mut points = vec![0.0; GRAPH_POINTS.saturating_sub(connection.graph.len())];
-    points.extend(
-        connection
-            .graph
-            .iter()
-            .map(|point| point.up_bps.max(point.down_bps) as f32 / scale),
-    );
-    points
+    let scale = connection.graph_scale() as f32;
+    let rate = connection
+        .graph
+        .back()
+        .map_or(0.0, |point| point.up_bps.max(point.down_bps) as f32 / scale);
+
+    IDLE_FLOW + (1.0 - IDLE_FLOW) * rate
 }
 
 /// Что печатается при первом открытии, а дальше показывается целиком.
@@ -141,9 +159,9 @@ fn config(state: &State) -> Vec<Line> {
     ]
 }
 
-/// Цифры под графиком.
+/// Цифры под потоком.
 ///
-/// Заголовка раздела здесь нет: график над ними — и есть заголовок, а строка с
+/// Заголовка раздела здесь нет: поток над ними — и есть заголовок, а строка с
 /// чертой отняла бы у него высоту ни за что.
 fn traffic(state: &State) -> Vec<Line> {
     let strings = crate::i18n::s();
@@ -293,41 +311,98 @@ mod tests {
     }
 
     #[test]
-    fn the_graph_gets_a_column_per_sample_of_history() {
-        // Столбиков всегда столько, сколько отсчётов держит окно: иначе первые
-        // полминуты после подключения каждый растягивался бы на треть окна.
-        let state = State::default();
-        assert_eq!(history(&state).len(), GRAPH_POINTS);
+    fn a_stream_without_a_tunnel_stays_at_rest() {
+        // Когда тоннель падает, новых замеров больше не приходит, и в истории
+        // остаётся последняя ненулевая скорость: без этой проверки поток
+        // разогнался бы на связи, которой уже нет.
+        let mut state = State::default();
+        state.connection.apply_throughput(
+            penguin_core::stats::Throughput {
+                up_bps: 5_000,
+                down_bps: 0,
+            },
+            penguin_core::stats::Traffic::default(),
+            0,
+        );
 
-        let mut state = state;
-        for step in 0..GRAPH_POINTS as u64 * 2 {
+        assert_eq!(load(&state), 0.0, "тоннеля нет — полотно стоит");
+
+        state.connection.online = true;
+        state.connection.set_tunnel(TunnelState::Connected {
+            profile: ProfileId::new("home"),
+            uptime_secs: 1,
+        });
+        assert_eq!(load(&state), 1.0, "тоннель поднят — идёт обмен");
+    }
+
+    #[test]
+    fn a_silent_tunnel_still_keeps_the_stream_going() {
+        // Поднятый тоннель без обмена — это всё-таки поднятый тоннель: полотно
+        // обязано идти, иначе связь на вид ничем не отличается от её отсутствия.
+        let mut state = State::default();
+        state.connection.online = true;
+        state.connection.set_tunnel(TunnelState::Connected {
+            profile: ProfileId::new("home"),
+            uptime_secs: 1,
+        });
+
+        assert_eq!(load(&state), IDLE_FLOW, "молчащий тоннель остановил поток");
+    }
+
+    #[test]
+    fn the_stream_reads_the_freshest_sample_against_the_peak() {
+        // Загрузка — доля от наибольшего отсчёта окна, и она обязана остаться
+        // долей: за единицей поток быстрее не идёт, а меньше нуля не бывает.
+        let mut state = State::default();
+        state.connection.online = true;
+        state.connection.set_tunnel(TunnelState::Connected {
+            profile: ProfileId::new("home"),
+            uptime_secs: 1,
+        });
+        assert_eq!(load(&state), IDLE_FLOW, "истории нет — обмена нет");
+
+        for step in 1..=4 {
             state.connection.apply_throughput(
                 penguin_core::stats::Throughput {
-                    up_bps: step,
-                    down_bps: step,
+                    up_bps: step * 1_000,
+                    down_bps: 0,
                 },
                 penguin_core::stats::Traffic::default(),
                 0,
             );
         }
-        assert_eq!(history(&state).len(), GRAPH_POINTS);
+        assert_eq!(load(&state), 1.0, "свежий отсчёт он же и пик");
+
+        state.connection.apply_throughput(
+            penguin_core::stats::Throughput {
+                up_bps: 1_000,
+                down_bps: 0,
+            },
+            penguin_core::stats::Traffic::default(),
+            0,
+        );
+        assert_eq!(
+            load(&state),
+            IDLE_FLOW + (1.0 - IDLE_FLOW) * 0.25,
+            "скорость упала вчетверо от пика"
+        );
     }
 
     #[test]
-    fn the_graph_stands_between_the_status_and_its_numbers() {
-        // График — единственная строка, которой достаётся высота; стоять она
+    fn the_stream_stands_between_the_status_and_its_numbers() {
+        // Поток — единственная строка, которой достаётся высота; стоять она
         // должна там, где раньше была пустота, а не под цифрами.
         let state = State::default();
         let mut lines = config(&state);
         lines.push(status(&state));
         lines.push(Line::Section(crate::i18n::s().traffic.to_uppercase()));
-        lines.push(Line::Graph(history(&state)));
+        lines.push(Line::Stream(load(&state)));
         lines.extend(traffic(&state));
 
         let at = lines
             .iter()
-            .position(|line| matches!(line, Line::Graph(_)))
-            .expect("графика нет");
+            .position(|line| matches!(line, Line::Stream(_)))
+            .expect("потока нет");
         assert!(matches!(lines[at - 1], Line::Section(_)), "без подписи");
         assert!(matches!(lines[at + 1], Line::Pair(..)), "не перед цифрами");
     }
@@ -387,8 +462,8 @@ mod tests {
                     (label.as_str(), value.as_str())
                 }
                 Line::Section(label) => (label.as_str(), ""),
-                // У графика знаков нет вовсе — он рисуется столбиками.
-                Line::Graph(_) => continue,
+                // У потока знаков нет вовсе — он рисуется битами.
+                Line::Stream(_) => continue,
             };
 
             for glyph in RISKY {
