@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use penguin_core::address::SocketAddress;
 use penguin_core::id::OutboundId;
+use penguin_core::stats::Rtt;
 
 use crate::capabilities::Capabilities;
 use crate::datagram::ProxyDatagram;
@@ -44,6 +45,21 @@ pub trait Outbound: Send + Sync + 'static {
     /// Адрес назначения указывается на каждой посылке, поэтому один канал
     /// обслуживает всю UDP-сессию приложения.
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError>;
+
+    /// Задержка до сервера, если протокол умеет измерить её сам.
+    ///
+    /// `None` — не умеет; тогда её меряют временем открытия потока
+    /// ([`crate::probe::probe`]).
+    ///
+    /// Нужно это мультиплексорам. Открытие потока у них не стоит ничего:
+    /// кадр `OPEN` уезжает вместе с первыми данными, и ждать ответа никто не
+    /// станет — за это платили бы оборотом на каждом соединении. Померив
+    /// такое открытие, интерфейс показал бы ноль миллисекунд у сервера на
+    /// другом континенте. У протокола же есть своя проверка живости, и вот
+    /// она задержку измеряет честно.
+    async fn rtt(&self) -> Option<Rtt> {
+        None
+    }
 
     /// Закрывает нижележащее соединение и освобождает ресурсы.
     ///

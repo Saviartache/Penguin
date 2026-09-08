@@ -46,6 +46,13 @@ pub async fn probe(
     target: &SocketAddress,
     timeout: Duration,
 ) -> ProbeResult {
+    // Протокол, умеющий измерить задержку сам, спрашивается первым. Без
+    // этого мультиплексор показывал бы ноль: открытие потока у него не стоит
+    // ничего, потому что подтверждения оно не ждёт (`Outbound::rtt`).
+    if let Ok(Some(rtt)) = tokio::time::timeout(timeout, outbound.rtt()).await {
+        return ProbeResult::Alive(rtt);
+    }
+
     let started = Instant::now();
     match tokio::time::timeout(timeout, outbound.connect_tcp(target)).await {
         Ok(Ok(_stream)) => {

@@ -335,6 +335,34 @@ async fn many_streams_at_once_do_not_scramble_the_records() {
 }
 
 #[tokio::test]
+async fn the_latency_shown_to_a_person_is_measured_and_not_zero() {
+    // Открытие потока подтверждения не ждёт и меряет ноль — на этом кнопка
+    // «Проверить» показывала бы ноль миллисекунд у сервера на другом
+    // континенте. Задержку поэтому спрашивают у самой несущей.
+    let echo = start_echo().await;
+    let (server, key, _running) = start_server(None).await;
+    let client = client(server, &key, true);
+
+    // Без несущей мерить нечего: пусть её поднимет первый поток.
+    assert!(client.rtt().await.is_none(), "несущей ещё нет");
+    let _stream = client
+        .connect_tcp(&SocketAddress::ip(echo.ip(), echo.port()))
+        .await
+        .expect("поток открылся");
+
+    let rtt = tokio::time::timeout(std::time::Duration::from_secs(5), client.rtt())
+        .await
+        .expect("замер не уложился в срок")
+        .expect("несущая есть — задержку она знает");
+    // На петле это ноль миллисекунд, и это правильный ответ: мерилось
+    // настоящее хождение туда и обратно, а не выдумка.
+    assert!(
+        rtt.millis < 1000,
+        "петля не может отвечать секунду: {rtt:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_stream_works_without_early_data_too() {
     // 0-RTT можно выключить: рукопожатие тогда обычное, в один оборот.
     let echo = start_echo().await;

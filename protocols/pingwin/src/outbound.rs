@@ -25,10 +25,12 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use penguin_core::address::{Address, SocketAddress};
 use penguin_core::id::OutboundId;
+use penguin_core::stats::Rtt;
 use penguin_proto::capabilities::Capabilities;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::dialer::Dialer;
@@ -82,6 +84,14 @@ const CARRIERS: usize = 4;
 /// бы готовой несущей; больше — и вся страница ехала бы через одно окно
 /// перегрузки.
 const STREAMS_PER_CARRIER: usize = 8;
+
+/// Сколько ждать ответа на замер задержки.
+///
+/// Не дождались — значит несущая либо мертва, либо так загружена, что цифра
+/// всё равно ничего не скажет. Пять секунд — это заведомо больше любой
+/// разумной задержки и заметно меньше того, что человек готов ждать, глядя
+/// на «Проверить».
+const RTT_LIMIT: Duration = Duration::from_secs(5);
 
 impl std::fmt::Debug for PingwinOutbound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -313,6 +323,19 @@ impl Outbound for PingwinOutbound {
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
         let session = self.session().await?;
         Ok(Box::new(session.open_udp().await?))
+    }
+
+    async fn rtt(&self) -> Option<Rtt> {
+        // Открытие потока меряет ноль — оно и не ждёт ничего. Задержку
+        // спрашивают у самой несущей: проверка живости ходит туда и обратно,
+        // то есть меряет ровно то, что человек и хочет увидеть.
+        //
+        // Несущей нет — отвечаем `None`, и тогда её померят открытием: у
+        // первого потока в него входит рукопожатие, а это честный оборот.
+        let session = self.pick().await?;
+        let took = session.round_trip(RTT_LIMIT).await?;
+        let millis = u32::try_from(took.as_millis()).unwrap_or(u32::MAX);
+        Some(Rtt::from_millis(millis))
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {

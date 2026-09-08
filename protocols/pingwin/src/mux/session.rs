@@ -40,7 +40,7 @@ use penguin_proto::stream::ProxyStream;
 use penguin_transport::addr::socks;
 use penguin_transport::aead::{Algorithm, Cipher};
 use tokio::io::{ReadHalf, WriteHalf};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::error::{PingwinError, PingwinResult};
@@ -211,6 +211,12 @@ pub struct Session {
     last_seen: AtomicU64,
     /// Момент рождения — точка отсчёта для [`Self::last_seen`].
     born: Instant,
+    /// Кто ждёт ответа на проверку живости.
+    ///
+    /// Один на сессию, и больше не нужно: замер задержки делают по просьбе
+    /// человека, а не в цикле. Пришёл второй, пока не ответили первому, —
+    /// первый останется без ответа и упрётся в свой срок.
+    pong: StdMutex<Option<oneshot::Sender<()>>>,
     /// Ссылка на себя: её раздают просьбам открыть поток.
     ///
     /// Иначе не обойтись: разбор кадров идёт из задачи, у которой на руках
@@ -271,6 +277,7 @@ impl Session {
             death: StdMutex::new(None),
             last_seen: AtomicU64::new(0),
             born: Instant::now(),
+            pong: StdMutex::new(None),
             me: StdMutex::new(Weak::new()),
             tasks: StdMutex::new(Vec::new()),
             closed: AtomicBool::new(false),
@@ -410,6 +417,27 @@ impl Session {
         self.death_reason().is_some()
     }
 
+    /// Меряет задержку до собеседника проверкой живости.
+    ///
+    /// `None` — ответа не дождались; сессию это не убивает: за её живостью
+    /// следит [`ping_loop`], и один потерянный ответ ему не повод.
+    pub async fn round_trip(&self, limit: Duration) -> Option<Duration> {
+        let (tx, rx) = oneshot::channel();
+        *self.pong.lock().ok()? = Some(tx);
+
+        let started = Instant::now();
+        self.send(frame::PING, 0, &[]).await.ok()?;
+        tokio::time::timeout(limit, rx).await.ok()?.ok()?;
+        Some(started.elapsed())
+    }
+
+    fn answer_pong(&self) {
+        let waiting = self.pong.lock().ok().and_then(|mut pong| pong.take());
+        if let Some(waiting) = waiting {
+            let _ = waiting.send(());
+        }
+    }
+
     /// Закрывает сессию: гасит задачи и закрывает соединение.
     ///
     /// Соединение закрывается тем, что задачи бросают свои половины сокета:
@@ -489,7 +517,8 @@ impl Session {
         incoming: &mpsc::Sender<Incoming>,
     ) {
         match header.cmd {
-            frame::PAD | frame::PONG => {}
+            frame::PAD => {}
+            frame::PONG => self.answer_pong(),
             frame::PING => self.reply_pong(),
             frame::OPEN => self.on_open(header.sid, body, incoming).await,
             frame::UDP_BIND => self.on_udp_bind(header.sid, incoming).await,
