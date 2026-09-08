@@ -104,6 +104,17 @@ const STREAMS_PER_CARRIER: usize = 8;
 /// на «Проверить».
 const RTT_LIMIT: Duration = Duration::from_secs(5);
 
+/// Сколько ждать первой попытки, когда за ней есть вторая.
+///
+/// Не общий срок рукопожатия: та попытка не столько соединяется, сколько
+/// выясняет, не рвут ли приветствие по дороге. Рвущее оборудование не
+/// отвечает ничем, и ждать его полный срок — значит держать человека перед
+/// «Подключением» десять секунд впустую.
+///
+/// Полторы секунды — это вчетверо больше оборота до сервера на другом
+/// континенте. Не уложился — дело не в медленной сети.
+const PROBING_DEADLINE: Duration = Duration::from_millis(1500);
+
 /// Стоит ли пробовать ещё раз, но с ложной посылкой.
 ///
 /// Только те отказы, которые бывают от вмешательства по дороге: молчание,
@@ -244,10 +255,25 @@ impl PingwinOutbound {
         first: Option<&SocketAddress>,
     ) -> PingwinResult<(Arc<Session>, Option<PingwinStream>)> {
         if self.forced.load(Ordering::Relaxed) {
-            return self.raise_with(&self.fallback, first).await;
+            return self
+                .raise_with(&self.fallback, first, deadline::DEFAULT)
+                .await;
         }
 
-        let failure = match self.raise_with(&self.desync, first).await {
+        // Первой попытке срок короче общего — но только когда есть чем
+        // ответить на её провал. Оборудование, которое рвёт приветствие, не
+        // отвечает вовсе, и все десять секунд общего срока уходят в тупик:
+        // человек смотрит на «Подключение…» и не знает, что клиент уже
+        // проиграл и просто досиживает. Полутора секунд хватает любому живому
+        // серверу с запасом — дальше начинается не медленная сеть, а её
+        // отсутствие.
+        let limit = if self.desync.is_disabled() {
+            PROBING_DEADLINE
+        } else {
+            deadline::DEFAULT
+        };
+
+        let failure = match self.raise_with(&self.desync, first, limit).await {
             Ok(raised) => return Ok(raised),
             Err(err) => err,
         };
@@ -260,7 +286,10 @@ impl PingwinOutbound {
             %failure,
             "рукопожатие не прошло — пробуем с ложной посылкой"
         );
-        match self.raise_with(&self.fallback, first).await {
+        match self
+            .raise_with(&self.fallback, first, deadline::DEFAULT)
+            .await
+        {
             Ok(raised) => {
                 self.forced.store(true, Ordering::Relaxed);
                 tracing::info!(
@@ -278,6 +307,7 @@ impl PingwinOutbound {
         &self,
         desync: &Desync,
         first: Option<&SocketAddress>,
+        limit: Duration,
     ) -> PingwinResult<(Arc<Session>, Option<PingwinStream>)> {
         let early = match (self.config.zero_rtt, first) {
             (true, Some(target)) => Some(Session::early_open(target)?),
@@ -303,7 +333,7 @@ impl PingwinOutbound {
             tracing::debug!(%err, "не вышло выключить склейку мелких посылок");
         }
 
-        let established = deadline::handshake("рукопожатие pingwin", async {
+        let established = deadline::within(limit, "рукопожатие pingwin", async {
             handshake::connect(
                 &mut tcp,
                 &ClientParams {
