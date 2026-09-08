@@ -190,6 +190,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         // Не протокол: перечисление остальных.
         "default" => &[],
         "pingwin" => &["pingwin"],
+        "dpi" => &["dpi"],
         "hysteria2" => &["hysteria2"],
         "trojan" => &["trojan"],
         "shadowsocks" => &["shadowsocks"],
@@ -221,6 +222,12 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
     // `servers/pingwin` в этом же дереве.
     #[cfg(feature = "pingwin")]
     registry.register(Arc::new(penguin_pingwin::PingwinFactory::new()));
+
+    // Единственное направление в реестре, у которого нет сервера: соединение
+    // идёт прямо к сайту, а обход применяется к его первой посылке. Нужен он
+    // там, где адрес сайта достижим, а разговор рвут по имени узла.
+    #[cfg(feature = "dpi")]
+    registry.register(Arc::new(penguin_dpi::DpiFactory::new()));
 
     #[cfg(feature = "hysteria2")]
     registry.register(Arc::new(penguin_hysteria2::Hysteria2Factory::new()));

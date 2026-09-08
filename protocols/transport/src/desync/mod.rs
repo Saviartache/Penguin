@@ -58,4 +58,6 @@
 pub mod plan;
 pub mod write;
 
-pub use plan::{Desync, DesyncConfig, Marker, Position, Strategy};
+pub use plan::{
+    DEFAULT_TTL, Desync, DesyncConfig, FOOLING_PAUSE, Marker, Position, Step, Strategy,
+};

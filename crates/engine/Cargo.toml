@@ -51,6 +51,7 @@ penguin-shadowsocks = { workspace = true, optional = true }
 penguin-vless = { workspace = true, optional = true }
 penguin-vmess = { workspace = true, optional = true }
 penguin-pingwin = { workspace = true, optional = true }
+penguin-dpi = { workspace = true, optional = true }
 penguin-tuic = { workspace = true, optional = true }
 penguin-anytls = { workspace = true, optional = true }
 penguin-juicity = { workspace = true, optional = true }
@@ -62,8 +63,11 @@ penguin-naive = { workspace = true, optional = true }
 penguin-http-proxy = { workspace = true, optional = true }
 
 [features]
-default = ["pingwin", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "openconnect", "trusttunnel", "socks5", "http-proxy"]
+default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "openconnect", "trusttunnel", "socks5", "http-proxy"]
 pingwin = ["dep:penguin-pingwin"]
+# Не протокол в обычном смысле: сервера у него нет вовсе, есть только обход
+# DPI на прямом соединении. Фича своя, потому что и крейт свой.
+dpi = ["dep:penguin-dpi"]
 hysteria2 = ["dep:penguin-hysteria2"]
 socks5 = ["dep:penguin-socks5"]
 trojan = ["dep:penguin-trojan"]

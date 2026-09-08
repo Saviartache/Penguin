@@ -277,6 +277,8 @@ pub struct Strings {
     pub zero_rtt: &'static str,
     /// Способ обхода DPI в первой посылке.
     pub desync_strategy: &'static str,
+    /// Чем режим DPI отличается от тоннеля.
+    pub dpi_no_tunnel: &'static str,
     /// Не задан адрес.
     pub need_server: &'static str,
     /// Не задан пароль.
@@ -580,6 +582,7 @@ mod tests {
                 table.browser_fingerprint,
                 table.zero_rtt,
                 table.desync_strategy,
+                table.dpi_no_tunnel,
                 table.need_server,
                 table.need_password,
                 table.bad_server,

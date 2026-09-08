@@ -133,6 +133,7 @@ pub static STRINGS: Strings = Strings {
     browser_fingerprint: "Browser fingerprint",
     zero_rtt: "Send the first request with the handshake",
     desync_strategy: "DPI bypass",
+    dpi_no_tunnel: "No tunnel here: the connection goes straight to the site and is not encrypted. It helps where the site's address is reachable but the conversation is cut by the host name",
     need_server: "Server address is empty",
     need_password: "Password is empty",
     bad_server: "The address must look like example.com:443",

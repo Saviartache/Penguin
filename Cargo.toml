@@ -21,6 +21,7 @@ members = [
     "crates/cli",
     "crates/app",
     "protocols/transport",
+    "protocols/dpi",
     "protocols/hysteria2",
     "protocols/anytls",
     "protocols/juicity",
@@ -46,7 +47,7 @@ members = [
 exclude = ["vendor/rust-ui-kit"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -76,6 +77,7 @@ penguin-daemon   = { path = "crates/daemon" }
 penguin-cli      = { path = "crates/cli" }
 penguin-gui      = { path = "crates/gui" }
 penguin-transport = { path = "protocols/transport" }
+penguin-dpi = { path = "protocols/dpi" }
 penguin-anytls = { path = "protocols/anytls" }
 penguin-juicity = { path = "protocols/juicity" }
 penguin-masque = { path = "protocols/masque" }

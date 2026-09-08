@@ -20,22 +20,16 @@
 //! Между «записали кусок с малым TTL» и «вернули TTL обратно» есть окно, в
 //! котором пакет может уйти уже с восстановленным значением, и весь приём
 //! превратится в обычную отправку. Лечится это единственным доступным
-//! способом — паузой ([`FOOLING_PAUSE`]) перед возвратом TTL. У `zapret2`
-//! этой гонки нет вовсе: там пакет собирают целиком и отдают в сеть сами.
+//! способом — паузой ([`FOOLING_PAUSE`](crate::desync::plan::FOOLING_PAUSE))
+//! перед возвратом TTL. У `zapret2` этой гонки нет вовсе: там пакет собирают
+//! целиком и отдают в сеть сами.
 
 use std::io;
-use std::time::Duration;
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::desync::plan::{Desync, Strategy};
-
-/// Пауза после куска с подменённым TTL — окно, за которое он успевает уйти.
-///
-/// Меньше миллисекунды планировщик всё равно не отмерит, а больше — это
-/// задержка на каждом соединении, которую видно в браузере.
-pub const FOOLING_PAUSE: Duration = Duration::from_millis(1);
+use crate::desync::plan::{DEFAULT_TTL, Desync, Step};
 
 /// Соединение, у которого можно менять TTL.
 ///
@@ -109,64 +103,25 @@ async fn run<S: TtlStream>(
     host: Option<&str>,
     normal_ttl: u32,
 ) -> io::Result<()> {
-    if plan.wants_fake()
-        && let Some(decoy) = decoy
-    {
-        stream.set_ttl(plan.ttl())?;
-        for _ in 0..plan.repeats() {
-            stream.write_all(decoy).await?;
-            stream.flush().await?;
-        }
-        tokio::time::sleep(FOOLING_PAUSE).await;
-        stream.set_ttl(normal_ttl)?;
-    }
-
-    let cuts = plan.cuts(payload, host);
-    let segments = split(payload, &cuts);
-
-    for (index, segment) in segments.iter().enumerate() {
-        // `disorder`: первый кусок уходит с малым TTL и до сервера не
-        // доходит. Ядро повторит его позже — по обычным правилам TCP, — и
-        // сервер соберёт посылку целиком, а DPI к тому времени уже решит.
-        let fooled = plan.strategy() == Strategy::Disorder && index == 0 && segments.len() > 1;
-        if fooled {
-            stream.set_ttl(plan.ttl())?;
-        }
-
-        stream.write_all(segment).await?;
-        stream.flush().await?;
-
-        if fooled {
-            tokio::time::sleep(FOOLING_PAUSE).await;
-            stream.set_ttl(normal_ttl)?;
-        } else if !plan.delay().is_zero() && index + 1 < segments.len() {
-            tokio::time::sleep(plan.delay()).await;
+    for step in plan.steps(payload, host, decoy.is_some()) {
+        match step {
+            Step::Fool => stream.set_ttl(plan.ttl())?,
+            Step::Restore => stream.set_ttl(normal_ttl)?,
+            Step::Decoy => {
+                // Шага `Decoy` без ложной посылки план не выдаёт.
+                if let Some(decoy) = decoy {
+                    stream.write_all(decoy).await?;
+                    stream.flush().await?;
+                }
+            }
+            Step::Chunk(piece) => {
+                stream.write_all(&payload[piece]).await?;
+                stream.flush().await?;
+            }
+            Step::Pause(pause) => tokio::time::sleep(pause).await,
         }
     }
     Ok(())
-}
-
-/// TTL, с которым уходят обычные пакеты, — на случай, если у сокета его не
-/// спросить. Столько ставят две системы из трёх; у Windows умолчание другое,
-/// и потому спрашивают сокет, а не берут это число.
-const DEFAULT_TTL: u32 = 64;
-
-/// Режет посылку по границам.
-///
-/// Границы приходят упорядоченными и внутри посылки — это обеспечивает
-/// [`Desync::cuts`]. Пустой список означает один кусок целиком.
-fn split<'a>(payload: &'a [u8], cuts: &[usize]) -> Vec<&'a [u8]> {
-    let mut segments = Vec::with_capacity(cuts.len() + 1);
-    let mut previous = 0;
-    for &cut in cuts {
-        if cut <= previous || cut >= payload.len() {
-            continue;
-        }
-        segments.push(&payload[previous..cut]);
-        previous = cut;
-    }
-    segments.push(&payload[previous..]);
-    segments
 }
 
 #[cfg(test)]
@@ -405,17 +360,5 @@ mod tests {
         assert_eq!(pieces.len(), 2);
         assert_eq!(pieces[0], b"....www.goo".to_vec());
         assert_eq!(pieces[1], b"gle.com....".to_vec());
-    }
-
-    #[test]
-    fn splitting_never_produces_an_empty_piece() {
-        // Пустой кусок — это `write` без единого байта: лишний системный
-        // вызов, который к тому же ничего не режет.
-        for cuts in [vec![], vec![0], vec![5], vec![0, 5, 5, 5], vec![9]] {
-            for piece in split(b"hello", &cuts) {
-                assert!(!piece.is_empty(), "{cuts:?}");
-            }
-        }
-        assert_eq!(split(b"hello", &[2, 4]).len(), 3);
     }
 }

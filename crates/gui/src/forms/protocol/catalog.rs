@@ -7,8 +7,8 @@
 
 use crate::forms::protocol::spec::ProtocolSpec;
 use crate::forms::protocol::{
-    anytls, http, hysteria2, juicity, masque, masque_ip, naive, openconnect, pingwin, shadowsocks,
-    socks5, trojan, trusttunnel, tuic, vless, vmess, wireguard,
+    anytls, dpi, http, hysteria2, juicity, masque, masque_ip, naive, openconnect, pingwin,
+    shadowsocks, socks5, trojan, trusttunnel, tuic, vless, vmess, wireguard,
 };
 
 /// Протоколы в порядке показа.
@@ -19,6 +19,9 @@ pub static ALL: &[&ProtocolSpec] = &[
     // Свой протокол — первым: единственный в списке, у которого в этом же
     // дереве лежит и сервер, и единственный, который обходит DPI сам.
     &pingwin::SPEC,
+    // Вторым — единственный в списке, которому не нужен вообще никакой
+    // сервер: он лечит блокировку по имени узла, и настроить в нём нечего.
+    &dpi::SPEC,
     &wireguard::SPEC,
     &openconnect::SPEC,
     &hysteria2::SPEC,
@@ -128,10 +131,15 @@ mod tests {
     }
 
     #[test]
-    fn every_protocol_asks_for_a_server() {
+    fn every_protocol_that_has_a_server_asks_for_its_address() {
         // Поле адреса — единственное, что показывается в списке профилей
         // (`screens::servers::server_of`), и без него строка пуста.
-        for spec in ALL {
+        //
+        // Исключение ровно одно и оно настоящее: у режима DPI сервера нет —
+        // соединение идёт прямо к сайту. Спросить его адрес значило бы
+        // спросить то, чего не существует; в списке у такого профиля стоит
+        // прочерк, и это честно.
+        for spec in ALL.iter().filter(|spec| spec.id != dpi::SPEC.id) {
             let server = spec
                 .fields
                 .iter()

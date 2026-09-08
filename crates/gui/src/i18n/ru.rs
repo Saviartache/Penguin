@@ -133,6 +133,7 @@ pub static STRINGS: Strings = Strings {
     browser_fingerprint: "Отпечаток браузера",
     zero_rtt: "Слать первый запрос вместе с приветствием",
     desync_strategy: "Обход DPI",
+    dpi_no_tunnel: "Тоннеля нет: соединение идёт прямо к сайту и не шифруется. Помогает там, где адрес сайта доступен, а разговор рвут по имени узла",
     need_server: "Не задан адрес сервера",
     need_password: "Не задан пароль",
     bad_server: "Адрес нужен в виде example.com:443",

@@ -3,6 +3,7 @@
 //! Чистая логика: ни сокета, ни ожидания. Точку разреза можно посчитать и
 //! проверить, ничего не отправляя, — этим и пользуются тесты.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,19 @@ use crate::error::{TransportError, TransportResult};
 /// быть не должно: TTL, равный нулю, означает пакет, который не уходит с
 /// машины вовсе.
 pub const DEFAULT_FAKE_TTL: u8 = 3;
+
+/// TTL обычных пакетов — на случай, если его не спросить у сокета.
+///
+/// Столько ставят две системы из трёх; у Windows умолчание другое, и потому
+/// спрашивают сокет, а не берут это число.
+pub const DEFAULT_TTL: u32 = 64;
+
+/// Пауза после куска с подменённым TTL — окно, за которое он успевает уйти.
+///
+/// TTL читается ядром в момент, когда пакет уходит, а не в момент записи.
+/// Меньше миллисекунды планировщик всё равно не отмерит, а больше — это
+/// задержка на каждом соединении, которую видно в браузере.
+pub const FOOLING_PAUSE: Duration = Duration::from_millis(1);
 
 /// Сколько кусков разреза допускается. Больше — это уже не обход DPI, а
 /// сотня системных вызовов на каждое соединение.
@@ -302,6 +316,27 @@ impl DesyncConfig {
     }
 }
 
+/// Шаг отправки первой посылки.
+///
+/// Весь план в виде, который не зависит от того, чем его исполняют. Отправить
+/// его можно `async`-кодом ([`crate::desync::write`]), а можно вручную из
+/// `poll_write` — так делает тот, кто обходит DPI за чужую первую посылку и
+/// потому не владеет задачей, в которой она пишется. Порядок шагов при этом
+/// один и тот же, и разъехаться двум отправителям негде.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Понизить TTL исходящих пакетов до [`Desync::ttl`].
+    Fool,
+    /// Вернуть TTL, с которым сокет пришёл.
+    Restore,
+    /// Отправить ложную посылку целиком.
+    Decoy,
+    /// Отправить кусок настоящей посылки.
+    Chunk(Range<usize>),
+    /// Подождать.
+    Pause(Duration),
+}
+
 /// Проверенный план рассинхронизации.
 #[derive(Debug, Clone)]
 pub struct Desync {
@@ -369,6 +404,69 @@ impl Desync {
         cuts.dedup();
         cuts
     }
+
+    /// Во что превращается отправка посылки по этому плану.
+    ///
+    /// `decoy` — есть ли у отправителя ложная посылка. Нет — шаги с ней не
+    /// появляются вовсе: выдумывать её здесь нельзя (см. документ
+    /// [`crate::desync`]), а пообещать шагом и не отправить — значит соврать
+    /// исполнителю.
+    ///
+    /// Пустых кусков в списке не бывает: запись нуля байт — это лишний
+    /// системный вызов, а для исполнителя на `poll_write` ещё и неотличимо от
+    /// закрытого сокета.
+    pub fn steps(&self, payload: &[u8], host: Option<&str>, decoy: bool) -> Vec<Step> {
+        let mut steps = Vec::new();
+
+        if self.wants_fake() && decoy {
+            steps.push(Step::Fool);
+            for _ in 0..self.repeats {
+                steps.push(Step::Decoy);
+            }
+            steps.push(Step::Pause(FOOLING_PAUSE));
+            steps.push(Step::Restore);
+        }
+
+        let pieces = ranges(payload.len(), &self.cuts(payload, host));
+        for (index, piece) in pieces.iter().enumerate() {
+            // `disorder`: первый кусок уходит с малым TTL и до сервера не
+            // доходит. Ядро повторит его позже — по обычным правилам TCP, — и
+            // сервер соберёт посылку целиком, а DPI к тому времени уже решит.
+            let fooled = self.strategy == Strategy::Disorder && index == 0 && pieces.len() > 1;
+            if fooled {
+                steps.push(Step::Fool);
+            }
+            steps.push(Step::Chunk(piece.clone()));
+            if fooled {
+                steps.push(Step::Pause(FOOLING_PAUSE));
+                steps.push(Step::Restore);
+            } else if !self.delay.is_zero() && index + 1 < pieces.len() {
+                steps.push(Step::Pause(self.delay));
+            }
+        }
+        steps
+    }
+}
+
+/// Границы кусков посылки длиной `len`.
+///
+/// Точки приходят упорядоченными и внутри посылки — это обеспечивает
+/// [`Desync::cuts`]. Пустой список означает один кусок целиком; пустых кусков
+/// не возвращается никогда.
+fn ranges(len: usize, cuts: &[usize]) -> Vec<Range<usize>> {
+    let mut pieces = Vec::with_capacity(cuts.len() + 1);
+    let mut previous = 0;
+    for &cut in cuts {
+        if cut <= previous || cut >= len {
+            continue;
+        }
+        pieces.push(previous..cut);
+        previous = cut;
+    }
+    if previous < len {
+        pieces.push(previous..len);
+    }
+    pieces
 }
 
 /// Ищет имя узла в посылке. Возвращает смещение и длину.
@@ -550,6 +648,84 @@ mod tests {
         let plan = DesyncConfig::default().compile().expect("настройки верны");
         assert!(plan.is_disabled());
         assert!(!plan.wants_fake());
+    }
+
+    #[test]
+    fn the_pieces_go_in_order_and_none_of_them_is_empty() {
+        // Пустой кусок — это `write` без единого байта: лишний системный
+        // вызов, а исполнителю на `poll_write` ещё и неотличимо от обрыва.
+        for cuts in [vec![], vec![0], vec![5], vec![0, 5, 5, 5], vec![9]] {
+            let pieces = ranges(5, &cuts);
+            assert!(pieces.iter().all(|piece| !piece.is_empty()), "{cuts:?}");
+            assert_eq!(pieces.last().map(|piece| piece.end), Some(5), "{cuts:?}");
+        }
+        assert_eq!(ranges(5, &[2, 4]), vec![0..2, 2..4, 4..5]);
+        assert!(ranges(0, &[]).is_empty(), "пустую посылку резать не на что");
+    }
+
+    #[test]
+    fn disorder_fools_the_first_piece_and_puts_the_ttl_back() {
+        // Не вернуть TTL значило бы, что весь дальнейший разговор уходит на
+        // три перехода и не доходит никуда.
+        let plan = config("disorder", &["2"])
+            .compile()
+            .expect("настройки верны");
+        assert_eq!(
+            plan.steps(b"hello", None, false),
+            vec![
+                Step::Fool,
+                Step::Chunk(0..2),
+                Step::Pause(FOOLING_PAUSE),
+                Step::Restore,
+                Step::Chunk(2..5),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_piece_is_never_fooled() {
+        // Единственный кусок с малым TTL — это соединение, которое не
+        // состоится: повторять его будет нечем, потому что за ним ничего нет.
+        let plan = config("disorder", &["99"])
+            .compile()
+            .expect("настройки верны");
+        assert_eq!(plan.steps(b"hello", None, false), vec![Step::Chunk(0..5)]);
+    }
+
+    #[test]
+    fn the_fake_steps_appear_only_when_there_is_something_to_send() {
+        let plan = config("fake", &[]).compile().expect("настройки верны");
+        assert_eq!(
+            plan.steps(b"real", None, true),
+            vec![
+                Step::Fool,
+                Step::Decoy,
+                Step::Pause(FOOLING_PAUSE),
+                Step::Restore,
+                Step::Chunk(0..4),
+            ]
+        );
+        assert_eq!(plan.steps(b"real", None, false), vec![Step::Chunk(0..4)]);
+    }
+
+    #[test]
+    fn the_pause_between_pieces_is_asked_for_only_between_them() {
+        // Пауза после последнего куска — это задержка, за которую никто
+        // ничего не получает.
+        let plan = DesyncConfig {
+            delay_ms: 5,
+            ..config("multisplit", &["2"])
+        }
+        .compile()
+        .expect("настройки верны");
+        assert_eq!(
+            plan.steps(b"hello", None, false),
+            vec![
+                Step::Chunk(0..2),
+                Step::Pause(Duration::from_millis(5)),
+                Step::Chunk(2..5),
+            ]
+        );
     }
 
     #[test]

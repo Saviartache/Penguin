@@ -25,6 +25,7 @@
 
 pub mod anytls;
 pub mod catalog;
+pub mod dpi;
 pub mod http;
 pub mod hysteria2;
 pub mod juicity;
