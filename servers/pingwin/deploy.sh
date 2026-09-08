@@ -8,8 +8,10 @@
 # исходники, собирает образ, поднимает сервер и прикрытие, заводит ключи и
 # печатает ссылку-приглашение для клиента.
 #
-# Запускать можно сколько угодно раз: ключ и пароли, если они уже есть, не
-# трогаются — иначе разосланные ссылки перестали бы работать.
+# Запускать можно сколько угодно раз: скрипт сначала смотрит, что уже стоит на
+# сервере, и на повторном запуске предлагает просто завести ещё одного
+# пользователя и выдать ему ссылку, ничего не пересобирая. Ключ и пароли не
+# трогаются в любом случае — иначе разосланные ссылки перестали бы работать.
 #
 # Что нужно на этой машине: ssh, tar и OpenSSH 8.4 или новее — тот, что умеет
 # SSH_ASKPASS_REQUIRE. Что нужно на той: доступ по SSH и выход в интернет.
@@ -89,19 +91,6 @@ else
     SSH_KEY="$(ask 'Файл ключа (пусто — как настроено у ssh)' '')"
 fi
 
-bold "Каким будет сервер"
-info 'Порт: 443 выглядит естественнее всего — TLS там никого не удивляет.'
-info 'Но именно его чаще всего и разбирают по дороге: на проверочной линии'
-info 'он давал оборот в 135 мс против 0.9 мс на 9443. Отсюда умолчание.'
-CLIENT_PORT="$(ask 'Порт, на который будут приходить клиенты' '9443')"
-COVER_SNI="$(ask 'Имя прикрытия (его увидит DPI)' 'www.microsoft.com')"
-USER_NAME="$(ask 'Имя пользователя в профиле' 'client')"
-PROFILE_NAME="$(ask 'Как назвать профиль в клиенте' "Pingwin $SSH_HOST")"
-
-# Пароль машинный: человеческий подбирается, а вводить его руками всё равно
-# не придётся — он уедет в ссылку.
-USER_PASSWORD="$(head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
-
 # --- связь -------------------------------------------------------------------
 
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -p "$SSH_PORT")
@@ -123,11 +112,109 @@ fi
 
 remote() { ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" "$@"; }
 
+# Ссылка собирается на сервере: ключ и пароль лежат только там, и тащить их
+# сюда ради одной строки незачем.
+show_link() {
+    local link
+    link="$(remote "docker run --rm -v $REMOTE_DIR/pingwin.toml:/etc/pingwin/pingwin.toml:ro \
+        pingwin-server:latest link --config /etc/pingwin/pingwin.toml --user '$USER_NAME' \
+        --host '$SSH_HOST:$CLIENT_PORT' --sni '$COVER_SNI' --name '$PROFILE_NAME'")"
+    [[ -n "$link" ]] || die "ссылка не собралась"
+
+    printf '\n\033[1m▶ Готово\033[0m\n\n'
+    printf '  Вставьте эту ссылку в клиент: «Добавить сервер» → «Ссылка».\n\n'
+    printf '\033[32m%s\033[0m\n\n' "$link"
+    printf '  Что дальше:\n'
+    printf '    журнал       ssh -p %s %s@%s "cd %s && docker compose logs -f pingwin"\n' \
+        "$SSH_PORT" "$SSH_USER" "$SSH_HOST" "$REMOTE_DIR"
+    printf '    ещё человек  запустите скрипт снова — он предложит добавить пользователя\n'
+    printf '    обновить     запустите скрипт снова и откажитесь от добавления\n\n'
+}
+
 bold "Проверяю связь"
 remote 'echo ok' >/dev/null 2>&1 \
     || die "не захожу по SSH на $SSH_USER@$SSH_HOST:$SSH_PORT"
 SYSTEM="$(remote 'sed -n "s/^PRETTY_NAME=//p" /etc/os-release 2>/dev/null | tr -d \" ' || true)"
 ok "связь есть: ${SYSTEM:-неизвестная система}"
+
+# --- что уже стоит -----------------------------------------------------------
+
+# Сервер считается развёрнутым, когда есть и настройки, и образ: по ним одним
+# можно завести пользователя и выдать ссылку, ничего не пересобирая.
+bold "Смотрю, что уже стоит"
+MODE="full"
+USERS=""
+if remote "test -s $REMOTE_DIR/pingwin.toml && docker image inspect pingwin-server:latest >/dev/null 2>&1"; then
+    USERS="$(remote "sed -n 's/^name = \"\\(.*\\)\"$/\\1/p' $REMOTE_DIR/pingwin.toml")"
+    ok "сервер уже развёрнут; пользователи: $(printf '%s' "$USERS" | tr '\n' ' ')"
+    if yes_no 'Только добавить пользователя и выдать ссылку?' 'y'; then
+        MODE="user"
+    else
+        info 'хорошо, пройду весь путь заново — ключ и пароли останутся прежними'
+    fi
+else
+    ok "чисто — ставлю с нуля"
+fi
+
+# --- каким будет профиль -----------------------------------------------------
+
+if [[ "$MODE" == "user" ]]; then
+    # Порт и имя прикрытия у работающего сервера уже выбраны: спрашивать их
+    # заново значило бы предлагать выдать ссылку, которая никуда не придёт.
+    bold "Кому ссылку"
+    CLIENT_PORT="$(remote "sed -n 's/^PINGWIN_PORT=//p' $REMOTE_DIR/.env 2>/dev/null" || true)"
+    COVER_SNI="$(remote "sed -n 's/^PINGWIN_SNI=//p' $REMOTE_DIR/.env 2>/dev/null" || true)"
+    CLIENT_PORT="${CLIENT_PORT:-9443}"
+    COVER_SNI="${COVER_SNI:-www.microsoft.com}"
+    info "порт $CLIENT_PORT, прикрытие $COVER_SNI — как при развёртывании"
+else
+    bold "Каким будет сервер"
+    info 'Порт: 443 выглядит естественнее всего — TLS там никого не удивляет.'
+    info 'Но именно его чаще всего и разбирают по дороге: на проверочной линии'
+    info 'он давал оборот в 135 мс против 0.9 мс на 9443. Отсюда умолчание.'
+    CLIENT_PORT="$(ask 'Порт, на который будут приходить клиенты' '9443')"
+    COVER_SNI="$(ask 'Имя прикрытия (его увидит DPI)' 'www.microsoft.com')"
+fi
+
+USER_NAME="$(ask 'Имя пользователя в профиле' 'client')"
+# Имя уходит в TOML как есть: кавычка или обратная косая черта сломали бы
+# настройки работающего сервера.
+[[ "$USER_NAME" =~ ^[A-Za-z0-9._-]+$ ]] \
+    || die "имя пользователя: латиница, цифры, точка, дефис, подчёркивание"
+PROFILE_NAME="$(ask 'Как назвать профиль в клиенте' "Pingwin $SSH_HOST")"
+
+# Пароль машинный: человеческий подбирается, а вводить его руками всё равно
+# не придётся — он уедет в ссылку.
+USER_PASSWORD="$(head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
+
+# --- ещё один пользователь ---------------------------------------------------
+
+if [[ "$MODE" == "user" ]]; then
+    bold "Добавляю пользователя"
+    if printf '%s\n' "$USERS" | grep -qxF "$USER_NAME"; then
+        ok "$USER_NAME уже заведён — пароль прежний, ссылка будет та же"
+    else
+        # Дописывание, а не перезапись: файл примонтирован в живой контейнер,
+        # а bind-mount держит inode. Владелец и права при дописывании тоже
+        # остаются прежними.
+        remote "cat >> $REMOTE_DIR/pingwin.toml <<'PINGWIN_USER'
+
+[[users]]
+name = \"$USER_NAME\"
+password = \"$USER_PASSWORD\"
+PINGWIN_USER" || die "не дописал пользователя в $REMOTE_DIR/pingwin.toml"
+        ok "$USER_NAME заведён"
+
+        # Настройки читаются один раз при старте: без перезапуска сервер о
+        # новом пароле не узнает. `up -d` — на случай, если сейчас всё лежит.
+        remote "cd $REMOTE_DIR && docker compose up -d pingwin && docker compose restart pingwin" \
+            >/dev/null 2>&1 \
+            || die "сервер не перезапустился; посмотрите docker compose logs pingwin на сервере"
+        ok "сервер перечитал настройки"
+    fi
+    show_link
+    exit 0
+fi
 
 # --- Docker ------------------------------------------------------------------
 
@@ -192,7 +279,10 @@ ok "исходники на месте"
 
 # Порт наружу спрашивается у человека, а файл в репозитории один на всех, —
 # поэтому он приезжает переменной окружения, а не правкой compose.yml.
-remote "printf 'PINGWIN_PORT=%s\n' '$CLIENT_PORT' > $REMOTE_DIR/.env"
+#
+# `PINGWIN_SNI` compose не читает: он лежит рядом, чтобы повторный запуск знал
+# имя прикрытия и не переспрашивал его ради одной ссылки.
+remote "printf 'PINGWIN_PORT=%s\nPINGWIN_SNI=%s\n' '$CLIENT_PORT' '$COVER_SNI' > $REMOTE_DIR/.env"
 
 # --- сборка ------------------------------------------------------------------
 
@@ -276,16 +366,4 @@ fi
 
 # --- ссылка ------------------------------------------------------------------
 
-LINK="$(remote "docker run --rm -v $REMOTE_DIR/pingwin.toml:/etc/pingwin/pingwin.toml:ro \
-    pingwin-server:latest link --config /etc/pingwin/pingwin.toml --user '$USER_NAME' \
-    --host '$SSH_HOST:$CLIENT_PORT' --sni '$COVER_SNI' --name '$PROFILE_NAME'")"
-[[ -n "$LINK" ]] || die "ссылка не собралась"
-
-printf '\n\033[1m▶ Готово\033[0m\n\n'
-printf '  Вставьте эту ссылку в клиент: «Добавить сервер» → «Ссылка».\n\n'
-printf '\033[32m%s\033[0m\n\n' "$LINK"
-printf '  Что дальше:\n'
-printf '    журнал       ssh -p %s %s@%s "cd %s && docker compose logs -f pingwin"\n' \
-    "$SSH_PORT" "$SSH_USER" "$SSH_HOST" "$REMOTE_DIR"
-printf '    обновить     bash servers/pingwin/deploy.sh — ключи и пароли сохранятся\n'
-printf '    ещё человек  допишите [[users]] в %s/pingwin.toml и перезапустите\n\n' "$REMOTE_DIR"
+show_link
