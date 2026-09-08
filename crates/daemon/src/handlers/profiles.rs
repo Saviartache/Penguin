@@ -41,6 +41,10 @@ pub fn set_config(
         return Response::error(err, true);
     }
 
+    // Журнал ведёт служба, а не движок: уровень доводится здесь, до передачи
+    // настроек дальше.
+    crate::logging::set_level(config.app.log_level);
+
     match engine.reload(config) {
         Ok(()) => Response::Ok,
         Err(err) => {

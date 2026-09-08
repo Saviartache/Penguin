@@ -10,6 +10,7 @@
 //! который человек ещё правит на соседней.
 
 use iced::Task;
+use penguin_config::schema::app::LogLevel;
 
 use crate::app::App;
 use crate::app::message::{Message, SettingsMessage};
@@ -42,6 +43,34 @@ pub fn handle(app: &mut App, message: SettingsMessage) -> Task<Message> {
             app.state_mut().config.network.allow_lan = enabled;
             save(app)
         }
+
+        SettingsMessage::CaptureDefaultRoute(enabled) => {
+            app.state_mut().config.network.capture_default_route = enabled;
+            save(app)
+        }
+
+        SettingsMessage::DnsHijack(enabled) => {
+            app.state_mut().config.dns.hijack = enabled;
+            save(app)
+        }
+
+        SettingsMessage::VerboseLog(enabled) => {
+            app.state_mut().config.app.log_level = log_level(enabled);
+            save(app)
+        }
+    }
+}
+
+/// Уровень журнала под переключателем.
+///
+/// Из пяти уровней переключатель различает два: подробнее `debug` в окне не
+/// спрашивают, а `trace` ставят руками в файле — и, выключив переключатель,
+/// его же руками и возвращают.
+fn log_level(verbose: bool) -> LogLevel {
+    if verbose {
+        LogLevel::Debug
+    } else {
+        LogLevel::Info
     }
 }
 
@@ -87,6 +116,15 @@ mod tests {
 
         let _ = handle(&mut app, SettingsMessage::Autoconnect(true));
         assert!(app.state().saved.app.autoconnect);
+
+        let _ = handle(&mut app, SettingsMessage::CaptureDefaultRoute(false));
+        assert!(!app.state().saved.network.capture_default_route);
+
+        let _ = handle(&mut app, SettingsMessage::DnsHijack(false));
+        assert!(!app.state().saved.dns.hijack);
+
+        let _ = handle(&mut app, SettingsMessage::VerboseLog(true));
+        assert_eq!(app.state().saved.app.log_level, LogLevel::Debug);
 
         assert!(
             !app.state().dirty,

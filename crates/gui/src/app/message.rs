@@ -287,6 +287,12 @@ pub enum SettingsMessage {
     KillSwitch(bool),
     /// Локальная сеть мимо тоннеля.
     AllowLan(bool),
+    /// Забирать маршрут по умолчанию.
+    CaptureDefaultRoute(bool),
+    /// Перехват запросов имён.
+    DnsHijack(bool),
+    /// Подробность журнала службы.
+    VerboseLog(bool),
 }
 
 #[cfg(test)]

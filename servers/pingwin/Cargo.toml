@@ -1,0 +1,42 @@
+[package]
+name = "penguin-pingwin-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Сервер протокола Pingwin: опознание, мультиплексор, прикрытие"
+
+[[bin]]
+name = "pingwin-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Формат провода, ключевое расписание и разбор кадров — те же, что у клиента,
+# и потому берутся из крейта протокола, а не пишутся второй раз. Всё, что
+# добавляет сервер, — сокеты и правила: их в `protocols/*` быть не может.
+penguin-pingwin.workspace = true
+penguin-core.workspace = true
+# Ради `ProxyDatagram`: датаграммный канал сессии отдаётся этим типажом, и
+# другого языка у него нет.
+penguin-proto.workspace = true
+
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal"] }
+bytes.workspace = true
+serde.workspace = true
+toml.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+# Проверка от края до края поднимает и сервер, и клиента: клиенту нужен
+# `Dialer`, а он — типаж с асинхронными методами.
+async-trait.workspace = true
+serde_json.workspace = true

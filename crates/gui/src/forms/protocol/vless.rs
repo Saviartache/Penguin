@@ -13,18 +13,33 @@ const DEFAULT_PORT: u16 = 443;
 /// снимает кто-то другой — сеть доставки перед сервером; сам по себе он
 /// означает, что UUID уходит по сети открытым текстом.
 ///
-/// `reality` здесь нет нарочно, хотя протокол его уже наполовину умеет:
-/// рукопожатие доходит до сертификата сервера и проверяет его, но не
-/// продолжается до прикладных ключей, и байты VLESS такой канал не понесёт.
-/// Пункт в списке выбора, который нельзя выбрать с пользой, хуже
-/// отсутствующего. Из ссылки `security=reality` по-прежнему читается — он
-/// допишется в список сам, — и профиль честно откажет с объяснением.
-const SECURITY: &[&str] = &["tls", "none"];
+/// `reality` — рукопожатие доведено до прикладных ключей TLS 1.3, и канал
+/// несёт байты VLESS (`penguin_vless::reality::handshake::connect`). Но
+/// «подключилось» здесь ещё не значит «сервер нас узнал»: сама формула
+/// Reality сверена только между `Xray-core` и `sing-box`, без официальных
+/// тестовых векторов, — не узнавший клиента сервер не откажет, а молча
+/// перешлёт его настоящему сайту. Об этом форма говорит отдельной строкой
+/// (`SPEC.note`, `crate::i18n::Strings::reality_unverified`), а не молчит.
+const SECURITY: &[&str] = &["tls", "none", "reality"];
 
 /// Чем переносится поток.
 const TRANSPORTS: &[&str] = &["tcp", "ws", "httpupgrade"];
 
 /// Поля формы в том порядке, в каком они показываются.
+///
+/// Поля Reality (`reality_*`) не помечены `.required()`, хотя без них
+/// `security = "reality"` не поднимется, — конфликта с `tls`/`none` тогда бы
+/// не было, потому что этой форме нечем спросить «обязательно, только если
+/// security = reality» (`FieldSpec::required` не видит других полей). Как и
+/// у `path`/`host` под `ws`/`httpupgrade`, недостающее здесь ловит
+/// `RealityConfig::validate` — понятной ошибкой, а не пустым ключом сервера.
+///
+/// Отпечатка браузера (`penguin_utls::Fingerprint`) в форме нет нарочно:
+/// поле выбора не умеет быть пустым (`FieldSpec::choice`, см. `spec.rs`) и
+/// писало бы `reality.fingerprint` даже в профиль `tls`/`none`, заводя
+/// группу `reality`, которой там взяться неоткуда, — `RealityConfig` и так
+/// по умолчанию берёт `chrome` (`config.rs`), и ссылка `fp=` от провайдера
+/// сюда не заводится по той же причине.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -35,10 +50,29 @@ static FIELDS: &[FieldSpec] = &[
         .check(check::uuid),
     FieldSpec::choice("security", &["security"], |s| s.security, SECURITY),
     FieldSpec::choice("transport", &["transport"], |s| s.transport, TRANSPORTS),
+    // Свободный текст, а не выбор: единственное принимаемое значение —
+    // `penguin_vless::frame::addons::FLOW_VISION`, а поле выбора не умеет
+    // быть пустым (см. документ `FIELDS` про отпечаток чуть ниже) — здесь же
+    // пустое как раз законное и самое частое значение. Неверную комбинацию
+    // (не та `security`, не тот `transport`, не то значение) ловит
+    // `VlessConfig::validate` понятной ошибкой, а не эта форма.
+    FieldSpec::text("flow", &["flow"], |s| s.flow).example(|s| s.flow_example),
     FieldSpec::text("path", &["path"], |s| s.path).example(|s| s.path_example),
     FieldSpec::text("host", &["host"], |s| s.http_host).example(|s| s.optional_hint),
     FieldSpec::text("sni", &["tls", "sni"], |s| s.sni).example(|s| s.sni_example),
     FieldSpec::flag("insecure", &["tls", "insecure"], |s| s.insecure),
+    FieldSpec::text("reality_public_key", &["reality", "public_key"], |s| {
+        s.server_public_key
+    })
+    .example(|s| s.reality_public_key_example),
+    FieldSpec::text("reality_short_id", &["reality", "short_id"], |s| {
+        s.reality_short_id
+    })
+    .example(|s| s.reality_short_id_example),
+    FieldSpec::text("reality_server_name", &["reality", "server_name"], |s| {
+        s.reality_server_name
+    })
+    .example(|s| s.reality_server_name_example),
     FieldSpec::flag("udp", &["udp"], |s| s.proxy_udp).on(),
 ];
 
@@ -49,7 +83,12 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["vless://"],
     from_link: Some(from_link),
-    note: None,
+    // Строка не про VLESS вообще, а про security = reality — см. документ
+    // константы `SECURITY` и `crate::i18n::Strings::reality_unverified`.
+    // Показывать её и при tls/none тоже — цена статичной строки в этой
+    // форме: другого способа сказать это только при выборе reality сейчас
+    // нет (`FieldKind::Choice` не показывает `example`, см. `editor.rs`).
+    note: Some(|s| s.reality_unverified),
 };
 
 /// Как ссылка ложится в поля.
@@ -70,9 +109,8 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
 
     let mut values = vec![("server", link.server(DEFAULT_PORT)), ("uuid", uuid)];
 
+    let is_reality = link.query.get("security").as_deref() == Some("reality");
     if let Some(security) = link.query.get("security") {
-        // `reality` и `xtls` сюда попасть могут, и это не наш случай: пусть
-        // отвергнет протокол — с объяснением, которого у окна нет.
         values.push(("security", security));
     }
     if let Some(transport) = link.query.get("type") {
@@ -84,11 +122,35 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if let Some(host) = link.query.get("host") {
         values.push(("host", host));
     }
+    // Одно и то же имя сайта у обычного TLS (`tls.sni`) и у Reality
+    // (`reality.server_name`) значит разное — совсем не подделка личности
+    // против ровно этой подделки — и лежит в разных полях
+    // (`RealityConfig::validate` отказывает, если заданы оба сразу).
     if let Some(sni) = link.query.get("sni").or_else(|| link.query.get("peer")) {
-        values.push(("sni", sni));
+        values.push((
+            if is_reality {
+                "reality_server_name"
+            } else {
+                "sni"
+            },
+            sni,
+        ));
     }
     if link.query.flag("allowInsecure") || link.query.flag("insecure") {
         values.push(("insecure", "1".to_owned()));
+    }
+    // `pbk`/`sid` — обычные имена параметров Reality в ссылках `vless://`
+    // (`Xray-core`, `infra/conf/transport_security.go`, разбор `RealityOpts`).
+    // Отпечаток (`fp`) сюда не попадает — поля под него в форме нет (см.
+    // документ `FIELDS`), и ссылка с ним просто оставляет умолчание `chrome`.
+    if let Some(public_key) = link.query.get("pbk") {
+        values.push(("reality_public_key", public_key));
+    }
+    if let Some(short_id) = link.query.get("sid") {
+        values.push(("reality_short_id", short_id));
+    }
+    if let Some(flow) = link.query.get("flow") {
+        values.push(("flow", flow));
     }
 
     Ok(values)
@@ -102,13 +164,21 @@ mod tests {
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 
     #[test]
-    fn reality_is_not_offered_while_it_cannot_carry_traffic() {
-        // Рукопожатие Reality доходит до сертификата сервера и проверяет его,
-        // но не продолжается до прикладных ключей: байты VLESS такой канал не
-        // понесёт. Пункт в списке, который нельзя выбрать с пользой, хуже
-        // отсутствующего — вернуть его сюда можно будет вместе с
-        // доведённым рукопожатием, не раньше.
-        assert!(!SECURITY.contains(&"reality"));
+    fn reality_is_offered_now_that_the_handshake_carries_traffic() {
+        // Рукопожатие доведено до прикладных ключей TLS 1.3
+        // (`penguin_vless::reality::handshake::connect`) — канал несёт байты
+        // VLESS, и пункт в списке снова можно выбрать с пользой.
+        assert!(SECURITY.contains(&"reality"));
+    }
+
+    #[test]
+    fn the_form_warns_that_reality_was_not_checked_against_a_live_server() {
+        assert!(SPEC.note.is_some());
+    }
+
+    #[test]
+    fn the_flow_field_is_exposed_in_the_form() {
+        assert!(SPEC.index_of("flow").is_some());
     }
 
     fn parse(raw: &str) -> Vec<(&'static str, String)> {
@@ -155,11 +225,38 @@ mod tests {
     }
 
     #[test]
-    fn reality_is_carried_over_and_left_to_the_protocol() {
-        // Окно не знает, чего протокол не умеет, — и объяснить это некому,
-        // кроме самого протокола.
-        let values = parse(&format!("vless://{UUID}@example.com:443?security=reality"));
+    fn a_vision_flow_is_carried_over_from_the_link() {
+        let values = parse(&format!(
+            "vless://{UUID}@example.com:443?security=reality&pbk=abc&sid=ab12&sni=www.example.com&flow=xtls-rprx-vision"
+        ));
+        assert_eq!(value(&values, "flow"), Some("xtls-rprx-vision"));
+    }
+
+    #[test]
+    fn reality_settings_are_carried_over_into_their_own_fields() {
+        let values = parse(&format!(
+            "vless://{UUID}@example.com:443?security=reality&pbk=abc&sid=ab12&sni=www.example.com"
+        ));
         assert_eq!(value(&values, "security"), Some("reality"));
+        assert_eq!(value(&values, "reality_public_key"), Some("abc"));
+        assert_eq!(value(&values, "reality_short_id"), Some("ab12"));
+        assert_eq!(
+            value(&values, "reality_server_name"),
+            Some("www.example.com")
+        );
+        // `sni` (обычный TLS) не заполняется рядом — иначе `RealityConfig::validate`
+        // отказала бы: Reality не использует обычный TLS вовсе.
+        assert_eq!(value(&values, "sni"), None);
+    }
+
+    #[test]
+    fn an_unrecognized_security_still_carries_the_site_name_into_plain_sni() {
+        // Без `security=reality` имя сайта — это обычный TLS SNI, не Reality.
+        let values = parse(&format!(
+            "vless://{UUID}@example.com:443?security=tls&sni=cdn.example.com"
+        ));
+        assert_eq!(value(&values, "sni"), Some("cdn.example.com"));
+        assert_eq!(value(&values, "reality_server_name"), None);
     }
 
     #[test]

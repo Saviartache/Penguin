@@ -24,26 +24,23 @@
 //! всех их тестов разом.
 
 pub mod anytls;
-pub mod brook;
 pub mod catalog;
-pub mod gost_relay;
 pub mod http;
 pub mod hysteria2;
 pub mod juicity;
 pub mod masque;
-pub mod mieru;
+pub mod masque_ip;
 pub mod naive;
 pub mod openconnect;
+pub mod pingwin;
 pub mod shadowsocks;
-pub mod shadowsocksr;
-pub mod snell;
 pub mod socks5;
 pub mod spec;
-pub mod ssh;
 pub mod trojan;
 pub mod trusttunnel;
 pub mod tuic;
 pub mod vless;
+pub mod vmess;
 pub mod wireguard;
 
 pub use catalog::{ALL, DEFAULT, by_id, by_scheme};

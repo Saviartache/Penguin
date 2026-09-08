@@ -195,8 +195,11 @@ where
 /// Читает заголовок ответа целиком и возвращает его вместе с хвостом.
 ///
 /// Общая часть с [`crate::httpupgrade`]: рукопожатие там то же самое, а
-/// проверка ответа — другая.
-pub(crate) async fn read_head<S>(io: &mut S) -> TransportResult<(String, Vec<u8>)>
+/// проверка ответа — другая. `pub`, а не `pub(crate)`: тот же разбор нужен
+/// любому протоколу, поднимающему запрос-апгрейд HTTP/1.1 своими руками —
+/// см. `penguin_masque::ip`, где `CONNECT-IP` идёт этим путём, а не
+/// расширенным CONNECT у HTTP/2/3.
+pub async fn read_head<S>(io: &mut S) -> TransportResult<(String, Vec<u8>)>
 where
     S: AsyncRead + Unpin,
 {

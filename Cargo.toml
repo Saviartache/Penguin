@@ -1,4 +1,4 @@
-# Penguin — VPN-клиент. Корень workspace. Раскладка — `docs/protocols.md`.
+# Penguin — VPN-клиент. Корень workspace. Раскладка — `AGENTS.md` §1.
 
 [workspace]
 resolver = "3"
@@ -24,24 +24,21 @@ members = [
     "protocols/hysteria2",
     "protocols/anytls",
     "protocols/juicity",
-    "protocols/snell",
-    "protocols/gost-relay",
-    "protocols/brook",
-    "protocols/mieru",
     "protocols/masque",
     "protocols/naive",
     "protocols/openconnect",
-    "protocols/shadowsocksr",
-    "protocols/ssh",
     "protocols/trusttunnel",
     "protocols/utls",
     "protocols/wireguard",
     "protocols/tuic",
     "protocols/vless",
+    "protocols/vmess",
+    "protocols/pingwin",
     "protocols/shadowsocks",
     "protocols/trojan",
     "protocols/socks5",
     "protocols/http-proxy",
+    "servers/pingwin",
 ]
 
 # У кита свои `rustfmt.toml` и свои пороги clippy: в нашем workspace он
@@ -81,21 +78,17 @@ penguin-gui      = { path = "crates/gui" }
 penguin-transport = { path = "protocols/transport" }
 penguin-anytls = { path = "protocols/anytls" }
 penguin-juicity = { path = "protocols/juicity" }
-penguin-snell = { path = "protocols/snell" }
-penguin-gost-relay = { path = "protocols/gost-relay" }
-penguin-brook = { path = "protocols/brook" }
-penguin-mieru = { path = "protocols/mieru" }
 penguin-masque = { path = "protocols/masque" }
 penguin-naive = { path = "protocols/naive" }
 penguin-openconnect = { path = "protocols/openconnect" }
-penguin-shadowsocksr = { path = "protocols/shadowsocksr" }
-penguin-ssh = { path = "protocols/ssh" }
 penguin-trusttunnel = { path = "protocols/trusttunnel" }
 penguin-utls = { path = "protocols/utls" }
 penguin-wireguard = { path = "protocols/wireguard" }
 penguin-hysteria2 = { path = "protocols/hysteria2" }
 penguin-tuic = { path = "protocols/tuic" }
 penguin-vless = { path = "protocols/vless" }
+penguin-vmess = { path = "protocols/vmess" }
+penguin-pingwin = { path = "protocols/pingwin" }
 penguin-shadowsocks = { path = "protocols/shadowsocks" }
 penguin-trojan = { path = "protocols/trojan" }
 penguin-socks5 = { path = "protocols/socks5" }
@@ -129,10 +122,6 @@ h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 smoltcp = { version = "0.12", default-features = false }
-# Своей реализации SSH не будет — обмен ключами, шифры, опознание и каналы
-# отдельный проект. Бэкенд и алгоритмы выбираются в `protocols/ssh`, чтобы не
-# тащить сюда второй криптографический бэкенд по умолчанию.
-russh = { version = "0.63", default-features = false }
 
 # Только ради OpenConnect: опознание на сервере ocserv устроено как обмен
 # HTTPS-запросами с телом XML. Свой разбор XML — это либо утиный разбор
@@ -161,15 +150,20 @@ maxminddb = "0.24"
 # не собирается, и каждая половина тянет в дерево свою копию `digest`,
 # `block-buffer`, `crypto-common` и `generic-array`.
 blake2 = "0.11"
+# Только ради Shadowsocks 2022: ключи и подключи там выводятся BLAKE3 в режиме
+# `derive_key`, и другой функции вывода у метода нет. В `ring` его нет.
+blake3 = { version = "1", default-features = false }
 sha2 = "0.11"
+# Только ради VMess: маскировка длины кадра тела — это XOF Shake128,
+# которого нет ни у `ring`, ни у остальной уже подключённой криптографии.
+# Зафиксировано на `0.11`: в `0.12` `Shake128`/`Shake128Reader` из крейта
+# убраны (сверено с исходником `sha3` на crates.io), а именно они здесь и
+# нужны.
+sha3 = { version = "=0.11", default-features = false }
 # Только ради `EVP_BytesToKey` — вывода ключа из пароля у Shadowsocks. Своей
 # стойкости он не даёт и придуман не для этого; заменить его нельзя, потому
 # что так делает сервер.
 md-5 = "0.11"
-# Только ради Snell: сеансовый ключ он выводит Argon2id прямо из пароля, и
-# другой функции у него нет. Своей реализации Argon2 в проекте не будет —
-# это примитив, который либо берут готовым, либо ошибаются в нём молча.
-argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 rand = "0.8"
 # Только ради WireGuard: постоянный приватный ключ участвует в каждом
 # рукопожатии за весь сеанс, а `ring::agreement` потребляет его при первом же
@@ -177,21 +171,14 @@ rand = "0.8"
 # одноразового ключа рукопожатия, который в одном сеансе Noise IK участвует в
 # двух разных вычислениях Диффи-Хеллмана.
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "getrandom"] }
-# Только ради ShadowsocksR: там все шифры потоковые, а в `ring` (AEAD) их
-# нет. Данные ими не заверяются — это свойство протокола, не наше решение
-# (см. документ крейта `penguin-shadowsocksr`).
+# Голый блочный AES: заголовок сессии у Shadowsocks 2022 и опознаватель
+# VMess шифруются одним блоком без режима сцепления, а `ring` даёт только
+# AEAD.
 aes = "0.9"
-cfb-mode = "0.9"
-ctr = "0.10"
-rc4 = "0.2"
-sha1 = "0.11"
-hmac = "0.13"
-# Только ради Mieru: нонс XChaCha20-Poly1305 — 24 байта, вдвое длиннее того,
-# что умеет общий `aead` (у `ring` XChaCha20 нет вовсе).
+# XChaCha20-Poly1305: нонс 24 байта, вдвое длиннее того, что умеет общий
+# `aead` (у `ring` XChaCha20 нет вовсе). Нужен датаграммам Shadowsocks 2022 и
+# WireGuard.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
-# Только ради Mieru: сеансовый ключ выводится PBKDF2-HMAC-SHA256 из хэша
-# пароля с именем пользователя и соли, зависящей от времени.
-pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 
 # --- DNS ---
 hickory-proto = { version = "0.24", default-features = false }

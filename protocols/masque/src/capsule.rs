@@ -54,16 +54,24 @@ pub fn encode_udp_datagram(payload: &[u8]) -> Result<Bytes, MasqueError> {
             payload.len()
         )));
     }
+    Ok(encode_datagram_capsule(CONTEXT_ID_UDP, payload))
+}
 
-    let mut value = BytesMut::with_capacity(varint::encoded_len(CONTEXT_ID_UDP) + payload.len());
-    varint::encode(CONTEXT_ID_UDP, &mut value);
+/// Собирает капсулу `DATAGRAM` с произвольным Context ID.
+///
+/// Общий строитель для [`encode_udp_datagram`] (CONNECT-UDP, RFC 9298 §5) и
+/// капсулы данных CONNECT-IP (RFC 9484 §6, [`crate::ip`]): формат `Context ID
+/// + Payload` один и тот же в обоих документах, разница только в том, что
+/// лежит в `Payload` — UDP-датаграмма там и целый IP-пакет здесь.
+pub(crate) fn encode_datagram_capsule(context_id: u64, payload: &[u8]) -> Bytes {
+    let mut value = BytesMut::with_capacity(varint::encoded_len(context_id) + payload.len());
+    varint::encode(context_id, &mut value);
     value.put_slice(payload);
-
-    Ok(encode_capsule(CAPSULE_TYPE_DATAGRAM, &value))
+    encode_capsule(CAPSULE_TYPE_DATAGRAM, &value)
 }
 
 /// Собирает капсулу произвольного типа.
-fn encode_capsule(capsule_type: u64, value: &[u8]) -> Bytes {
+pub(crate) fn encode_capsule(capsule_type: u64, value: &[u8]) -> Bytes {
     let mut buf = BytesMut::with_capacity(
         varint::encoded_len(capsule_type) + varint::encoded_len(value.len() as u64) + value.len(),
     );
@@ -103,30 +111,15 @@ impl CapsuleReader {
     /// сегодня, для целой капсулы не хватает.
     pub fn next_datagram(&mut self) -> Result<Option<Bytes>, MasqueError> {
         loop {
-            let Some((capsule_type, type_len)) = varint::try_decode(&self.buf) else {
+            let Some((capsule_type, mut value)) = self.next_capsule()? else {
                 return Ok(None);
             };
-            let Some((length, length_len)) = varint::try_decode(&self.buf[type_len..]) else {
-                return Ok(None);
-            };
-            let header_len = type_len + length_len;
-            let total_len = header_len
-                + usize::try_from(length)
-                    .map_err(|_| MasqueError::malformed("длина капсулы не влезает в память"))?;
-
-            if self.buf.len() < total_len {
-                return Ok(None);
-            }
-
-            let mut frame = self.buf.split_to(total_len);
-            frame.advance(header_len);
 
             if capsule_type != CAPSULE_TYPE_DATAGRAM {
                 // Неизвестный тип — переходим к следующей капсуле.
                 continue;
             }
 
-            let mut value = frame.freeze();
             let context_id = varint::decode_prefix(&mut value)
                 .ok_or_else(|| MasqueError::malformed("капсула DATAGRAM без context ID"))?;
             if context_id != CONTEXT_ID_UDP {
@@ -137,6 +130,34 @@ impl CapsuleReader {
 
             return Ok(Some(value));
         }
+    }
+
+    /// Возвращает следующую капсулу целиком — тип и значение как есть, без
+    /// разбора того, что внутри, — если она уже целиком собрана.
+    ///
+    /// Общий уровень под [`Self::next_datagram`] (CONNECT-UDP) и капсулами
+    /// согласования адреса CONNECT-IP ([`crate::ip`]), которым нужны типы,
+    /// каких `next_datagram` вообще не знает (`ADDRESS_ASSIGN` и родня).
+    /// `Ok(None)` — то же самое «подождать ещё», что и у `next_datagram`.
+    pub fn next_capsule(&mut self) -> Result<Option<(u64, Bytes)>, MasqueError> {
+        let Some((capsule_type, type_len)) = varint::try_decode(&self.buf) else {
+            return Ok(None);
+        };
+        let Some((length, length_len)) = varint::try_decode(&self.buf[type_len..]) else {
+            return Ok(None);
+        };
+        let header_len = type_len + length_len;
+        let total_len = header_len
+            + usize::try_from(length)
+                .map_err(|_| MasqueError::malformed("длина капсулы не влезает в память"))?;
+
+        if self.buf.len() < total_len {
+            return Ok(None);
+        }
+
+        let mut frame = self.buf.split_to(total_len);
+        frame.advance(header_len);
+        Ok(Some((capsule_type, frame.freeze())))
     }
 }
 
@@ -216,5 +237,25 @@ mod tests {
             b"two"
         );
         assert_eq!(reader.next_datagram().expect("разбирается"), None);
+    }
+
+    #[test]
+    fn next_capsule_returns_a_type_next_datagram_does_not_know() {
+        // `next_datagram` пропускает всё, что не DATAGRAM; `next_capsule`
+        // отдаёт его как есть — этим и пользуются капсулы CONNECT-IP.
+        let mut buf = BytesMut::new();
+        varint::encode(0x2a, &mut buf);
+        varint::encode(3, &mut buf);
+        buf.put_slice(b"xyz");
+
+        let mut reader = CapsuleReader::new();
+        reader.push(buf.freeze());
+        let (capsule_type, value) = reader
+            .next_capsule()
+            .expect("разбирается")
+            .expect("капсула целиком пришла");
+        assert_eq!(capsule_type, 0x2a);
+        assert_eq!(&value[..], b"xyz");
+        assert_eq!(reader.next_capsule().expect("разбирается"), None);
     }
 }

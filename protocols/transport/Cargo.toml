@@ -29,7 +29,9 @@ ring.workspace = true
 # повторить — так выводит ключ сервер (см. `kdf`).
 md-5.workspace = true
 
-tokio = { workspace = true, features = ["rt", "io-util", "time", "macros"] }
+# `net` — ради `desync`: он меняет TTL уже открытого `TcpStream`. Сокетов
+# крейт по-прежнему не открывает: соединение приходит от `Dialer`.
+tokio = { workspace = true, features = ["rt", "io-util", "net", "time", "macros"] }
 bytes.workspace = true
 rand.workspace = true
 serde.workspace = true

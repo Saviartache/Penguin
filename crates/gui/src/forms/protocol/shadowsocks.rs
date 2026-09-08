@@ -20,7 +20,32 @@ const DEFAULT_PORT: u16 = 8388;
 /// Потоковых шифров прежних версий (`aes-256-cfb`, `rc4-md5`) в списке нет, и
 /// крейт протокола их тоже не принимает: они не заверяют данные, то есть
 /// правку по дороге не заметит ни клиент, ни сервер.
-const METHODS: &[&str] = &["aes-256-gcm", "aes-128-gcm", "chacha20-ietf-poly1305"];
+///
+/// Три метода `2022-blake3-*` — снизу: у них поле «пароль» несёт не пароль, а
+/// закодированный в base64 ключ (PSK), и это стоит увидеть по имени метода, а
+/// не только в подсказке поля.
+const METHODS: &[&str] = &[
+    "aes-256-gcm",
+    "aes-128-gcm",
+    "chacha20-ietf-poly1305",
+    "2022-blake3-aes-128-gcm",
+    "2022-blake3-aes-256-gcm",
+    "2022-blake3-chacha20-poly1305",
+];
+
+/// Длина ключа (PSK) в байтах для метода 2022. `None` — метод не из 2022, у
+/// него в этом поле обычный пароль, а не ключ фиксированной длины.
+///
+/// Список продублирован с `penguin_shadowsocks::method::Method2022`, а не
+/// взят оттуда: `gui` не имеет права зависеть от `protocols/*` (`AGENTS.md`
+/// §1), и три строки дешевле, чем зависимость ради них.
+fn method2022_key_len(method: &str) -> Option<usize> {
+    match method {
+        "2022-blake3-aes-128-gcm" => Some(16),
+        "2022-blake3-aes-256-gcm" | "2022-blake3-chacha20-poly1305" => Some(32),
+        _ => None,
+    }
+}
 
 /// Поля формы в том порядке, в каком они показываются.
 static FIELDS: &[FieldSpec] = &[
@@ -58,6 +83,17 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
 /// Отличаются они наличием `@` **снаружи** base64. Разобрать надо обе: ссылки
 /// рассылают до сих пор в обеих, и отвергнутая ссылка выглядит как поломка
 /// клиента, а не как устаревший формат.
+///
+/// # 2022 несёт ключ, а не пароль
+///
+/// У методов `2022-blake3-*` поле после двоеточия — не пароль, а
+/// закодированный в base64 предварительный общий ключ (PSK) ровно нужной
+/// длины: 16 байт для AES-128-GCM, 32 — для остальных двух. Разбор строки на
+/// «метод» и «пароль» тем же `split_once(':')` работает и здесь без изменений
+/// — base64 двоеточий не содержит, — но длину ключа стоит проверить сразу:
+/// сервер с ключом не той длины не пришлёт даже отказа, он просто не сможет
+/// прочитать первый кусок, и ссылка, принятая молча, выглядела бы рабочей до
+/// первой попытки подключиться.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let userinfo = link.userinfo();
     let (credentials, server) = if userinfo.is_empty() {
@@ -76,6 +112,10 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
         .ok_or_else(|| crate::i18n::s().link_no_password.to_owned())?;
     if password.is_empty() {
         return Err(crate::i18n::s().link_no_password.to_owned());
+    }
+    if let Some(key_len) = method2022_key_len(method) {
+        base64::decode_exact(password, key_len, "ключ Shadowsocks 2022")
+            .map_err(|_| crate::i18n::s().link_not_a_link.to_owned())?;
     }
 
     Ok(vec![
@@ -222,6 +262,59 @@ mod tests {
 
         let link = link::split(&sip002("aes-256-gcm", "example.com:8388")).expect("разбирается");
         assert!(from_link(&link).is_err());
+    }
+
+    #[test]
+    fn the_2022_methods_are_offered_in_the_choice() {
+        for method in [
+            "2022-blake3-aes-128-gcm",
+            "2022-blake3-aes-256-gcm",
+            "2022-blake3-chacha20-poly1305",
+        ] {
+            assert!(METHODS.contains(&method), "{method}");
+        }
+    }
+
+    #[test]
+    fn a_2022_link_with_a_key_of_the_right_length_is_read() {
+        let key = base64::encode(&[7u8; 16]);
+        let values = parse(&sip002(
+            &format!("2022-blake3-aes-128-gcm:{key}"),
+            "example.com:8388",
+        ));
+        assert_eq!(value(&values, "method"), Some("2022-blake3-aes-128-gcm"));
+        assert_eq!(value(&values, "password"), Some(key.as_str()));
+    }
+
+    #[test]
+    fn a_2022_link_with_a_key_of_the_wrong_length_is_not_silently_accepted() {
+        // Сервер с ключом не той длины не пришлёт даже отказа: ссылка,
+        // принятая молча, выглядела бы рабочей до первой попытки подключиться.
+        let short_key = base64::encode(&[7u8; 10]);
+        let link = link::split(&sip002(
+            &format!("2022-blake3-aes-128-gcm:{short_key}"),
+            "example.com:8388",
+        ))
+        .expect("ссылка разбирается");
+        assert!(from_link(&link).is_err());
+    }
+
+    #[test]
+    fn a_2022_link_whose_key_is_not_base64_is_not_silently_accepted() {
+        let link = link::split(&sip002(
+            "2022-blake3-aes-128-gcm:не base64 и не ключ",
+            "example.com:8388",
+        ))
+        .expect("ссылка разбирается");
+        assert!(from_link(&link).is_err());
+    }
+
+    #[test]
+    fn a_plain_aead_password_is_not_held_to_the_2022_key_length() {
+        // Обычный пароль — произвольная строка; проверка длины ключа его не
+        // касается вовсе.
+        let values = parse(&sip002("aes-256-gcm:любой пароль", "example.com:8388"));
+        assert_eq!(value(&values, "password"), Some("любой пароль"));
     }
 
     #[test]

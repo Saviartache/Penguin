@@ -22,9 +22,10 @@ use tokio::io::AsyncWriteExt;
 
 use crate::config::{Security, Transport, VlessConfig};
 use crate::error::{VlessError, VlessResult};
-use crate::frame::request;
+use crate::frame::{addons, request};
 use crate::reality::{self, RealityConfig};
 use crate::stream::VlessStream;
+use crate::vision::VisionStream;
 
 /// Всё, что нужно, чтобы открыть поток до сервера.
 pub struct Connector {
@@ -37,6 +38,10 @@ pub struct Connector {
     tls: Option<TlsClient>,
     /// Настройки Reality. `None` — `security` не `"reality"`.
     reality: Option<RealityConfig>,
+    /// `flow` — `xtls-rprx-vision`. `config.validate()` уже отказала бы на
+    /// любой другой комбинации, так что здесь это просто «включать ли
+    /// Vision», без своего разбора значения.
+    vision: bool,
     transport: Transport,
     /// Путь запроса для переносов поверх HTTP.
     path: String,
@@ -52,6 +57,7 @@ impl std::fmt::Debug for Connector {
             .field("port", &self.port)
             .field("tls", &self.tls.is_some())
             .field("reality", &self.reality.is_some())
+            .field("vision", &self.vision)
             .field("transport", &self.transport)
             .finish()
     }
@@ -83,12 +89,15 @@ impl Connector {
             }
         };
 
+        let vision = config.flow() == Some(addons::FLOW_VISION);
+
         Ok(Self {
             host,
             port,
             uuid: config.uuid,
             tls,
             reality,
+            vision,
             transport: config.transport,
             path: config.path().to_owned(),
             http_host: config.host()?,
@@ -102,24 +111,9 @@ impl Connector {
         command: u8,
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
-        if self.reality.is_some() {
-            // См. `crate::reality`: рукопожатие доходит до сертификата
-            // сервера и проверяет его, но не продолжается до Finished и
-            // прикладных ключей TLS 1.3 — поток, о котором эта проверка
-            // ничего не знает, не готов нести байты VLESS. Отказ здесь —
-            // не временная затычка, а честный ответ на вопрос «а что
-            // случится, если я всё-таки попробую подключиться»: тихо
-            // притвориться работающим каналом хуже, чем отказать.
-            return Err(VlessError::config(
-                "VLESS поверх Reality пока проверяет сервер, но не соединяет: рукопожатие \
-                 останавливается на сертификате и не продолжается до прикладных ключей TLS 1.3 \
-                 (см. penguin_vless::reality)",
-            )
-            .into());
-        }
-
         let mut io = self.carry().await?;
-        let header = request::request(&self.uuid, command, target)?;
+        let flow = self.vision.then_some(addons::FLOW_VISION);
+        let header = request::request(&self.uuid, command, target, flow)?;
 
         deadline::handshake::<_, VlessError>("заголовок VLESS", async {
             io.write_all(&header).await?;
@@ -135,9 +129,28 @@ impl Connector {
     async fn carry(&self) -> Result<Box<dyn ProxyStream>, ProtocolError> {
         let plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
 
-        let secure: Box<dyn ProxyStream> = match &self.tls {
-            Some(tls) => Box::new(tls.connect(plain).await.map_err(VlessError::from)?),
-            None => Box::new(plain),
+        let secure: Box<dyn ProxyStream> = if let Some(tls) = &self.tls {
+            Box::new(tls.connect(plain).await.map_err(VlessError::from)?)
+        } else if let Some(reality) = &self.reality {
+            // Рукопожатие доводится до прикладных ключей TLS 1.3
+            // (`crate::reality::handshake::connect`) — байты VLESS дальше
+            // идут внутри уже зашифрованного канала, вторым слоем поверх
+            // TLS 1.3. `flow = "xtls-rprx-vision"` (`self.vision`,
+            // `config.validate()` уже проверила, что тогда `security` —
+            // именно `reality`, а `transport` — `tcp`) снимает этот второй
+            // слой, как только увидит подходящее условие (`crate::vision`);
+            // без него канал остаётся двойным, как и был.
+            let stream = deadline::handshake::<_, VlessError>("рукопожатие Reality", async {
+                Ok(reality::connect(plain, reality).await?)
+            })
+            .await?;
+            if self.vision {
+                Box::new(VisionStream::new(stream, *self.uuid.as_bytes()))
+            } else {
+                Box::new(stream)
+            }
+        } else {
+            Box::new(plain)
         };
 
         Ok(match self.transport {
@@ -176,10 +189,13 @@ impl Connector {
     /// отправляется: соединение до чужого адреса, о котором никто не просил,
     /// в журнале сервера выглядит чужим трафиком.
     ///
-    /// У Reality эта проверка — единственное, что вообще можно сделать с
-    /// сервером сейчас (см. [`Self::open`]): она честная и самостоятельная
-    /// (доходит до HMAC-подтверждения сертификата, а не только до открытия
-    /// сокета), но не открывает канал для данных.
+    /// У Reality эта проверка дешевле [`Self::open`]: она останавливается на
+    /// HMAC-подтверждении сертификата (`crate::reality::handshake::verify`)
+    /// и не доводит рукопожатие до прикладных ключей — соединение, на
+    /// котором она работает, потом просто закрывается, а не становится
+    /// каналом. Честная и самостоятельная (не только открытие сокета), но
+    /// дешевле полного [`crate::reality::connect`], которым пользуется
+    /// [`Self::open`].
     pub async fn verify(&self) -> Result<(), ProtocolError> {
         if let Some(config) = &self.reality {
             let mut plain = connect::dial(&*self.dialer, &self.host, self.port).await?;

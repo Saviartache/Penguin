@@ -38,6 +38,17 @@ pub enum MasqueError {
         status: u16,
     },
 
+    /// Сервер отказал в `CONNECT-IP`: код ответа не `101`, кроме `401`/`407`.
+    ///
+    /// Отдельный вариант от [`Self::Refused`]: у `CONNECT-IP` нет цели в
+    /// пути запроса (RFC 9484 запрашивает полный туннель, а не канал до
+    /// одного адреса), и текст «до `{target}`» здесь был бы неправдой.
+    #[error("сервер отказал в CONNECT-IP: код {status}")]
+    RefusedIp {
+        /// Код ответа.
+        status: u16,
+    },
+
     /// Ответ не разбирается как ожидалось: нет `capsule-protocol: ?1`,
     /// обрезанная капсула, полезная нагрузка сверх предела.
     #[error("сервер ответил не по протоколу MASQUE: {0}")]
@@ -86,6 +97,7 @@ impl From<MasqueError> for ProtocolError {
             err @ MasqueError::Malformed(_) => Self::InvalidConfig(err.to_string()),
             MasqueError::Transport(message) => Self::Connect(message),
             err @ MasqueError::Refused { .. } => Self::Unreachable(err.to_string()),
+            err @ MasqueError::RefusedIp { .. } => Self::Unreachable(err.to_string()),
             MasqueError::Disconnected(message) => Self::Disconnected(message),
             MasqueError::TransportCommon(err) => err.into(),
             MasqueError::Io(err) => Self::Io(err),
@@ -129,6 +141,13 @@ mod tests {
         }
         .into();
         assert!(err.to_string().contains("203.0.113.5:53"));
+        assert!(err.is_retryable(), "чужой отказ — не наша поломка");
+    }
+
+    #[test]
+    fn an_ip_refusal_names_no_target_it_never_had() {
+        let err: ProtocolError = MasqueError::RefusedIp { status: 403 }.into();
+        assert!(err.to_string().contains("403"));
         assert!(err.is_retryable(), "чужой отказ — не наша поломка");
     }
 }

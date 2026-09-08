@@ -189,21 +189,17 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
     Some(match feature {
         // Не протокол: перечисление остальных.
         "default" => &[],
+        "pingwin" => &["pingwin"],
         "hysteria2" => &["hysteria2"],
         "trojan" => &["trojan"],
         "shadowsocks" => &["shadowsocks"],
         "vless" => &["vless"],
+        "vmess" => &["vmess"],
         "tuic" => &["tuic"],
         "anytls" => &["anytls"],
         "juicity" => &["juicity"],
-        "snell" => &["snell"],
-        "gost-relay" => &["gost-relay"],
-        "brook" => &["brook"],
-        "mieru" => &["mieru"],
-        "shadowsocksr" => &["shadowsocksr"],
-        "ssh" => &["ssh"],
         "naive" => &["http2"],
-        "masque" => &["masque"],
+        "masque" => &["masque", "masque-ip"],
         "wireguard" => &["wireguard"],
         "openconnect" => &["openconnect"],
         "trusttunnel" => &["trusttunnel"],
@@ -220,6 +216,12 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
 /// Добавление протокола — одна строка здесь, одна фича в `Cargo.toml` и одна
 /// строка в [`protocols_of`]. Больше нигде в программе трогать ничего не нужно.
 fn register_protocols(registry: &mut ProtocolRegistry) {
+    // Свой протокол, а не чужой: рукопожатие в форме TLS 1.3, 0-RTT,
+    // мультиплексор и обход DPI в первой посылке. Сервер к нему —
+    // `servers/pingwin` в этом же дереве.
+    #[cfg(feature = "pingwin")]
+    registry.register(Arc::new(penguin_pingwin::PingwinFactory::new()));
+
     #[cfg(feature = "hysteria2")]
     registry.register(Arc::new(penguin_hysteria2::Hysteria2Factory::new()));
 
@@ -232,6 +234,9 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
     #[cfg(feature = "vless")]
     registry.register(Arc::new(penguin_vless::VlessFactory::new()));
 
+    #[cfg(feature = "vmess")]
+    registry.register(Arc::new(penguin_vmess::VmessFactory::new()));
+
     #[cfg(feature = "tuic")]
     registry.register(Arc::new(penguin_tuic::TuicFactory::new()));
 
@@ -241,26 +246,6 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
     #[cfg(feature = "juicity")]
     registry.register(Arc::new(penguin_juicity::JuicityFactory::new()));
 
-    #[cfg(feature = "snell")]
-    registry.register(Arc::new(penguin_snell::SnellFactory::new()));
-
-    #[cfg(feature = "gost-relay")]
-    registry.register(Arc::new(penguin_gost_relay::GostRelayFactory::new()));
-
-    #[cfg(feature = "brook")]
-    registry.register(Arc::new(penguin_brook::BrookFactory::new()));
-
-    #[cfg(feature = "mieru")]
-    registry.register(Arc::new(penguin_mieru::MieruFactory::new()));
-
-    #[cfg(feature = "shadowsocksr")]
-    registry.register(Arc::new(penguin_shadowsocksr::ShadowsocksrFactory::new()));
-
-    #[cfg(feature = "ssh")]
-    registry.register(Arc::new(penguin_ssh::SshFactory::new()));
-
-    // Две записи из одного крейта: тот же `CONNECT` и та же схема
-    // дополнения, но поверх разных переносов.
     // Первый протокол уровня пакетов, и потому вторая таблица реестра.
     // Превращать его пакеты в соединения будет мост (`crate::packet_tunnel`),
     // и выше по дереву он неотличим от обычного направления.
@@ -275,7 +260,15 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     #[cfg(feature = "masque")]
     registry.register(Arc::new(penguin_masque::MasqueFactory::new()));
+    // Второй режим одного семейства (RFC 9484, `CONNECT-IP`) — труба для
+    // пакетов, а не для датаграмм с адресом, и потому второй реестр, как у
+    // WireGuard и OpenConnect.
+    #[cfg(feature = "masque")]
+    registry.register_packet(Arc::new(penguin_masque::MasqueIpFactory::new()));
 
+    // Одна запись, а не две: ноги HTTP/3 у крейта нет и пока быть не может
+    // (`h3` 0.0.8 шлёт в `CONNECT` запрещённые RFC 9114 §4.4 `:scheme` и
+    // `:path` — разбор в документе крейта `penguin_naive`).
     #[cfg(feature = "naive")]
     registry.register(Arc::new(penguin_naive::NaiveFactory::http2()));
 

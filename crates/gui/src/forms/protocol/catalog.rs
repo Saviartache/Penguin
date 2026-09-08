@@ -7,8 +7,8 @@
 
 use crate::forms::protocol::spec::ProtocolSpec;
 use crate::forms::protocol::{
-    anytls, brook, gost_relay, http, hysteria2, juicity, masque, mieru, naive, openconnect,
-    shadowsocks, shadowsocksr, snell, socks5, ssh, trojan, trusttunnel, tuic, vless, wireguard,
+    anytls, http, hysteria2, juicity, masque, masque_ip, naive, openconnect, pingwin, shadowsocks,
+    socks5, trojan, trusttunnel, tuic, vless, vmess, wireguard,
 };
 
 /// Протоколы в порядке показа.
@@ -16,6 +16,9 @@ use crate::forms::protocol::{
 /// Добавление протокола — строка здесь и файл с описанием рядом. Ни экран
 /// выбора, ни редактор, ни разбор ссылок при этом не трогаются.
 pub static ALL: &[&ProtocolSpec] = &[
+    // Свой протокол — первым: единственный в списке, у которого в этом же
+    // дереве лежит и сервер, и единственный, который обходит DPI сам.
+    &pingwin::SPEC,
     &wireguard::SPEC,
     &openconnect::SPEC,
     &hysteria2::SPEC,
@@ -23,17 +26,13 @@ pub static ALL: &[&ProtocolSpec] = &[
     &juicity::SPEC,
     &anytls::SPEC,
     &vless::SPEC,
+    &vmess::SPEC,
     &trojan::SPEC,
     &shadowsocks::SPEC,
-    &shadowsocksr::SPEC,
-    &snell::SPEC,
-    &gost_relay::SPEC,
-    &brook::SPEC,
-    &mieru::SPEC,
     &trusttunnel::SPEC,
     &naive::HTTP2,
     &masque::SPEC,
-    &ssh::SPEC,
+    &masque_ip::SPEC,
     &socks5::TLS,
     &socks5::SPEC,
     &http::HTTPS,

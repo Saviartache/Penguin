@@ -1,7 +1,7 @@
 //! Настройки — символьная панель терминала во всю вкладку.
 //!
 //! Тот же прямоугольник консоли, что у серверов и правил, но не таблица:
-//! настройки — это четыре переключателя, а не список записей. Столбцов, по
+//! настройки — это набор переключателей, а не список записей. Столбцов, по
 //! которым сравнивают строки, здесь нет, сравнивать нечего, и потому нет ни
 //! шапки, ни поиска — только разделы и строки под ними
 //! ([`crate::screens::table::sheet`]).
@@ -18,8 +18,7 @@
 //!
 //! Строк-объяснений под переключателями нет: подписи сказаны целыми
 //! предложениями («Блокировать трафик при разрыве тоннеля»), и абзац под
-//! каждым пересказывал бы подпись второй раз, разгоняя четыре строки на
-//! пол-экрана.
+//! каждым пересказывал бы подпись второй раз, разгоняя список на пол-экрана.
 //!
 //! Кнопки «Сохранить» здесь нет: каждый переключатель уезжает демону сразу.
 //! Настройка — это один флаг, а не набор, который собирают и подтверждают
@@ -30,10 +29,12 @@
 //! Темы здесь нет: её переключает кружок в шапке. Настройка, до которой два
 //! пути, — это настройка, которая однажды разойдётся сама с собой.
 //!
-//! # Почему разделов два
+//! # Почему разделов три
 //!
 //! «Запуск» трогает только это окно и эту машину. «Сеть» трогает **весь трафик
-//! системы**, и ошибка в ней заметна не сразу.
+//! системы**, и ошибка в ней заметна не сразу. «Журнал» не трогает ничего:
+//! оттого он и стоит отдельно, а не среди переключателей, каждый из которых
+//! что-то меняет в системе.
 
 use iced::widget::button;
 use iced::{Alignment, Element, Length};
@@ -93,22 +94,54 @@ fn panel(state: &State) -> Element<'_, Message> {
                 state.config.network.allow_lan,
                 SettingsMessage::AllowLan,
             ),
+            switch(
+                state,
+                strings.capture_default_route,
+                state.config.network.capture_default_route,
+                SettingsMessage::CaptureDefaultRoute,
+            ),
+            switch(
+                state,
+                strings.dns_hijack,
+                state.config.dns.hijack,
+                SettingsMessage::DnsHijack,
+            ),
         ],
+    );
+
+    let log = section(
+        state,
+        strings.log,
+        vec![switch(
+            state,
+            strings.verbose_log,
+            verbose(state),
+            SettingsMessage::VerboseLog,
+        )],
     );
 
     let body = Flex::col()
         .w(Size::FILL)
         .push_auto(startup)
         .push_auto(network)
-        // Между разделами больше, чем между строками: иначе четыре
-        // переключателя читаются одним списком, и деление теряет смысл.
+        .push_auto(log)
+        // Между разделами больше, чем между строками: иначе переключатели
+        // читаются одним списком, и деление теряет смысл.
         .gap(gap::MD)
         .build();
 
-    // Прокрутка при четырёх строках не нужна и не видна, но заводится сразу:
-    // настройка добавляется одной строкой, а спохватываются об этом уже тогда,
-    // когда нижняя ушла под край панели.
+    // Прокрутка нужна не всегда, но заводится сразу: настройка добавляется
+    // одной строкой, а спохватываются об этом уже тогда, когда нижняя ушла
+    // под край панели.
     table::sheet(palette, table::scroll(body), crate::i18n::s().toggle_hint)
+}
+
+/// Журнал ведётся подробно.
+///
+/// Уровней пять, а переключатель один: всё, что подробнее `info`, для строки
+/// «Подробный журнал» одно и то же — включено.
+fn verbose(state: &State) -> bool {
+    state.config.app.log_level >= penguin_config::schema::app::LogLevel::Debug
 }
 
 /// Заголовок раздела с чертой до края и строки под ним.
@@ -234,8 +267,11 @@ mod tests {
         for label in [
             crate::i18n::s().kill_switch,
             crate::i18n::s().allow_lan,
+            crate::i18n::s().capture_default_route,
+            crate::i18n::s().dns_hijack,
             crate::i18n::s().autostart,
             crate::i18n::s().autoconnect,
+            crate::i18n::s().verbose_log,
         ] {
             assert!(
                 label.split_whitespace().count() > 2,
@@ -273,7 +309,31 @@ mod tests {
             state.config.app.autoconnect = value;
             state.config.network.kill_switch = value;
             state.config.network.allow_lan = value;
+            state.config.network.capture_default_route = value;
+            state.config.dns.hijack = value;
+            state.config.app.log_level = if value {
+                penguin_config::schema::app::LogLevel::Debug
+            } else {
+                penguin_config::schema::app::LogLevel::Info
+            };
             let _ = view(&state);
+        }
+    }
+
+    #[test]
+    fn anything_more_detailed_than_info_reads_as_verbose() {
+        // Уровней пять, а строка одна: `trace`, поставленный руками в файле,
+        // не должен выглядеть в окне выключенным.
+        use penguin_config::schema::app::LogLevel;
+
+        let mut state = State::default();
+        for level in [LogLevel::Error, LogLevel::Warn, LogLevel::Info] {
+            state.config.app.log_level = level;
+            assert!(!verbose(&state), "{level:?} — не подробный журнал");
+        }
+        for level in [LogLevel::Debug, LogLevel::Trace] {
+            state.config.app.log_level = level;
+            assert!(verbose(&state), "{level:?} — подробный журнал");
         }
     }
 }

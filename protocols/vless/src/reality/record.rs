@@ -97,6 +97,34 @@ impl RecordKey {
         let (content_type, content) = split_inner_plaintext(plaintext)?;
         Ok((content_type, content.to_vec()))
     }
+
+    /// Шифрует один кадр в TLS-запись — обратная операция к [`Self::open`],
+    /// той же формулой (RFC 8446 §5.2): `TLSInnerPlaintext = content ||
+    /// тип`, без набивки нулями (она нужна только для того, чтобы прятать
+    /// длину, — здесь нечего прятать), затем `AEAD-Seal` с AAD из
+    /// 5-байтного заголовка записи, который сам зависит от длины
+    /// зашифрованного содержимого и потому собирается заранее.
+    pub fn seal(&mut self, content_type: u8, plaintext: &[u8]) -> Result<Vec<u8>, RealityError> {
+        let mut inner = Vec::with_capacity(plaintext.len() + 1);
+        inner.extend_from_slice(plaintext);
+        inner.push(content_type);
+
+        let sealed_len = inner.len() + self.key.algorithm().tag_len();
+        let mut header = [0u8; 5];
+        header[0] = CONTENT_TYPE_APPLICATION_DATA;
+        header[1..3].copy_from_slice(&[0x03, 0x03]);
+        header[3..5].copy_from_slice(&(sealed_len as u16).to_be_bytes());
+
+        let nonce = self.next_nonce();
+        self.key
+            .seal_in_place_append_tag(nonce, Aad::from(header.as_slice()), &mut inner)
+            .map_err(|_| RealityError::Crypto("шифрование прикладной записи"))?;
+
+        let mut out = Vec::with_capacity(header.len() + inner.len());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&inner);
+        Ok(out)
+    }
 }
 
 /// Отделяет тип содержимого от заполнения нулями — RFC 8446 §5.4
@@ -209,5 +237,61 @@ mod tests {
         let header = [0x17, 0x03, 0x03, 0x00, 0x10];
         let mut garbage = vec![0xFFu8; 32];
         assert!(record_key.open(&header, &mut garbage).is_err());
+    }
+
+    /// RFC 8448 §3, "{client} send handshake record": клиентский `Finished`
+    /// (36 октетов, тип `handshake` = `0x16`), зашифрованный клиентским
+    /// ключом записи рукопожатия (тот же ключ и `IV`, что и в
+    /// `key_schedule.rs`, `traffic_keys_matches_the_rfc_8448_client_handshake_vector`),
+    /// даёт ровно ту запись, которую RFC печатает как "complete record (58
+    /// octets)". Обратная сторона [`decrypts_the_rfc_8448_test_vector_record`]
+    /// — там сервер шифрует, здесь клиент; независимая половина того же
+    /// формата.
+    #[test]
+    fn seals_the_rfc_8448_client_finished_record() {
+        let key = from_hex("db fa a6 93 d1 76 2c 5b 66 6a f5 d9 50 25 8d 01");
+        let iv_bytes = from_hex("5b d3 c7 1b 83 6e 0b 76 bb 73 26 5f");
+        let mut iv = [0u8; 12];
+        iv.copy_from_slice(&iv_bytes);
+        let mut record_key =
+            RecordKey::new(CipherSuite::Aes128GcmSha256, &key, iv).expect("ключ строится");
+
+        let finished_message = from_hex(
+            "14 00 00 20 a8 ec 43 6d 67 76 34 ae 52 5a c1 fc eb e1 1a 03 9e c1 76 94 fa c6 e9
+             85 27 b6 42 f2 ed d5 ce 61",
+        );
+
+        let record = record_key
+            .seal(CONTENT_TYPE_HANDSHAKE, &finished_message)
+            .expect("шифруется");
+
+        let expected = from_hex(
+            "17 03 03 00 35 75 ec 4d c2 38 cc e6 0b 29 80 44 a7 1e 21 9c 56 cc 77 b0 51 7f e9
+             b9 3c 7a 4b fc 44 d8 7f 38 f8 03 38 ac 98 fc 46 de b3 84 bd 1c ae ac ab 68 67 d7
+             26 c4 05 46",
+        );
+        assert_eq!(record, expected);
+    }
+
+    #[test]
+    fn what_is_sealed_can_be_opened_again() {
+        let key = [3u8; 32];
+        let iv = [4u8; 12];
+        let mut sealer =
+            RecordKey::new(CipherSuite::Chacha20Poly1305Sha256, &key, iv).expect("ключ строится");
+        let mut opener =
+            RecordKey::new(CipherSuite::Chacha20Poly1305Sha256, &key, iv).expect("ключ строится");
+
+        for message in [b"first".as_slice(), b"second frame".as_slice()] {
+            let mut record = sealer
+                .seal(CONTENT_TYPE_APPLICATION_DATA, message)
+                .expect("шифруется");
+            let header: [u8; 5] = record[..5].try_into().expect("заголовок всегда 5 байт");
+            let (content_type, opened) = opener
+                .open(&header, &mut record[5..])
+                .expect("расшифровывается");
+            assert_eq!(content_type, CONTENT_TYPE_APPLICATION_DATA);
+            assert_eq!(opened, message);
+        }
     }
 }

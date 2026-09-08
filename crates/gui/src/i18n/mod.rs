@@ -197,18 +197,8 @@ pub struct Strings {
     pub http_host: &'static str,
     /// Пароль обфускации.
     pub obfs: &'static str,
-    /// Общий ключ.
-    pub psk: &'static str,
-    /// Не задан общий ключ.
-    pub need_psk: &'static str,
     /// Не задано имя пользователя.
     pub need_username: &'static str,
-    /// Версия протокола, описания которого нет.
-    pub snell_version: &'static str,
-    /// Имя узла, под который прикрыто соединение.
-    pub obfs_host: &'static str,
-    /// Что вписать в поле имени узла обфускации.
-    pub obfs_host_example: &'static str,
     /// Отдача.
     pub bandwidth_up: &'static str,
     /// Приём.
@@ -219,16 +209,6 @@ pub struct Strings {
     pub chain_fingerprint: &'static str,
     /// Что вписать в поле отпечатка цепочки.
     pub chain_fingerprint_example: &'static str,
-    /// Ключ хоста SSH.
-    pub host_fingerprint: &'static str,
-    /// Что вписать в поле ключа хоста.
-    pub host_fingerprint_example: &'static str,
-    /// Не задан ключ хоста.
-    pub need_host_fingerprint: &'static str,
-    /// Параметр обфускации.
-    pub obfs_param: &'static str,
-    /// Что вписать в параметр обфускации.
-    pub obfs_param_example: &'static str,
     /// Группа входа на сервере.
     pub login_group: &'static str,
     /// Предупреждение: у OpenConnect нет DTLS.
@@ -267,10 +247,36 @@ pub struct Strings {
     pub authorization: &'static str,
     /// Предупреждение: через MASQUE ходит только UDP.
     pub masque_udp_only: &'static str,
-    /// Надстройка кадра у ShadowsocksR.
-    pub ssr_protocol: &'static str,
-    /// Предупреждение: шифры ShadowsocksR не заверяют данные.
-    pub ssr_no_authentication: &'static str,
+    /// Предупреждение: у MASQUE `CONNECT-IP` нет сервера имён внутри тоннеля.
+    pub masque_ip_no_dns: &'static str,
+    /// Предупреждение: VLESS + Reality не проверен о живой сервер.
+    pub reality_unverified: &'static str,
+    /// Что вписать в публичный ключ Reality.
+    pub reality_public_key_example: &'static str,
+    /// Короткий идентификатор Reality.
+    pub reality_short_id: &'static str,
+    /// Что вписать в короткий идентификатор Reality.
+    pub reality_short_id_example: &'static str,
+    /// Имя сайта, за который выдаёт себя сервер Reality.
+    pub reality_server_name: &'static str,
+    /// Что вписать в имя сайта Reality.
+    pub reality_server_name_example: &'static str,
+    /// Подпись поля `flow` у VLESS.
+    pub flow: &'static str,
+    /// Что вписать в поле `flow`.
+    pub flow_example: &'static str,
+    /// Что вписать в ключ сервера Pingwin.
+    pub pingwin_key_example: &'static str,
+    /// Имя сайта, за который выдаёт себя соединение.
+    pub cover_name: &'static str,
+    /// Что вписать в имя прикрытия.
+    pub cover_name_example: &'static str,
+    /// Чьим приветствием TLS притворяться.
+    pub browser_fingerprint: &'static str,
+    /// Слать первый запрос вместе с приветствием.
+    pub zero_rtt: &'static str,
+    /// Способ обхода DPI в первой посылке.
+    pub desync_strategy: &'static str,
     /// Не задан адрес.
     pub need_server: &'static str,
     /// Не задан пароль.
@@ -291,6 +297,19 @@ pub struct Strings {
     pub link_no_password: &'static str,
     /// В ссылке нет порта.
     pub link_no_port: &'static str,
+    /// Идентичность пользователя у VMess: канонический UUID или, если
+    /// провайдер прислал не его, произвольный текст.
+    pub vmess_id: &'static str,
+    /// Не задана идентичность VMess.
+    pub need_vmess_id: &'static str,
+    /// `alterId` — числовое поле легаси-схемы VMess. Собственное имя
+    /// протокола, не переводится.
+    pub alter_id: &'static str,
+    /// Значение `alterId` не число.
+    pub bad_alter_id: &'static str,
+    /// Предупреждение: шифр `zero` у VMess отключает и шифрование, и
+    /// заверение данных.
+    pub vmess_zero_warning: &'static str,
 
     // --- правила ---
     /// Режим тоннелирования.
@@ -370,6 +389,8 @@ pub struct Strings {
     pub startup: &'static str,
     /// Раздел сети.
     pub network: &'static str,
+    /// Раздел журнала.
+    pub log: &'static str,
     /// Запускать при входе в систему.
     pub autostart: &'static str,
     /// Подключаться при запуске.
@@ -378,6 +399,12 @@ pub struct Strings {
     pub kill_switch: &'static str,
     /// Локальная сеть мимо тоннеля.
     pub allow_lan: &'static str,
+    /// Забирать маршрут по умолчанию.
+    pub capture_default_route: &'static str,
+    /// Перехват запросов имён.
+    pub dns_hijack: &'static str,
+    /// Подробность журнала службы.
+    pub verbose_log: &'static str,
 }
 
 /// Значения режимов в том порядке, в каком они показываются.
@@ -488,6 +515,11 @@ mod tests {
                 table.proxy_udp,
                 table.proxy_udp_plain,
                 table.link_no_port,
+                table.vmess_id,
+                table.need_vmess_id,
+                table.alter_id,
+                table.bad_alter_id,
+                table.vmess_zero_warning,
                 table.new_server,
                 table.edit_server,
                 table.server_name,
@@ -508,22 +540,12 @@ mod tests {
                 table.path_example,
                 table.http_host,
                 table.obfs,
-                table.psk,
-                table.need_psk,
                 table.need_username,
-                table.snell_version,
-                table.obfs_host,
-                table.obfs_host_example,
                 table.bandwidth_up,
                 table.bandwidth_down,
                 table.insecure,
                 table.chain_fingerprint,
                 table.chain_fingerprint_example,
-                table.host_fingerprint,
-                table.host_fingerprint_example,
-                table.need_host_fingerprint,
-                table.obfs_param,
-                table.obfs_param_example,
                 table.login_group,
                 table.openconnect_no_dtls,
                 table.private_key,
@@ -543,8 +565,21 @@ mod tests {
                 table.keepalive_example,
                 table.authorization,
                 table.masque_udp_only,
-                table.ssr_protocol,
-                table.ssr_no_authentication,
+                table.masque_ip_no_dns,
+                table.reality_unverified,
+                table.reality_public_key_example,
+                table.reality_short_id,
+                table.reality_short_id_example,
+                table.reality_server_name,
+                table.reality_server_name_example,
+                table.flow,
+                table.flow_example,
+                table.pingwin_key_example,
+                table.cover_name,
+                table.cover_name_example,
+                table.browser_fingerprint,
+                table.zero_rtt,
+                table.desync_strategy,
                 table.need_server,
                 table.need_password,
                 table.bad_server,
@@ -579,10 +614,14 @@ mod tests {
                 table.off,
                 table.startup,
                 table.network,
+                table.log,
                 table.autostart,
                 table.autoconnect,
                 table.kill_switch,
                 table.allow_lan,
+                table.capture_default_route,
+                table.dns_hijack,
+                table.verbose_log,
             ];
 
             for label in all.into_iter().chain(table.screens).chain(table.modes) {

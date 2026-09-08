@@ -112,15 +112,6 @@ services:
       - "127.0.0.1:18388:8388/udp"
     networks: [interop]
 
-  # Brook. Настраивается строкой запуска: у этого проекта так принято.
-  brook:
-    image: txthinking/brook
-    command: server --listen :9999 --password secret
-    ports:
-      - "127.0.0.1:19999:9999"
-      - "127.0.0.1:19999:9999/udp"
-    networks: [interop]
-
   # Своя сборка: сервер NaiveProxy — это Caddy с форком плагина, готового
   # образа нет.
   naive:
@@ -130,36 +121,6 @@ services:
       - ./tls:/etc/caddy/tls:ro
     ports:
       - "127.0.0.1:14436:443"
-    networks: [interop]
-
-  # Своя сборка, а не готовый образ: у готовых `AllowTcpForwarding` то включён,
-  # то выключен от версии к версии, а отказ в канале выглядел бы ошибкой нашего
-  # протокола. Ключ хоста рождается при сборке образа, и `run.sh` читает его
-  # тем же `ssh-keyscan`, каким его читает человек.
-  ssh:
-    build: ./ssh
-    ports:
-      - "127.0.0.1:18446:22"
-    networks: [interop]
-
-  # Ретранслятор gost. Настраивается строкой запуска, а не файлом: у этого
-  # проекта так принято, и файл настроек здесь был бы лишней сущностью.
-  gost-relay:
-    image: gogost/gost
-    command: -L relay://:8443
-    ports:
-      - "127.0.0.1:18445:8443"
-    networks: [interop]
-
-  # Свой образ, а не sing-box: Snell тот не умеет. Сервер здесь — не Surge,
-  # а чужая реализация того же разбора: другого просто нет.
-  snell:
-    image: metacubex/mihomo:Alpha
-    volumes:
-      - ./mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro
-    ports:
-      - "127.0.0.1:18443:8443"
-      - "127.0.0.1:18444:8444"
     networks: [interop]
 
   # Свой образ, а не sing-box: Juicity тот не умеет. Порт по UDP — под ним

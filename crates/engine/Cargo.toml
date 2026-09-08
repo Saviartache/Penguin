@@ -49,43 +49,35 @@ penguin-socks5 = { workspace = true, optional = true }
 penguin-trojan = { workspace = true, optional = true }
 penguin-shadowsocks = { workspace = true, optional = true }
 penguin-vless = { workspace = true, optional = true }
+penguin-vmess = { workspace = true, optional = true }
+penguin-pingwin = { workspace = true, optional = true }
 penguin-tuic = { workspace = true, optional = true }
 penguin-anytls = { workspace = true, optional = true }
 penguin-juicity = { workspace = true, optional = true }
-penguin-snell = { workspace = true, optional = true }
-penguin-gost-relay = { workspace = true, optional = true }
-penguin-brook = { workspace = true, optional = true }
-penguin-mieru = { workspace = true, optional = true }
 penguin-masque = { workspace = true, optional = true }
 penguin-openconnect = { workspace = true, optional = true }
 penguin-trusttunnel = { workspace = true, optional = true }
 penguin-wireguard = { workspace = true, optional = true }
 penguin-naive = { workspace = true, optional = true }
-penguin-shadowsocksr = { workspace = true, optional = true }
-penguin-ssh = { workspace = true, optional = true }
 penguin-http-proxy = { workspace = true, optional = true }
 
 [features]
-default = ["hysteria2", "tuic", "juicity", "anytls", "vless", "trojan", "shadowsocks", "snell", "gost-relay", "brook", "mieru", "shadowsocksr", "ssh", "naive", "masque", "wireguard", "openconnect", "trusttunnel", "socks5", "http-proxy"]
+default = ["pingwin", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "openconnect", "trusttunnel", "socks5", "http-proxy"]
+pingwin = ["dep:penguin-pingwin"]
 hysteria2 = ["dep:penguin-hysteria2"]
 socks5 = ["dep:penguin-socks5"]
 trojan = ["dep:penguin-trojan"]
 shadowsocks = ["dep:penguin-shadowsocks"]
 vless = ["dep:penguin-vless"]
+vmess = ["dep:penguin-vmess"]
 tuic = ["dep:penguin-tuic"]
 anytls = ["dep:penguin-anytls"]
 juicity = ["dep:penguin-juicity"]
-snell = ["dep:penguin-snell"]
-gost-relay = ["dep:penguin-gost-relay"]
-brook = ["dep:penguin-brook"]
-mieru = ["dep:penguin-mieru"]
-shadowsocksr = ["dep:penguin-shadowsocksr"]
 naive = ["dep:penguin-naive"]
 masque = ["dep:penguin-masque"]
 wireguard = ["dep:penguin-wireguard"]
 openconnect = ["dep:penguin-openconnect"]
 trusttunnel = ["dep:penguin-trusttunnel"]
-ssh = ["dep:penguin-ssh"]
 # Одна фича на два протокола: `http` и `https` — это один крейт и одна строка
 # настройки; собрать половину крейта всё равно нельзя.
 http-proxy = ["dep:penguin-http-proxy"]

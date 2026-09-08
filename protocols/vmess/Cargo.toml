@@ -1,0 +1,49 @@
+[package]
+name = "penguin-vmess"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Протокол VMess: AEAD-заголовок, вложенный HMAC-KDF, шифрует сам"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Протокол зависит только от контракта, общих типов и общего транспорта
+# (AGENTS.md §1.1).
+penguin-core.workspace = true
+penguin-proto.workspace = true
+penguin-transport.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
+async-trait.workspace = true
+bytes.workspace = true
+serde.workspace = true
+# Параметры протокола приходят от `penguin-config` непрозрачным JSON.
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rand.workspace = true
+# AES-128/256-GCM и ChaCha20-Poly1305 тела, плюс AES-128-GCM заголовка —
+# тот же провайдер, которым уже пользуется TLS и `penguin-transport`.
+ring.workspace = true
+# Вложенный HMAC-SHA256 ("VMess AEAD KDF") и вывод ключа ответа — своя
+# функция поверх этого хеша, стандартным HKDF она не выражается.
+sha2.workspace = true
+# `cmdKey`, опознаватель заголовка и второй проход ключа ChaCha20 считаются
+# этим хешем — так делает сам протокол, стойкости он здесь не даёт.
+md-5.workspace = true
+# Единственный однобайтовый блок AES-ECB — шифрование опознавателя
+# заголовка. Раскладка кадра тела и вложенный KDF — свои: см. `frame/` и
+# `crypto/kdf.rs`.
+aes.workspace = true
+# Маскировка длины кадра тела (`0x04`) — потоковый ключ из Shake128, XOF из
+# семейства SHA-3. Ни у `ring`, ни у остальной уже подключённой
+# криптографии такого нет.
+sha3.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

@@ -29,11 +29,14 @@ pub enum Security {
     /// Reality: свой `ClientHello` с отпечатком браузера вместо обычного
     /// TLS. Настройки — в [`VlessConfig::reality`].
     ///
-    /// Проверяемо (сервер либо подтверждает себя, либо нет,
-    /// [`crate::reality::handshake::verify`]), но не готово нести байты
-    /// VLESS — рукопожатие останавливается на сертификате сервера
-    /// (см. [`crate::reality`]). `connector.rs` отвечает понятной ошибкой на
-    /// попытку открыть поток, а не притворяется работающим каналом.
+    /// Рукопожатие доведено до прикладных ключей TLS 1.3
+    /// ([`crate::reality::handshake::connect`]) — канал несёт байты VLESS.
+    /// Но «канал открылся» здесь ещё не значит «сервер нас узнал»: HMAC над
+    /// сертификатом ([`crate::reality`], `auth.rs`) — формула, сверенная
+    /// только между `Xray-core` и `sing-box`, без опубликованных тестовых
+    /// векторов, и её ошибку сервер не покажет отказом — он просто
+    /// перешлёт `ClientHello` настоящему сайту, за который себя выдаёт, и
+    /// TLS 1.3 с этим сайтом тоже успешно откроется.
     Reality,
 }
 
@@ -78,11 +81,13 @@ pub struct VlessConfig {
     /// журнал он не уходит — за этим следит сам тип.
     pub uuid: Uuid,
 
-    /// Дополнение к потоку: `xtls-rprx-vision` и подобное.
-    ///
-    /// Поддерживается только пустое. Vision неотделим от Reality и требует
-    /// разбора записей TLS на лету; принять его молча значит подключиться не
-    /// тем способом, о котором договорились с сервером.
+    /// Дополнение к потоку: единственное, что здесь понимают, —
+    /// [`crate::frame::addons::FLOW_VISION`], и только вместе с
+    /// `security = "reality"` и `transport = "tcp"` — подробности и почему
+    /// именно так в [`crate::vision`]. Любое другое непустое значение,
+    /// `security = "none"`, обычный `security = "tls"` или перенос кроме
+    /// `tcp` — ошибка настроек ([`Self::validate`]), а не тихое
+    /// игнорирование.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<String>,
 
@@ -144,6 +149,15 @@ impl VlessConfig {
         }
     }
 
+    /// `flow`, обрезанный по краям и приведённый к `None`, если пуст — так
+    /// его пишут в ссылках: поле есть, значения нет.
+    pub fn flow(&self) -> Option<&str> {
+        self.flow
+            .as_deref()
+            .map(str::trim)
+            .filter(|flow| !flow.is_empty())
+    }
+
     /// Имя узла в заголовке `Host`.
     pub fn host(&self) -> VlessResult<String> {
         if let Some(host) = self
@@ -178,13 +192,38 @@ impl VlessConfig {
                 "UUID из одних нулей: сервер отличает своих только по нему",
             ));
         }
-        if let Some(flow) = self.flow.as_deref().map(str::trim)
-            && !flow.is_empty()
-        {
-            return Err(VlessError::config(format!(
-                "`flow = {flow}` пока не поддерживается: он неотделим от Reality \
-                 и требует разбора записей TLS на лету. Оставьте поле пустым"
-            )));
+        if let Some(flow) = self.flow() {
+            if flow != crate::frame::addons::FLOW_VISION {
+                return Err(VlessError::config(format!(
+                    "`flow = {flow}` не поддерживается: понимаем только \
+                     `{vision}`",
+                    vision = crate::frame::addons::FLOW_VISION,
+                )));
+            }
+            match self.security {
+                Security::None => {
+                    return Err(VlessError::config(format!(
+                        "`flow = {flow}` вместе с `security = \"none\"`: Vision разбирает \
+                         записи TLS, а без TLS вообще их не будет — либо включите \
+                         `security = \"reality\"`, либо уберите `flow`"
+                    )));
+                }
+                Security::Tls => {
+                    return Err(VlessError::config(format!(
+                        "`flow = {flow}` поддержан только при `security = \"reality\"`: \
+                         Vision пишет TLS-записи в обход шифрования, а `rustls` \
+                         (`security = \"tls\"`) не даёт для этого доступа к своему \
+                         состоянию — см. `crate::vision`"
+                    )));
+                }
+                Security::Reality => {}
+            }
+            if self.transport != Transport::Tcp {
+                return Err(VlessError::config(format!(
+                    "`flow = {flow}` поддержан только с `transport = \"tcp\"`: перенос \
+                     рвёт прямую границу с внешним TLS, которая нужна для переключения"
+                )));
+            }
         }
         if self.security != Security::Reality && self.reality.is_some() {
             return Err(VlessError::config(
@@ -277,15 +316,70 @@ mod tests {
     }
 
     #[test]
-    fn a_flow_we_cannot_keep_is_refused_by_name() {
+    fn an_unknown_flow_is_refused_by_name() {
         // Принять его молча значит подключаться не тем способом, о котором
         // договорились с сервером, — и получить молчание вместо ошибки.
+        let config = VlessConfig {
+            security: Security::Reality,
+            reality: Some(reality()),
+            flow: Some("xtls-rprx-splice".to_owned()),
+            ..config()
+        };
+        let err = config.validate().expect_err("не поддерживается");
+        assert!(err.to_string().contains("xtls-rprx-splice"), "{err}");
+    }
+
+    #[test]
+    fn vision_without_reality_is_refused() {
+        // Vision пишет TLS-записи в обход шифрования; `rustls` не даёт
+        // такого доступа — принять `flow` молча значило бы подключаться не
+        // тем способом, о котором договорились с сервером.
         let config = VlessConfig {
             flow: Some("xtls-rprx-vision".to_owned()),
             ..config()
         };
-        let err = config.validate().expect_err("не поддерживается");
+        let err = config
+            .validate()
+            .expect_err("rustls не поддерживает Vision");
         assert!(err.to_string().contains("xtls-rprx-vision"), "{err}");
+    }
+
+    #[test]
+    fn vision_without_any_tls_at_all_is_refused() {
+        let config = VlessConfig {
+            security: Security::None,
+            flow: Some("xtls-rprx-vision".to_owned()),
+            ..config()
+        };
+        let err = config.validate().expect_err("нет TLS-записей вовсе");
+        assert!(err.to_string().contains("none"), "{err}");
+    }
+
+    #[test]
+    fn vision_over_a_transport_other_than_tcp_is_refused() {
+        let config = VlessConfig {
+            security: Security::Reality,
+            reality: Some(reality()),
+            transport: Transport::Ws,
+            path: Some("/ws".to_owned()),
+            flow: Some("xtls-rprx-vision".to_owned()),
+            ..config()
+        };
+        let err = config
+            .validate()
+            .expect_err("перенос рвёт границу с внешним TLS");
+        assert!(err.to_string().contains("tcp"), "{err}");
+    }
+
+    #[test]
+    fn vision_over_reality_and_tcp_is_the_one_combination_that_works() {
+        let config = VlessConfig {
+            security: Security::Reality,
+            reality: Some(reality()),
+            flow: Some("xtls-rprx-vision".to_owned()),
+            ..config()
+        };
+        config.validate().expect("Vision поддержан ровно здесь");
     }
 
     #[test]

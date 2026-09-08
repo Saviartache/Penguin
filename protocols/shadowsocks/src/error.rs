@@ -40,6 +40,19 @@ pub enum ShadowsocksError {
     #[error("поток не по протоколу: {0}")]
     Malformed(String),
 
+    /// Метка времени в заголовке Shadowsocks 2022 разошлась с часами этой
+    /// машины больше чем на 30 секунд.
+    ///
+    /// После неё AEAD уже расшифровался — ключ верный, — так что путать это
+    /// с неверным паролем нельзя. Частая причина именно в рассинхронизации
+    /// часов, и текст называет её прямо: иначе «сервер молчит» будут искать
+    /// в сети, а не в `date`.
+    #[error(
+        "метка времени Shadowsocks 2022 разошлась с часами этого устройства на {0} с \
+         (сервер отвергает то, что больше 30 с) — проверьте системное время"
+    )]
+    ClockSkew(u64),
+
     /// Проксирование UDP выключено в настройках профиля.
     #[error("проксирование UDP выключено в настройках профиля")]
     UdpDisabled,
@@ -83,6 +96,10 @@ impl From<ShadowsocksError> for ProtocolError {
             ShadowsocksError::Rejected => Self::AuthRejected,
             err @ ShadowsocksError::Crypto(_) => Self::InvalidConfig(err.to_string()),
             err @ ShadowsocksError::Malformed(_) => Self::InvalidConfig(err.to_string()),
+            // Не «неверный пароль»: ключ уже проверен AEAD. Отличие от
+            // обрыва сети в том, что стоит попробовать снова тогда же, когда
+            // это имеет смысл, — после того, как часы поправит NTP.
+            err @ ShadowsocksError::ClockSkew(_) => Self::Disconnected(err.to_string()),
             ShadowsocksError::UdpDisabled => Self::Unsupported("UDP"),
             ShadowsocksError::Disconnected(message) => Self::Disconnected(message),
             ShadowsocksError::Transport(err) => err.into(),
@@ -107,6 +124,17 @@ mod tests {
     fn a_broken_link_is_retried() {
         let err: ProtocolError = ShadowsocksError::Disconnected("сеть пропала".into()).into();
         assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn a_clock_skew_names_the_seconds_and_is_retried() {
+        // Ключ уже проверен AEAD: это не «неверный пароль», а рассинхронизация
+        // часов, и повторная попытка имеет смысл после того, как их поправит
+        // NTP.
+        let err: ProtocolError = ShadowsocksError::ClockSkew(42).into();
+        assert!(err.is_retryable());
+        assert!(err.to_string().contains("42"), "{err}");
+        assert!(err.to_string().to_lowercase().contains("час"), "{err}");
     }
 
     #[test]

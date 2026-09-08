@@ -5,11 +5,12 @@
 //! обязаны заранее знать одно и то же, иначе не сойдутся вовсе.
 
 use penguin_core::address::Address;
+use penguin_core::base64;
 use penguin_core::endpoint::ServerEndpoint;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::Method;
 use crate::error::{ShadowsocksError, ShadowsocksResult};
+use crate::method::ShadowsocksMethod;
 
 /// Настройки подключения к серверу Shadowsocks.
 ///
@@ -25,11 +26,19 @@ pub struct ShadowsocksConfig {
     /// Умолчания здесь нет намеренно. Метод — часть договора с сервером, и
     /// подставленный молча даёт соединение, которое открывается и ничего не
     /// передаёт: сервер просто не сможет прочитать первый кусок.
-    pub method: Method,
+    pub method: ShadowsocksMethod,
 
-    /// Пароль.
+    /// Пароль — для методов AEAD; ключ (PSK) в base64 — для методов
+    /// `2022-blake3-*`.
+    ///
+    /// У 2022 это не пароль в обычном смысле: ровно [`Method2022::key_len`]
+    /// байт в base64, и длина проверяется в [`ShadowsocksConfig::validate`]
+    /// до подключения — сервер с другой длиной ключа не пришлёт даже отказа,
+    /// он просто не сможет прочитать первый кусок.
     ///
     /// В `Debug` не попадает: вывод пишется вручную ниже.
+    ///
+    /// [`Method2022::key_len`]: crate::method::Method2022::key_len
     pub password: String,
 
     /// Пускать ли UDP через сервер.
@@ -63,11 +72,22 @@ impl ShadowsocksConfig {
     pub fn validate(&self) -> ShadowsocksResult<()> {
         self.endpoint()?;
 
-        if self.password.is_empty() {
-            return Err(ShadowsocksError::config(
-                "пароль не задан: из него выводится ключ, и пустой означает \
-                 ключ, который знают все",
-            ));
+        match self.method {
+            ShadowsocksMethod::Aead(_) => {
+                if self.password.is_empty() {
+                    return Err(ShadowsocksError::config(
+                        "пароль не задан: из него выводится ключ, и пустой означает \
+                         ключ, который знают все",
+                    ));
+                }
+            }
+            // У 2022 поле `password` несёт не пароль, а ключ в base64, и он
+            // обязан быть ровно нужной длины — до подключения, а не после
+            // молчания сервера.
+            ShadowsocksMethod::Aead2022(method) => {
+                base64::decode_exact(&self.password, method.key_len(), "ключ Shadowsocks 2022")
+                    .map_err(|e| ShadowsocksError::config(e.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -91,11 +111,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::crypto::Method;
+    use crate::method::Method2022;
 
     fn config() -> ShadowsocksConfig {
         ShadowsocksConfig {
             server: "example.com:8388".to_owned(),
-            method: Method::Aes256Gcm,
+            method: ShadowsocksMethod::Aead(Method::Aes256Gcm),
             password: "secret".to_owned(),
             udp: true,
         }
@@ -150,7 +172,10 @@ mod tests {
             "password": "x"
         });
         let config: ShadowsocksConfig = serde_json::from_value(params).expect("разбирается");
-        assert_eq!(config.method, Method::Chacha20Poly1305);
+        assert_eq!(
+            config.method,
+            ShadowsocksMethod::Aead(Method::Chacha20Poly1305)
+        );
         assert!(config.udp, "UDP включён, пока его не выключили");
     }
 
@@ -179,5 +204,43 @@ mod tests {
     fn the_password_never_shows_up_in_the_log() {
         let shown = format!("{:?}", config());
         assert!(!shown.contains("secret"), "{shown}");
+    }
+
+    #[test]
+    fn a_2022_key_of_the_right_length_validates() {
+        let key = penguin_core::base64::encode(&[7u8; 16]);
+        let config = ShadowsocksConfig {
+            method: ShadowsocksMethod::Aead2022(Method2022::Blake3Aes128Gcm),
+            password: key,
+            ..config()
+        };
+        config.validate().expect("ключ ровно нужной длины");
+    }
+
+    #[test]
+    fn a_2022_key_of_the_wrong_length_names_the_expected_length() {
+        // Сервер с ключом не той длины не пришлёт даже отказа — он просто не
+        // сможет прочитать первый кусок, и это должно быть видно до
+        // подключения, а не после его молчания.
+        let key = penguin_core::base64::encode(&[7u8; 10]);
+        let config = ShadowsocksConfig {
+            method: ShadowsocksMethod::Aead2022(Method2022::Blake3Aes128Gcm),
+            password: key,
+            ..config()
+        };
+        let err = config.validate().expect_err("длина не та");
+        let text = err.to_string();
+        assert!(text.contains("10"), "{text}");
+        assert!(text.contains("16"), "{text}");
+    }
+
+    #[test]
+    fn a_password_that_is_not_base64_is_refused_for_a_2022_method() {
+        let config = ShadowsocksConfig {
+            method: ShadowsocksMethod::Aead2022(Method2022::Blake3Chacha20Poly1305),
+            password: "не ключ и не base64!".to_owned(),
+            ..config()
+        };
+        assert!(config.validate().is_err());
     }
 }

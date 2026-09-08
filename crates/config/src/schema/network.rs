@@ -22,6 +22,15 @@ pub struct NetworkConfig {
     /// остальное в квартире, и первое, что делает пользователь, — выключает
     /// клиент целиком.
     pub allow_lan: bool,
+    /// Забирать маршрут по умолчанию, то есть весь трафик системы.
+    ///
+    /// Выключено — маршрут остаётся у системы, и в тоннель попадает только
+    /// то, что пришло в локальный прокси. Это не то же самое, что
+    /// [`TunnelMode::Off`]: режим решает судьбу уже перехваченного
+    /// соединения, а здесь решается, перехватывать ли вообще.
+    ///
+    /// [`TunnelMode::Off`]: crate::schema::routing::TunnelMode::Off
+    pub capture_default_route: bool,
 }
 
 impl Default for NetworkConfig {
@@ -32,6 +41,7 @@ impl Default for NetworkConfig {
             http: None,
             kill_switch: true,
             allow_lan: true,
+            capture_default_route: true,
         }
     }
 }

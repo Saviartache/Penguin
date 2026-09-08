@@ -8,7 +8,9 @@
 //! мегабайтами в час, а служба работает месяцами.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
+use penguin_config::schema::app::LogLevel;
 use tracing_subscriber::EnvFilter;
 
 /// Начало имени файла журнала; дату к нему приписывает `tracing_appender`.
@@ -17,14 +19,51 @@ use tracing_subscriber::EnvFilter;
 /// каталоге, и уборка одного не должна задевать другой.
 const PREFIX: &str = "penguin.log";
 
+/// Чем менять уровень уже заведённого журнала.
+///
+/// Журнал заводится раньше, чем прочитаны настройки: у службы нет терминала,
+/// и отказ на чтении настроек тоже надо куда-то записать. Поэтому уровень из
+/// настроек доводится сюда потом — [`set_level`].
+static RELOAD: OnceLock<Box<dyn Fn(EnvFilter) + Send + Sync>> = OnceLock::new();
+
 /// Настраивает журнал в терминал.
 ///
 /// Так демон запускают при отладке.
 pub fn init_console(verbose: bool) {
-    let _ = tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter(verbose))
         .with_target(false)
-        .try_init();
+        .with_filter_reloading();
+    let handle = builder.reload_handle();
+
+    if builder.try_init().is_ok() {
+        remember(handle, verbose);
+    }
+}
+
+/// Меняет уровень журнала на работающей службе.
+///
+/// Флаг `--verbose` и `RUST_LOG` сильнее настройки: тот, кто попросил
+/// подробностей руками, не должен терять их от переключателя в окне.
+pub fn set_level(level: LogLevel) {
+    if let Some(reload) = RELOAD.get() {
+        reload(level_filter(level.as_str()));
+    }
+}
+
+/// Запоминает, чем менять уровень.
+fn remember<S>(handle: tracing_subscriber::reload::Handle<EnvFilter, S>, verbose: bool)
+where
+    S: 'static,
+{
+    if pinned(verbose) {
+        return;
+    }
+    let _ = RELOAD.set(Box::new(move |filter| {
+        if let Err(err) = handle.reload(filter) {
+            eprintln!("уровень журнала не изменён: {err}");
+        }
+    }));
 }
 
 /// Настраивает журнал в файл.
@@ -65,14 +104,19 @@ pub fn init_file(
 
     let (writer, guard) = tracing_appender::non_blocking(appender);
 
-    let _ = tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter(verbose))
         .with_target(false)
         // Цвет в файле превращается в управляющие последовательности, и
         // читать его потом невозможно.
         .with_ansi(false)
         .with_writer(writer)
-        .try_init();
+        .with_filter_reloading();
+    let handle = builder.reload_handle();
+
+    if builder.try_init().is_ok() {
+        remember(handle, verbose);
+    }
 
     Some(guard)
 }
@@ -81,8 +125,17 @@ pub fn init_file(
 fn filter(verbose: bool) -> EnvFilter {
     let default = if verbose { "debug" } else { "info" };
     // `RUST_LOG` сильнее флага: тому, кто его выставил, виднее.
-    EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("penguin={default},warn")))
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| level_filter(default))
+}
+
+/// Фильтр одного уровня.
+fn level_filter(level: &str) -> EnvFilter {
+    EnvFilter::new(format!("penguin={level},warn"))
+}
+
+/// Уровень задан руками и настройкой не двигается.
+fn pinned(verbose: bool) -> bool {
+    verbose || EnvFilter::try_from_default_env().is_ok()
 }
 
 #[cfg(test)]

@@ -1,0 +1,57 @@
+# Сервер Pingwin и его прикрытие.
+#
+#   pingwin-server keygen > /dev/null    # ключи: см. README рядом
+#   docker compose up -d --build
+#
+# Две службы, и вторая здесь не для красоты. Сервер, не узнавший клиента,
+# отдаёт соединение прикрытию (`fallback`), и прикрытие обязано быть
+# настоящим сайтом: тот, кто пробует порт, должен увидеть страницу, а не
+# закрытое соединение. Пустой `fallback` — это примета, по которой сервер и
+# находят.
+
+services:
+  # Настоящий сайт на том же адресе. Наружу он не публикуется: к нему ходит
+  # только сам сервер, изнутри сети Docker.
+  cover:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    volumes:
+      - ./cover/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./cover/html:/usr/share/nginx/html:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  pingwin:
+    # Имя образа задано явно: под ним его зовут `keygen` и `link` — обе
+    # команды работают без томов и без прикрытия, то есть мимо compose.
+    image: pingwin-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Внутри контейнера порт непривилегированный — сервер работает не под
+    # `root`. Наружу по умолчанию 443: там TLS никого не удивляет, а выглядит
+    # соединение именно им.
+    #
+    # Через переменную, а не числом: порт спрашивают у человека
+    # (`deploy.sh`), а файл здесь один на всех. `deploy.sh` кладёт рядом
+    # `.env` с `PINGWIN_PORT`; без него берётся 443.
+    ports:
+      - "${PINGWIN_PORT:-443}:8443"
+    volumes:
+      - ./pingwin.toml:/etc/pingwin/pingwin.toml:ro
+    depends_on:
+      cover:
+        condition: service_healthy
+    environment:
+      # `info` — опознанные клиенты и отказы. `debug` добавляет чужие
+      # соединения и причины, по которым они ушли к прикрытию.
+      RUST_LOG: "info"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

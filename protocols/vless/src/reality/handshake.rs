@@ -1,5 +1,5 @@
-//! Ведёт рукопожатие Reality до места, где сервер можно проверить, — и
-//! останавливается там же.
+//! Ведёт рукопожатие Reality: [`verify`] — только до места, где сервер можно
+//! проверить, [`connect`] — до конца, до прикладных ключей TLS 1.3.
 //!
 //! ```text
 //! клиент                                              сервер
@@ -9,26 +9,61 @@
 //!   │                                                     │
 //!   │<───────────────────────────  ServerHello (открыто) │
 //!   │                                                     │
-//!   │  вывод ключа записи рукопожатия сервера            │
-//!   │  (key_schedule.rs) из общего секрета (EC)DHE       │
-//!   │  настоящего TLS 1.3 — НЕ AuthKey Reality           │
+//!   │  секрет рукопожатия (key_schedule.rs) из общего    │
+//!   │  секрета (EC)DHE настоящего TLS 1.3 — НЕ AuthKey   │
+//!   │  Reality; отсюда же — ключ клиента для Finished    │
 //!   │                                                     │
-//!   │<──── EncryptedExtensions, Certificate (зашифровано, │
-//!   │      record.rs расшифровывает по мере поступления) │
+//!   │<─ EncryptedExtensions, Certificate, CertificateVerify, Finished ─│
+//!   │       (зашифровано, record.rs расшифровывает по мере поступления)
 //!   │                                                     │
 //!   │  certificate.rs: ключ Ed25519 + подпись            │
-//!   │  auth.rs: HMAC-SHA512(AuthKey, ключ) == подпись?    │
+//!   │  auth.rs: HMAC-SHA512(AuthKey, ключ) == подпись?   │
 //!   │                                                     │
-//!  Verified                                     NotRecognized
+//!  [verify возвращает Verified здесь]           NotRecognized
+//!   │                                                     │
+//!   │  Finished сервера сверяется с посчитанным          │
+//!   │  (key_schedule::verify_finished)                   │
+//!   │                                                     │
+//!   │  ChangeCipherSpec (мидлбокс-совместимость,         │
+//!   │  RFC 8446 Приложение D.4) ─────────────────────────>│
+//!   │  свой Finished (зашифрован)           ─────────────>│
+//!   │                                                     │
+//!   │  Master Secret → прикладные ключи (RFC 8446 §7.1)  │
+//!   │                                                     │
+//!  RealityStream (application.rs) — байты VLESS дальше
 //! ```
 //!
-//! **Дальше рукопожатие не идёт.** `CertificateVerify` и `Finished` сервера
-//! не разбираются, свой `Finished` не отправляется, прикладные ключи не
-//! выводятся — соединение остаётся непригодным для передачи байт VLESS.
-//! Довести его до конца — отдельная задача (полноценный TLS 1.3 поверх
-//! своего рукопожатия, а затем XTLS Vision поверх него), которую этот шаг
-//! фазы 19 не включает (см. `plan.md`, крайний пункт списка "чего это
-//! требует", и `mod.rs`).
+//! **Ловушка** (см. `mod.rs`): прикладные секреты трафика выводятся из
+//! `Master Secret` с транскриптом ДО `Finished` клиента, но ПОСЛЕ `Finished`
+//! сервера (RFC 8446 §7.1) — перепутать эти две границы значит вывести
+//! секрет, которым сервер ничего не расшифрует.
+//!
+//! `CertificateVerify` разбирается только для того, чтобы правильно продвинуть
+//! транскрипт, — её подпись не проверяется отдельно. Это не пропуск, но и не
+//! то свойство, которое даёт `Finished`: ключ MAC у `Finished` выводится из
+//! общего секрета (EC)DHE, а его знает и посредник, ведущий своё рукопожатие
+//! с клиентом, — «транскрипт совпал» доказывает целостность канала, а не
+//! личность того, кто на другом конце. В обычном TLS 1.3 личность связывает с
+//! рукопожатием ровно `CertificateVerify`, и пропускать её там нельзя.
+//!
+//! Здесь её заменяет HMAC из `auth.rs`, и заменяет полноценно:
+//! `AuthKey = HKDF(salt = client_random[..20], ikm = X25519(наш закрытый ключ
+//! `key_share`, публичный ключ Reality сервера), info = "REALITY")` —
+//! то есть привязан и к нашему `random`, и к нашему `key_share` именно этого
+//! рукопожатия. Посредник не может ни вычислить `AuthKey` (не знает ни нашего
+//! закрытого ключа, ни ключа Reality сервера), ни выпросить готовый `HMAC` у
+//! настоящего сервера: тот отдаёт сертификат уже зашифрованным на общем
+//! секрете с **нашим** `key_share`, а подменив `key_share` в `ServerHello`,
+//! посредник тем самым лишает себя этого ответа. Подписи `CertificateVerify`
+//! это не отменяет как механизм TLS — просто здесь она доказывала бы лишь,
+//! что сторона знает закрытый ключ своего же самоподписанного сертификата,
+//! что не отличает Reality от обычного сайта, за который сервер себя выдаёт.
+//! Разбор RSA и ECDSA поверх уже разобранного X.509 — код без своего
+//! свойства.
+//!
+//! `KeyUpdate` и переиспользование билета (`NewSessionTicket`) не
+//! поддержаны — подробности в `application.rs`, где это уже видно на кадрах,
+//! приходящих после рукопожатия.
 //!
 //! `HelloRetryRequest` не поддержан: настоящий сервер Reality всегда отвечает
 //! `X25519` сразу, потому что клиент всегда предлагает эту группу первой
@@ -43,11 +78,13 @@ use penguin_core::address::Address;
 use penguin_utls::ServerHello;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::reality::application::RealityStream;
 use crate::reality::cipher_suite::CipherSuite;
 use crate::reality::config::RealityConfig;
 use crate::reality::error::RealityError;
 use crate::reality::record::{
-    CONTENT_TYPE_APPLICATION_DATA, CONTENT_TYPE_CHANGE_CIPHER_SPEC, RecordKey,
+    CONTENT_TYPE_APPLICATION_DATA, CONTENT_TYPE_CHANGE_CIPHER_SPEC, CONTENT_TYPE_HANDSHAKE,
+    RecordKey,
 };
 use crate::reality::{auth, certificate, key_schedule};
 
@@ -67,6 +104,8 @@ const HELLO_RETRY_REQUEST_RANDOM: [u8; 32] = [
 /// Handshake-типы, которые интересуют этот шаг, — RFC 8446 §B.3.
 const HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS: u8 = 8;
 const HANDSHAKE_TYPE_CERTIFICATE: u8 = 11;
+const HANDSHAKE_TYPE_CERTIFICATE_VERIFY: u8 = 15;
+const HANDSHAKE_TYPE_FINISHED: u8 = 20;
 
 /// Сервер подтвердил себя как Reality.
 ///
@@ -164,6 +203,279 @@ where
     let mut record_key = RecordKey::new(cipher, &handshake_keys.key, handshake_keys.iv)?;
 
     read_certificate_and_verify(io, &mut record_key, &auth_key).await
+}
+
+/// Ведёт рукопожатие Reality до конца: то же самое, что и [`verify`] (свой
+/// `ClientHello`, проверка сертификата сервера через `auth::verify_certificate`),
+/// а затем — `CertificateVerify`, `Finished` сервера, свой `Finished` и
+/// прикладные ключи TLS 1.3 (RFC 8446 §7.1). Возвращает поток, поверх
+/// которого `connector.rs` дальше отправляет байты VLESS.
+///
+/// Берёт `io` по значению (не `&mut`, как [`verify`]): в отличие от
+/// предварительной проверки, соединение здесь не отбрасывается после
+/// рукопожатия, а становится [`RealityStream`].
+pub async fn connect<S>(mut io: S, config: &RealityConfig) -> Result<RealityStream<S>, RealityError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let public_key = config.public_key_bytes()?;
+    let short_id = config.short_id_bytes()?;
+    let server_name = Address::domain(config.server_name.trim());
+
+    let (mut hello, keys) = config
+        .fingerprint
+        .build(&server_name, [0; 32])
+        .map_err(|e| RealityError::Config(e.to_string()))?;
+    let x25519 = keys.first().ok_or_else(|| {
+        RealityError::Config("отпечаток не запросил ни одного ключа key_share".to_owned())
+    })?;
+
+    let unix_time = current_unix_time();
+    let reality_shared_secret =
+        x25519
+            .x25519_diffie_hellman(&public_key)
+            .ok_or(RealityError::Config(
+                "первый ключ ClientHello — не X25519".to_owned(),
+            ))?;
+    let auth_key = auth::derive_auth_key(&reality_shared_secret, &hello.random)?;
+    let sealed = auth::seal_session_id(
+        &auth_key,
+        &hello.random,
+        short_id,
+        unix_time,
+        hello.handshake_bytes(),
+    )?;
+    hello.patch_session_id(sealed);
+
+    io.write_all(&hello.record_bytes()).await?;
+    io.flush().await?;
+
+    let (server_hello, server_hello_message) = read_server_hello(&mut io).await?;
+    if server_hello.random == HELLO_RETRY_REQUEST_RANDOM {
+        return Err(RealityError::Malformed(
+            "сервер запросил HelloRetryRequest — это не поддержано".to_owned(),
+        ));
+    }
+    if server_hello.supported_version != Some(0x0304) {
+        return Err(RealityError::UnsupportedNegotiation(format!(
+            "supported_version = {:?} вместо TLS 1.3",
+            server_hello.supported_version
+        )));
+    }
+    let cipher = CipherSuite::from_u16(server_hello.cipher_suite).ok_or_else(|| {
+        RealityError::UnsupportedNegotiation(format!(
+            "шифр {:#06x} — не TLS 1.3",
+            server_hello.cipher_suite
+        ))
+    })?;
+    let server_key_share = server_hello
+        .key_share
+        .as_ref()
+        .ok_or(RealityError::Malformed(
+            "ServerHello без key_share".to_owned(),
+        ))?;
+    if server_key_share.group != GROUP_X25519 {
+        return Err(RealityError::UnexpectedGroup(server_key_share.group));
+    }
+    let server_public: [u8; 32] = server_key_share
+        .data
+        .as_slice()
+        .try_into()
+        .map_err(|_| RealityError::Malformed("key_share сервера — не 32 байта".to_owned()))?;
+
+    let tls_shared_secret =
+        x25519
+            .x25519_diffie_hellman(&server_public)
+            .ok_or(RealityError::Config(
+                "первый ключ ClientHello — не X25519".to_owned(),
+            ))?;
+
+    let client_hello_bytes = hello.handshake_bytes();
+    let transcript_ch_sh =
+        key_schedule::transcript_hash(cipher, &[client_hello_bytes, &server_hello_message]);
+
+    let handshake_secret = key_schedule::handshake_secret(cipher, &tls_shared_secret)?;
+    let client_hs_traffic_secret =
+        handshake_secret.traffic_secret("c hs traffic", &transcript_ch_sh)?;
+    let server_hs_traffic_secret =
+        handshake_secret.traffic_secret("s hs traffic", &transcript_ch_sh)?;
+    let server_hs_keys = key_schedule::traffic_keys(cipher, &server_hs_traffic_secret)?;
+    let client_hs_keys = key_schedule::traffic_keys(cipher, &client_hs_traffic_secret)?;
+    let mut read_key = RecordKey::new(cipher, &server_hs_keys.key, server_hs_keys.iv)?;
+    let mut write_key = RecordKey::new(cipher, &client_hs_keys.key, client_hs_keys.iv)?;
+
+    let flight = read_server_flight(&mut io, &mut read_key, &auth_key).await?;
+
+    let transcript_before_server_finished = key_schedule::transcript_hash(
+        cipher,
+        &[
+            client_hello_bytes,
+            &server_hello_message,
+            &flight.messages_before_finished,
+        ],
+    );
+    let server_finished_key = key_schedule::finished_key(cipher, &server_hs_traffic_secret)?;
+    if !key_schedule::verify_finished(
+        cipher,
+        &server_finished_key,
+        &transcript_before_server_finished,
+        &flight.verify_data,
+    ) {
+        return Err(RealityError::FinishedMismatch);
+    }
+
+    // RFC 8446 §7.1: транскрипт "ClientHello...server Finished" — ДО
+    // Finished клиента, но ПОСЛЕ Finished сервера (см. документ модуля).
+    // Тот же транскрипт нужен и клиентскому Finished, и прикладным ключам.
+    let transcript_through_server_finished = key_schedule::transcript_hash(
+        cipher,
+        &[
+            client_hello_bytes,
+            &server_hello_message,
+            &flight.messages_before_finished,
+            &flight.server_finished_message,
+        ],
+    );
+
+    let client_finished_key = key_schedule::finished_key(cipher, &client_hs_traffic_secret)?;
+    let client_verify_data = key_schedule::finished_verify_data(
+        cipher,
+        &client_finished_key,
+        &transcript_through_server_finished,
+    );
+    let mut client_finished_message = vec![HANDSHAKE_TYPE_FINISHED];
+    client_finished_message
+        .extend_from_slice(&(client_verify_data.len() as u32).to_be_bytes()[1..]);
+    client_finished_message.extend_from_slice(&client_verify_data);
+
+    // ChangeCipherSpec — совместимость с мидлбоксами (RFC 8446 Приложение
+    // D.4): наш SessionID не пуст (Reality кладёт туда данные опознания),
+    // а значит настоящий клиент в этом режиме тоже её посылает.
+    io.write_all(&[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]).await?;
+    let finished_record = write_key.seal(CONTENT_TYPE_HANDSHAKE, &client_finished_message)?;
+    io.write_all(&finished_record).await?;
+    io.flush().await?;
+
+    let master_secret = handshake_secret.master_secret()?;
+    let client_ap_secret =
+        master_secret.traffic_secret("c ap traffic", &transcript_through_server_finished)?;
+    let server_ap_secret =
+        master_secret.traffic_secret("s ap traffic", &transcript_through_server_finished)?;
+    let client_ap_keys = key_schedule::traffic_keys(cipher, &client_ap_secret)?;
+    let server_ap_keys = key_schedule::traffic_keys(cipher, &server_ap_secret)?;
+
+    let application_read_key = RecordKey::new(cipher, &server_ap_keys.key, server_ap_keys.iv)?;
+    let application_write_key = RecordKey::new(cipher, &client_ap_keys.key, client_ap_keys.iv)?;
+
+    Ok(RealityStream::new(
+        io,
+        application_read_key,
+        application_write_key,
+    ))
+}
+
+/// Три сообщения второй половины серверного полёта: всё, что накопилось до
+/// `Finished` (`EncryptedExtensions`, `Certificate`, `CertificateVerify`, в
+/// исходных байтах — для транскрипта), и сам `Finished` (тоже в исходных
+/// байтах, и отдельно — его `verify_data`).
+#[derive(Debug)]
+struct ServerFlight {
+    /// `EncryptedExtensions` + `Certificate` + `CertificateVerify`, байты
+    /// сообщений как пришли (заголовок и тело каждого), без `Finished`.
+    messages_before_finished: Vec<u8>,
+    /// `Finished` целиком (заголовок и тело) — последний кусок транскрипта
+    /// перед `Finished` клиента и прикладными ключами.
+    server_finished_message: Vec<u8>,
+    /// `verify_data` из тела `Finished` — то, что сверяется с посчитанным
+    /// ([`key_schedule::verify_finished`]).
+    verify_data: Vec<u8>,
+}
+
+/// Читает `EncryptedExtensions`, `Certificate` (проверяя его тем же HMAC,
+/// что и [`verify`]), `CertificateVerify` (не проверяя подпись — см.
+/// документ модуля) и останавливается на `Finished` сервера, не проверяя
+/// его — это делает вызывающий ([`connect`]), которому для этого нужен ещё
+/// и транскрипт без `Finished`.
+async fn read_server_flight<S>(
+    io: &mut S,
+    record_key: &mut RecordKey,
+    auth_key: &[u8; 32],
+) -> Result<ServerFlight, RealityError>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut handshake_buffer = Vec::new();
+    let mut messages_before_finished = Vec::new();
+    let mut seen_encrypted_extensions = false;
+    let mut seen_certificate = false;
+
+    loop {
+        let (header, mut body) = read_record(io).await?;
+        match header[0] {
+            CONTENT_TYPE_CHANGE_CIPHER_SPEC => continue,
+            CONTENT_TYPE_APPLICATION_DATA => {}
+            other => {
+                return Err(RealityError::Malformed(format!(
+                    "тип записи {other:#04x} вместо application_data (0x17) или \
+                     change_cipher_spec (0x14)"
+                )));
+            }
+        }
+
+        let (inner_type, plaintext) = record_key.open(&header, &mut body)?;
+        if inner_type != CONTENT_TYPE_HANDSHAKE {
+            return Err(RealityError::Malformed(format!(
+                "запись после ServerHello несёт тип {inner_type:#04x}, а не handshake (0x16)"
+            )));
+        }
+        handshake_buffer.extend_from_slice(&plaintext);
+
+        while let Some((message_type, message_body, consumed)) =
+            take_handshake_message(&handshake_buffer)?
+        {
+            let message_bytes = handshake_buffer[..consumed].to_vec();
+            let message_body = message_body.to_vec();
+            handshake_buffer.drain(..consumed);
+
+            match message_type {
+                HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS => {
+                    seen_encrypted_extensions = true;
+                    messages_before_finished.extend_from_slice(&message_bytes);
+                }
+                HANDSHAKE_TYPE_CERTIFICATE => {
+                    if !seen_encrypted_extensions {
+                        return Err(RealityError::Malformed(
+                            "Certificate раньше EncryptedExtensions".to_owned(),
+                        ));
+                    }
+                    verify_certificate_message(&message_body, auth_key)?;
+                    seen_certificate = true;
+                    messages_before_finished.extend_from_slice(&message_bytes);
+                }
+                HANDSHAKE_TYPE_CERTIFICATE_VERIFY => {
+                    if !seen_certificate {
+                        return Err(RealityError::Malformed(
+                            "CertificateVerify раньше Certificate".to_owned(),
+                        ));
+                    }
+                    messages_before_finished.extend_from_slice(&message_bytes);
+                }
+                HANDSHAKE_TYPE_FINISHED => {
+                    if !seen_certificate {
+                        return Err(RealityError::Malformed(
+                            "Finished сервера раньше Certificate".to_owned(),
+                        ));
+                    }
+                    return Ok(ServerFlight {
+                        messages_before_finished,
+                        server_finished_message: message_bytes,
+                        verify_data: message_body,
+                    });
+                }
+                _ => {} // NewSessionTicket сюда не попадает: он идёт после Finished, под прикладными ключами (application.rs).
+            }
+        }
+    }
 }
 
 /// Читает записи рукопожатия, пока не разберёт `Certificate`, и проверяет
@@ -401,5 +713,145 @@ mod tests {
             let body = vec![0xFFu8; len];
             let _ = verify_certificate_message(&body, &[0; 32]);
         }
+    }
+
+    /// Один блок рукопожатия: тип и трёхбайтная длина (RFC 8446 §4), затем
+    /// тело — то же самое, что строит [`penguin_utls`] у `ClientHello`.
+    fn build_handshake_message(message_type: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![message_type];
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// Тело сообщения `Certificate` (RFC 8446 §4.4.2) с одним самоподписанным
+    /// сертификатом: минимальный DER, в котором есть только то, что читает
+    /// `certificate::parse_leaf` — `SubjectPublicKeyInfo` на `Ed25519` и
+    /// `signatureValue`. Настоящий сертификат несёт куда больше полей;
+    /// разбору (и, значит, этому тесту) они не нужны.
+    fn build_certificate_message(pubkey: [u8; 32], signature: &[u8]) -> Vec<u8> {
+        let oid = [0x06, 0x03, 0x2b, 0x65, 0x70]; // id-Ed25519, RFC 8410 §3
+        let mut algorithm = vec![0x30, oid.len() as u8];
+        algorithm.extend_from_slice(&oid);
+
+        let mut bit_string_content = vec![0x00];
+        bit_string_content.extend_from_slice(&pubkey);
+        let mut public_key_bit_string = vec![0x03, bit_string_content.len() as u8];
+        public_key_bit_string.extend_from_slice(&bit_string_content);
+
+        let mut spki_content = algorithm;
+        spki_content.extend_from_slice(&public_key_bit_string);
+        let mut spki = vec![0x30, spki_content.len() as u8];
+        spki.extend_from_slice(&spki_content);
+
+        let signature_algorithm = vec![0x30, 0x00]; // пустая SEQUENCE — не разбирается
+        let mut signature_bit_string_content = vec![0x00];
+        signature_bit_string_content.extend_from_slice(signature);
+        let mut signature_bit_string = vec![0x03, signature_bit_string_content.len() as u8];
+        signature_bit_string.extend_from_slice(&signature_bit_string_content);
+
+        // tbsCertificate здесь — сам SPKI: parse_leaf ищет его рекурсивно по
+        // всему телу Certificate, а не по фиксированному месту.
+        let mut certificate_content = spki;
+        certificate_content.extend_from_slice(&signature_algorithm);
+        certificate_content.extend_from_slice(&signature_bit_string);
+        let mut der = vec![0x30, certificate_content.len() as u8];
+        der.extend_from_slice(&certificate_content);
+
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&(der.len() as u32).to_be_bytes()[1..]);
+        entry.extend_from_slice(&der);
+        entry.extend_from_slice(&[0x00, 0x00]); // extensions_len = 0
+
+        let mut body = vec![0x00]; // certificate_request_context длиной 0
+        body.extend_from_slice(&(entry.len() as u32).to_be_bytes()[1..]);
+        body.extend_from_slice(&entry);
+        body
+    }
+
+    #[tokio::test]
+    async fn read_server_flight_collects_the_transcript_and_verifies_the_certificate() {
+        let cipher = CipherSuite::Aes128GcmSha256;
+        let key = [7u8; 16];
+        let iv = [1u8; 12];
+        let mut sender = RecordKey::new(cipher, &key, iv).expect("ключ строится");
+        let mut reader = RecordKey::new(cipher, &key, iv).expect("ключ строится");
+
+        let auth_key = [9u8; 32];
+        let pubkey = [3u8; 32];
+        let hmac_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA512, &auth_key);
+        let signature = ring::hmac::sign(&hmac_key, &pubkey);
+
+        let encrypted_extensions =
+            build_handshake_message(HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS, &[]);
+        let certificate = build_handshake_message(
+            HANDSHAKE_TYPE_CERTIFICATE,
+            &build_certificate_message(pubkey, signature.as_ref()),
+        );
+        let certificate_verify =
+            build_handshake_message(HANDSHAKE_TYPE_CERTIFICATE_VERIFY, &[0xAA; 4]);
+        let finished_body = vec![0xEEu8; 32];
+        let finished = build_handshake_message(HANDSHAKE_TYPE_FINISHED, &finished_body);
+
+        let mut plaintext = Vec::new();
+        plaintext.extend_from_slice(&encrypted_extensions);
+        plaintext.extend_from_slice(&certificate);
+        plaintext.extend_from_slice(&certificate_verify);
+        plaintext.extend_from_slice(&finished);
+
+        let record = sender
+            .seal(CONTENT_TYPE_HANDSHAKE, &plaintext)
+            .expect("шифруется");
+
+        let (mut wire, mut peer) = tokio::io::duplex(8192);
+        wire.write_all(&record).await.expect("пишется");
+
+        let flight = read_server_flight(&mut peer, &mut reader, &auth_key)
+            .await
+            .expect("разбирается и сертификат проходит проверку");
+
+        let mut expected_before = Vec::new();
+        expected_before.extend_from_slice(&encrypted_extensions);
+        expected_before.extend_from_slice(&certificate);
+        expected_before.extend_from_slice(&certificate_verify);
+        assert_eq!(flight.messages_before_finished, expected_before);
+        assert_eq!(flight.server_finished_message, finished);
+        assert_eq!(flight.verify_data, finished_body);
+    }
+
+    #[tokio::test]
+    async fn read_server_flight_rejects_a_certificate_with_the_wrong_auth_key() {
+        let cipher = CipherSuite::Aes128GcmSha256;
+        let key = [7u8; 16];
+        let iv = [1u8; 12];
+        let mut sender = RecordKey::new(cipher, &key, iv).expect("ключ строится");
+        let mut reader = RecordKey::new(cipher, &key, iv).expect("ключ строится");
+
+        let pubkey = [3u8; 32];
+        // Подпись посчитана другим AuthKey — как будто SessionID не подошёл
+        // серверу (`RealityError::NotRecognized`), а не как повреждение TLS.
+        let wrong_hmac_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA512, &[1u8; 32]);
+        let signature = ring::hmac::sign(&wrong_hmac_key, &pubkey);
+
+        let plaintext = build_handshake_message(HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS, &[])
+            .into_iter()
+            .chain(build_handshake_message(
+                HANDSHAKE_TYPE_CERTIFICATE,
+                &build_certificate_message(pubkey, signature.as_ref()),
+            ))
+            .collect::<Vec<u8>>();
+
+        let record = sender
+            .seal(CONTENT_TYPE_HANDSHAKE, &plaintext)
+            .expect("шифруется");
+
+        let (mut wire, mut peer) = tokio::io::duplex(8192);
+        wire.write_all(&record).await.expect("пишется");
+
+        let auth_key = [9u8; 32];
+        let err = read_server_flight(&mut peer, &mut reader, &auth_key)
+            .await
+            .expect_err("подпись не сходится с этим AuthKey");
+        assert!(matches!(err, RealityError::NotRecognized));
     }
 }

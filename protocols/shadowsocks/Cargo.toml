@@ -18,8 +18,22 @@ penguin-proto.workspace = true
 penguin-transport.workspace = true
 
 # Шифры, HKDF и случайные байты. `ring` уже собран в дереве через `rustls`.
+# Он же даёт разовый AEAD с явным нонсом для UDP 2022 (AES-GCM): там нонс не
+# растёт из своего счётчика, а приходит из заголовка пакета.
 ring.workspace = true
 rand.workspace = true
+# Только ради Shadowsocks 2022: подключ там выводится BLAKE3 в режиме
+# `derive_key`, а не HKDF, и другой функции вывода у метода нет.
+blake3.workspace = true
+# Только ради Shadowsocks 2022, UDP, AES-*-GCM: заголовок (идентификатор
+# сессии и счётчик пакета) шифруется отдельно, голым блоком AES прямо на
+# предварительном общем ключе — так делает сервер, и AEAD с его отдельным
+# нонсом здесь не подходит.
+aes.workspace = true
+# Только ради Shadowsocks 2022, UDP, `chacha20-poly1305`: там нонс — 24
+# случайных байта на пакет вместо счётчика, а обычный `ChaCha20-Poly1305` (у
+# `ring`) умеет только 12-байтовый. Тот же выбор уже сделан ради Mieru.
+chacha20poly1305.workspace = true
 
 tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
 async-trait.workspace = true
