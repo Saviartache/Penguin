@@ -23,6 +23,7 @@ use penguin_pingwin::outbound::PingwinOutbound;
 use penguin_pingwin_server::{Server, ServerConfig, User};
 use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
+use penguin_proto::factory::ProtocolFactory;
 use penguin_proto::outbound::Outbound;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -456,6 +457,35 @@ async fn a_wrong_key_gets_the_cover_site() {
     .expect("прикрытие молчит")
     .expect("прочиталось");
     assert_eq!(echoed, junk, "прикрытию достались не те байты");
+}
+
+#[tokio::test]
+async fn a_server_that_does_not_answer_is_reported_at_connect_time() {
+    // Ради этого несущая и поднимается при подключении профиля. Без этого
+    // направление собиралось бы, ни разу не сходив к серверу, окно писало бы
+    // «подключено», а человек с провайдером, который режет путь до сервера,
+    // искал бы поломку у себя.
+    let closed = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
+    let addr = closed.local_addr().expect("адрес");
+    drop(closed);
+
+    let params = serde_json::json!({
+        "server": addr.to_string(),
+        "key": penguin_core::base64::encode(&[7u8; 32]),
+        "password": "secret",
+    });
+    let factory = penguin_pingwin::PingwinFactory::new();
+    let built = factory
+        .build(
+            penguin_proto::factory::BuildContext {
+                id: OutboundId::new("test"),
+                dialer: Arc::new(Direct),
+            },
+            &params,
+        )
+        .await;
+
+    assert!(built.is_err(), "направление собралось до мёртвого сервера");
 }
 
 #[tokio::test]
