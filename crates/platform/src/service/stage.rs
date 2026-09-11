@@ -210,10 +210,14 @@ mod tests {
         std::fs::remove_dir_all(&directory).expect("cleanup");
 
         staged.expect("staging");
+        // Свежий файл на нынешних macOS несёт `com.apple.provenance`: метку
+        // ставит сама система, у копии она не от источника, и launchd её не
+        // замечает. Проверяется не «список пуст», а «карантина нет» — метка
+        // карантина должна была остаться на источнике.
+        let names = String::from_utf8_lossy(&marks.stdout);
         assert!(
-            marks.stdout.is_empty(),
-            "{}",
-            String::from_utf8_lossy(&marks.stdout)
+            !names.lines().any(|name| name == "com.apple.quarantine"),
+            "{names}"
         );
     }
 
