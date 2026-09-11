@@ -24,7 +24,7 @@ use iced::Element;
 use iced::widget::text;
 use penguin_core::state::TunnelState;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
-use uikit::style::tokens::type_scale;
+use uikit::tokens::type_scale;
 use uikit::widgets::Button;
 
 use crate::app::message::{HomeMessage, Message};

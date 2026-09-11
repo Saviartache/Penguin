@@ -15,7 +15,7 @@
 use iced::widget::text;
 use iced::{Alignment, Element};
 use uikit::layout::{Flex, gap, grow};
-use uikit::style::tokens::{ink, type_scale};
+use uikit::tokens::{ink, type_scale};
 use uikit::widgets::{Modal, TextInput};
 
 use crate::app::message::{Message, SplitTunnelMessage};

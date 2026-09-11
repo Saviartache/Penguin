@@ -22,7 +22,7 @@
 use iced::widget::button;
 use iced::{Element, Length};
 use uikit::layout::{Flex, Sizable, Size, gap};
-use uikit::style::tokens::type_scale;
+use uikit::tokens::type_scale;
 use uikit::widgets::Modal;
 
 use crate::app::message::{Message, ServersMessage};
@@ -68,7 +68,7 @@ fn row<'a>(state: &'a State, spec: &'static ProtocolSpec) -> Element<'a, Message
     button(label)
         .width(Length::Fill)
         .padding(gap::SM)
-        .style(uikit::style::button::ghost)
+        .style(uikit::button::ghost)
         .on_press(Message::Servers(ServersMessage::ProtocolChosen(spec.id)))
         .into()
 }

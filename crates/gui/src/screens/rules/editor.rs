@@ -25,7 +25,7 @@ use iced::Element;
 use iced::theme::Palette;
 use penguin_ipc::schema::AppInfo;
 use uikit::layout::{Flex, gap, grow};
-use uikit::style::tokens::type_scale;
+use uikit::tokens::type_scale;
 use uikit::widgets::{ButtonVariant, Checkbox, Modal, Select, TextInput};
 
 use crate::app::message::{Message, SplitTunnelMessage};

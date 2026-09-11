@@ -36,7 +36,7 @@ use iced::widget::button;
 use iced::{Alignment, Element, Length};
 use penguin_config::schema::rule::{Condition, Leaf, RuleAction, RuleConfig};
 use uikit::layout::{Flex, Sizable, Size, gap, px};
-use uikit::style::tokens::ink;
+use uikit::tokens::ink;
 use uikit::widgets::ButtonVariant;
 
 use crate::app::TAB_GAP;

@@ -39,7 +39,7 @@ use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{container, text};
 use iced::{Color, Element, Length, Padding};
 use uikit::layout::{Flex, Sizable, Size, px};
-use uikit::style::tokens::{ink, type_scale};
+use uikit::tokens::{ink, type_scale};
 use uikit::widgets::BitStream;
 
 /// Кегль консоли.
@@ -184,7 +184,7 @@ pub fn console<'a, Message: 'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(Padding::new(PAD))
-        .style(uikit::style::container::log_terminal_viewport as fn(&iced::Theme) -> _)
+        .style(uikit::container::log_terminal_viewport as fn(&iced::Theme) -> _)
         // Заполнители нарочно длиннее окна; без отсечения они вылезли бы за
         // тёмный прямоугольник.
         .clip(true)

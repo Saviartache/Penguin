@@ -32,7 +32,7 @@ use iced::{Alignment, Element, Length};
 use penguin_config::schema::profile::Profile;
 use penguin_core::id::ProfileId;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
-use uikit::style::tokens::ink;
+use uikit::tokens::ink;
 use uikit::widgets::ButtonVariant;
 
 use crate::app::TAB_GAP;

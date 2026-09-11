@@ -42,10 +42,10 @@ use iced::theme::Palette;
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{button, container, scrollable, text};
 use iced::{Color, Element, Length, Padding, Theme};
+use uikit::container::Wash;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
-use uikit::style::container::Wash;
-use uikit::style::scrollbar;
-use uikit::style::tokens::{accent, ink, radius, type_scale};
+use uikit::scrollbar;
+use uikit::tokens::{accent, ink, radius, type_scale};
 use uikit::widgets::TextInput;
 
 /// Кегль панели — тот же, что у строки журнала и у консоли главного экрана.
@@ -183,7 +183,7 @@ fn frame<'a, M: 'a>(content: Element<'a, M>) -> Element<'a, M> {
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(Padding::new(PANEL_PADDING))
-        .style(uikit::style::container::log_terminal_viewport as fn(&Theme) -> _)
+        .style(uikit::container::log_terminal_viewport as fn(&Theme) -> _)
         .clip(true)
         .into()
 }
@@ -257,7 +257,7 @@ pub fn action<'a, M: 'a + Clone>(label: &str, width: f32, on_press: M) -> Elemen
     // Тот же отступ, что у строки: иначе кнопка ниже строки, и подпись стоит
     // не на её линии.
     .padding(ROW_PADDING)
-    .style(uikit::style::button::ghost)
+    .style(uikit::button::ghost)
     .on_press(on_press)
     .into()
 }
@@ -301,7 +301,7 @@ pub fn row_style(selected: bool) -> impl Fn(&Theme, button::Status) -> button::S
 
         // Волна берётся у кита целиком: у контейнера и у кнопки она обязана
         // быть одной и той же, а второй такой градиент разошёлся бы с первым.
-        let wave = uikit::style::container::washed(
+        let wave = uikit::container::washed(
             Color::TRANSPARENT,
             accent::wash(&palette, strength),
             Wash::FromLeft,

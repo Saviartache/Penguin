@@ -19,7 +19,7 @@
 
 use iced::Element;
 use uikit::layout::{Flex, gap};
-use uikit::style::tokens::type_scale;
+use uikit::tokens::type_scale;
 use uikit::widgets::{Checkbox, Modal, Select, TextInput};
 
 use crate::app::message::{Message, ServersMessage};

@@ -39,7 +39,7 @@
 use iced::widget::button;
 use iced::{Alignment, Element, Length};
 use uikit::layout::{Flex, Sizable, Size, gap};
-use uikit::style::tokens::ink;
+use uikit::tokens::ink;
 
 use crate::app::message::{Message, SettingsMessage};
 use crate::app::state::State;

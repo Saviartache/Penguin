@@ -27,8 +27,8 @@ use iced::theme::Palette;
 use iced::widget::{Space, container, scrollable, text};
 use iced::{Alignment, Element, Length};
 use uikit::layout::{Flex, gap, grow};
-use uikit::style::scrollbar;
-use uikit::style::tokens::{ink, type_scale};
+use uikit::scrollbar;
+use uikit::tokens::{ink, type_scale};
 use uikit::widgets::{Button, ButtonVariant};
 
 /// Шрифт всего окна.
@@ -107,6 +107,7 @@ pub fn button<'a, Message: Clone + 'a>(
         ButtonVariant::Secondary => Button::secondary(label),
         ButtonVariant::Positive => Button::positive(label),
         ButtonVariant::Danger => Button::danger(label),
+        ButtonVariant::Caution => Button::caution(label),
         ButtonVariant::Neutral => Button::neutral(label),
     };
     button.hug()
