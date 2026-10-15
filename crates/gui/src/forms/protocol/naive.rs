@@ -1,7 +1,11 @@
 //! NaiveProxy — описание формы. Две записи: по HTTP/2 и по HTTP/3.
 
 use crate::forms::check;
+use crate::forms::link::Link;
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
+
+/// Порт, если в ссылке его не указали.
+const DEFAULT_PORT: u16 = 443;
 
 /// Поля формы в том порядке, в каком они показываются.
 ///
@@ -27,8 +31,8 @@ pub static HTTP2: ProtocolSpec = ProtocolSpec {
     id: "http2",
     label: "NaiveProxy (HTTP/2)",
     fields: FIELDS,
-    schemes: &[],
-    from_link: None,
+    schemes: &["naive+https://"],
+    from_link: Some(from_link),
     note: None,
 };
 
@@ -41,10 +45,39 @@ pub static HTTP3: ProtocolSpec = ProtocolSpec {
     id: "http3",
     label: "NaiveProxy (HTTP/3)",
     fields: FIELDS,
-    schemes: &[],
-    from_link: None,
+    schemes: &["naive+quic://"],
+    from_link: Some(from_link),
     note: None,
 };
+
+/// Как ссылка ложится в поля.
+///
+/// ```text
+///  naive+https://имя:пароль@хост:порт?sni=…#имя     — HTTP/2
+///  naive+quic://имя:пароль@хост:порт?sni=…#имя      — HTTP/3
+/// ```
+///
+/// Схемы те же, что у NekoBox и v2rayN. Двоеточие в userinfo — разделитель,
+/// как у `socks5://`: это Basic-авторизация, где имя и пароль раздельны.
+/// `padding` и `extra-headers` не переносятся: полей под них нет.
+fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
+    let mut values = vec![("server", link.server(DEFAULT_PORT))];
+
+    let userinfo = link.userinfo();
+    if !userinfo.is_empty() {
+        let (username, password) = userinfo.split_once(':').unwrap_or((&userinfo, ""));
+        values.push(("username", username.to_owned()));
+        values.push(("password", password.to_owned()));
+    }
+    if let Some(sni) = link.query.get("sni") {
+        values.push(("sni", sni));
+    }
+    if link.query.flag("insecure") || link.query.flag("allowInsecure") {
+        values.push(("insecure", "1".to_owned()));
+    }
+
+    Ok(values)
+}
 
 #[cfg(test)]
 mod tests {
@@ -76,6 +109,35 @@ mod tests {
         // профиль, переписанный с одной на другую, потерял бы настройки.
         assert_eq!(HTTP2.fields.len(), HTTP3.fields.len());
         assert_ne!(HTTP2.id, HTTP3.id);
+    }
+
+    #[test]
+    fn a_link_fills_the_form_and_picks_the_transport() {
+        let draft = crate::forms::link::parse(
+            "naive+https://friend:s3cr:et@example.com:8443?sni=cdn.example.com#Друг",
+        )
+        .expect("разбирается");
+        assert_eq!(draft.protocol(), HTTP2.id);
+        assert_eq!(draft.name, "Друг");
+
+        let link = crate::forms::link::split(
+            "naive+quic://friend:s3cr:et@example.com:8443?sni=cdn.example.com",
+        )
+        .expect("разбирается");
+        let values = from_link(&link).expect("поля заполняются");
+        assert_eq!(
+            values,
+            [
+                ("server", "example.com:8443".to_owned()),
+                ("username", "friend".to_owned()),
+                ("password", "s3cr:et".to_owned()),
+                ("sni", "cdn.example.com".to_owned()),
+            ]
+        );
+        assert_eq!(
+            crate::forms::protocol::by_scheme(&link.scheme).map(|spec| spec.id),
+            Some(HTTP3.id)
+        );
     }
 
     #[test]
