@@ -35,6 +35,7 @@
 //! хвост помечен тильдой ([`CUT`]).
 
 use iced::theme::Palette;
+use iced::time::Duration;
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{container, text};
 use iced::{Color, Element, Length, Padding};
@@ -102,6 +103,18 @@ const DASH: char = '─';
 /// лишь с запасом перекрыть самое широкое окно.
 const FILLER: usize = 240;
 
+/// За сколько поток набирается по ячейкам, когда появляется.
+///
+/// Две секунды: на компактном окне это около сотни столбцов, и фронт идёт по
+/// одному-двум за кадр — плавно, а не скачками.
+const STREAM_REVEAL: Duration = Duration::from_secs(2);
+
+/// Насколько зазор под потоком шире зазора над ним.
+///
+/// Прописные шапки над потоком стоят выше середины строки, поле под ними
+/// шире, чем над прописными строки ниже. Замерено на экране: около двух точек.
+const STREAM_SKEW: f32 = SIZE / 6.0;
+
 /// Предел длины значения в знаках.
 ///
 /// Не раскладка, а страховка: раскладку считает контейнер, а это защита от имени
@@ -122,11 +135,12 @@ pub enum Line {
     Toned(String, String, Color),
     /// Поток данных: загрузка долей от нуля до единицы.
     ///
-    /// Единственная строка, которой достаётся место: она забирает всю высоту,
-    /// не занятую текстом, и потому идёт ровно одна на экран. Пустых
-    /// строк-разделителей в консоли поэтому и нет — свободную высоту держит
-    /// поток, а блоки делит черта в заголовке раздела.
+    /// Забирает всю высоту, не занятую текстом, и потому идёт не больше одной
+    /// на экран — вместо [`Line::Space`].
     Stream(f32),
+    /// Пустота на всю свободную высоту: держит место потока, пока его нет, и
+    /// так же прижимает строки под собой к нижнему краю.
+    Space,
 }
 
 /// Сколько консоли показывать.
@@ -169,7 +183,7 @@ pub fn console<'a, Message: 'a>(
             body = match line {
                 // Единственная строка, которой достаётся место, — она его и
                 // забирает целиком.
-                Line::Stream(_) => body.push(element),
+                Line::Stream(_) | Line::Space => body.push(element),
                 // Высота задаётся здесь, а не оставляется на усмотрение строки:
                 // строка из точек и строка из чёрточек мерятся каждая своим
                 // шрифтом, и одинаковыми они выходят только пока об этом никто
@@ -200,7 +214,7 @@ fn cost(line: &Line) -> usize {
         Line::Pair(label, value) | Line::Toned(label, value, _) => count(label) + count(value),
         Line::Section(label) => count(label),
         // Поток — данные, а не набранный текст: он появляется целиком.
-        Line::Stream(_) => 0,
+        Line::Stream(_) | Line::Space => 0,
     }
 }
 
@@ -216,6 +230,10 @@ fn draw<'a, Message: 'a>(
         Line::Pair(label, value) => duo(palette, label, value, dim, palette.text, typed),
         Line::Toned(label, value, tone) => duo(palette, label, value, dim, *tone, typed),
         Line::Stream(load) => stream(*load),
+        Line::Space => iced::widget::Space::new()
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
     }
 }
 
@@ -290,8 +308,23 @@ fn duo<'a, Message: 'a>(
 /// выглядят одинаково, а окно открывают ради другого — идёт связь или встала.
 /// Летящие биты отвечают на это движением, а числа за минуту и за всё время
 /// стоят строками ниже.
+///
+/// Поток появляется вместе с подключением и заполняется слева направо за
+/// [`STREAM_REVEAL`].
+///
+/// Снизу отступ шире на [`STREAM_SKEW`]: остаток дорожек виджет делит поровну,
+/// а зазор под потоком без сдвига на глаз выходит меньше верхнего.
 fn stream<'a, Message: 'a>(load: f32) -> Element<'a, Message> {
-    BitStream::new(load).w(Size::FILL).h(Size::FILL).into()
+    container(
+        BitStream::new(load)
+            .reveal(STREAM_REVEAL)
+            .w(Size::FILL)
+            .h(Size::FILL),
+    )
+    .padding(Padding::ZERO.bottom(STREAM_SKEW))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// Заполнитель на всю оставшуюся пустоту: точки, черта, ровная линия.

@@ -11,21 +11,17 @@
 //!   именем программы — имя стоит в заголовке окна, и второй раз его читать
 //!   незачем;
 //! - под ней состояние — словом и цветом;
-//! - дальше поток данных: он забирает всю высоту, не занятую текстом. Раньше на
-//!   этом месте была пустота — та самая, из-за которой окно выглядело
-//!   недозаполненным;
-//! - над потоком его подпись, под ним его цифры: скорость приёма и отдачи,
-//!   число соединений. Ими консоль и заканчивается, у самого нижнего края.
+//! - дальше подпись трафика и его цифры: скорость приёма и отдачи, число
+//!   соединений;
+//! - между подписью и цифрами — поток данных, только пока соединение
+//!   поднимается или работает. Он забирает всю высоту, не занятую текстом, и
+//!   прижимает цифры к нижнему краю. Без соединения потока нет.
 //!
 //! Конфигурация и трафик показываются вместе, а не по очереди: переключение
 //! содержимого на одном месте заставляло бы искать глазами, что там сейчас.
-//!
-//! Пока профилей нет, строк нет вовсе: подписывать нечего, и консоль — один
-//! поток во всю площадь.
 
 use iced::Element;
 use iced::widget::text;
-use penguin_config::schema::profile::Profile;
 use penguin_core::state::TunnelState;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
 use uikit::tokens::type_scale;
@@ -77,20 +73,33 @@ fn screen(state: &State) -> Element<'_, Message> {
 
 /// Строки консоли.
 fn lines(state: &State) -> Vec<Line> {
-    let Some(profile) = state.config.active() else {
-        // Профилей нет — подписывать нечего: поток забирает всю площадь.
-        return vec![Line::Stream(load(state))];
-    };
-
-    let mut lines = config(state, profile);
+    let mut lines = config(state);
     lines.push(status(state));
-    // Заголовок раздела стоит над потоком и служит ему подписью: цифры под ним
-    // и так читаются как его же. Поток забирает всю высоту, которую не занял
-    // текст, — он же и прижимает цифры к нижнему краю.
-    lines.push(Line::Section(crate::i18n::s().traffic.to_uppercase()));
-    lines.push(Line::Stream(load(state)));
+    let traffic_head = Line::Section(crate::i18n::s().traffic.to_uppercase());
+    if streaming(state) {
+        // Заголовок раздела стоит над потоком и служит ему подписью; поток
+        // забирает свободную высоту и прижимает цифры к нижнему краю.
+        lines.push(traffic_head);
+        lines.push(Line::Stream(load(state)));
+    } else {
+        // Потока нет — свободную высоту держит пустота, и раздел трафика
+        // целиком стоит у нижнего края.
+        lines.push(Line::Space);
+        lines.push(traffic_head);
+    }
     lines.extend(traffic(state));
     lines
+}
+
+/// Показывать ли поток: только пока тоннель поднимается, работает или
+/// переподключается. Без соединения ему нечего показывать.
+fn streaming(state: &State) -> bool {
+    matches!(
+        state.connection.tunnel_now(),
+        TunnelState::Connecting { .. }
+            | TunnelState::Connected { .. }
+            | TunnelState::Reconnecting { .. }
+    )
 }
 
 /// Загрузка потока: свежая скорость долей от наибольшей за окно истории.
@@ -132,9 +141,15 @@ fn reveal(state: &State) -> Reveal {
 }
 
 /// Куда тоннель поведёт.
-fn config(state: &State, profile: &Profile) -> Vec<Line> {
+fn config(state: &State) -> Vec<Line> {
     let strings = crate::i18n::s();
     let head = Line::Section(strings.configuration.to_uppercase());
+
+    let Some(profile) = state.config.active() else {
+        // Профилей нет — говорить о конфигурации нечего, и столбец прочерков
+        // читался бы как поломка.
+        return vec![head, pair(strings.profile, strings.no_profiles.to_owned())];
+    };
 
     let latency = state
         .servers
@@ -317,15 +332,42 @@ mod tests {
     }
 
     #[test]
-    fn without_profiles_the_stream_takes_the_whole_console() {
-        // Подписывать нечего: ни конфигурации, ни состояния, ни цифр — только
-        // поток во всю площадь.
-        let lines = lines(&State::default());
-        assert!(
-            matches!(lines.as_slice(), [Line::Stream(_)]),
-            "{}",
-            lines.len()
-        );
+    fn without_a_connection_there_is_no_stream() {
+        // Строки стоят всегда, а потоку без соединения показывать нечего —
+        // ни без профилей, ни с профилем.
+        for state in [State::default(), with_profile()] {
+            let lines = lines(&state);
+            assert!(!lines.iter().any(|line| matches!(line, Line::Stream(_))));
+            assert!(matches!(lines.last(), Some(Line::Pair(..))), "цифр нет");
+
+            // Раздел трафика прижат к низу: пустота стоит прямо над ним.
+            let at = lines
+                .iter()
+                .position(|line| matches!(line, Line::Space))
+                .expect("пустоты нет");
+            assert!(matches!(lines[at + 1], Line::Section(_)), "не над трафиком");
+        }
+    }
+
+    #[test]
+    fn the_stream_appears_once_the_connection_starts() {
+        let mut state = with_profile();
+        for tunnel in [
+            TunnelState::Connecting {
+                profile: ProfileId::new("home"),
+            },
+            TunnelState::Connected {
+                profile: ProfileId::new("home"),
+                uptime_secs: 1,
+            },
+        ] {
+            state.connection.set_tunnel(tunnel);
+            assert!(
+                lines(&state)
+                    .iter()
+                    .any(|line| matches!(line, Line::Stream(_)))
+            );
+        }
     }
 
     #[test]
@@ -410,7 +452,12 @@ mod tests {
     fn the_stream_stands_between_the_status_and_its_numbers() {
         // Поток — единственная строка, которой достаётся высота; стоять она
         // должна там, где раньше была пустота, а не под цифрами.
-        let lines = lines(&with_profile());
+        let mut state = with_profile();
+        state.connection.set_tunnel(TunnelState::Connected {
+            profile: ProfileId::new("home"),
+            uptime_secs: 1,
+        });
+        let lines = lines(&state);
 
         let at = lines
             .iter()
@@ -470,8 +517,8 @@ mod tests {
                     (label.as_str(), value.as_str())
                 }
                 Line::Section(label) => (label.as_str(), ""),
-                // У потока знаков нет вовсе — он рисуется битами.
-                Line::Stream(_) => continue,
+                // У потока и пустоты знаков нет вовсе.
+                Line::Stream(_) | Line::Space => continue,
             };
 
             for glyph in RISKY {
