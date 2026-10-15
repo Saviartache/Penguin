@@ -1,0 +1,102 @@
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "tag": "vless-grpc",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "b831381d-6324-4d53-ad4f-8cda48b30811" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "grpcSettings": { "serviceName": "svc" },
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": ["h2"],
+          "certificates": [{ "certificateFile": "/etc/xray/tls/cert.pem", "keyFile": "/etc/xray/tls/key.pem" }]
+        }
+      }
+    },
+    {
+      "tag": "vless-xhttp",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "b831381d-6324-4d53-ad4f-8cda48b30811" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": { "path": "/up", "mode": "auto" },
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": ["h3"],
+          "certificates": [{ "certificateFile": "/etc/xray/tls/cert.pem", "keyFile": "/etc/xray/tls/key.pem" }]
+        }
+      }
+    },
+    {
+      "tag": "trojan-grpc",
+      "port": 444,
+      "protocol": "trojan",
+      "settings": { "clients": [{ "password": "secret" }] },
+      "streamSettings": {
+        "network": "grpc",
+        "grpcSettings": { "serviceName": "svc" },
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": ["h2"],
+          "certificates": [{ "certificateFile": "/etc/xray/tls/cert.pem", "keyFile": "/etc/xray/tls/key.pem" }]
+        }
+      }
+    },
+    {
+      "tag": "trojan-xhttp",
+      "port": 444,
+      "protocol": "trojan",
+      "settings": { "clients": [{ "password": "secret" }] },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": { "path": "/up", "mode": "auto" },
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": ["h3"],
+          "certificates": [{ "certificateFile": "/etc/xray/tls/cert.pem", "keyFile": "/etc/xray/tls/key.pem" }]
+        }
+      }
+    },
+    {
+      "tag": "vmess-grpc",
+      "port": 445,
+      "protocol": "vmess",
+      "settings": { "clients": [{ "id": "b831381d-6324-4d53-ad4f-8cda48b30811" }] },
+      "streamSettings": {
+        "network": "grpc",
+        "grpcSettings": { "serviceName": "svc" },
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": ["h2"],
+          "certificates": [{ "certificateFile": "/etc/xray/tls/cert.pem", "keyFile": "/etc/xray/tls/key.pem" }]
+        }
+      }
+    },
+    {
+      "tag": "vmess-xhttp",
+      "port": 445,
+      "protocol": "vmess",
+      "settings": { "clients": [{ "id": "b831381d-6324-4d53-ad4f-8cda48b30811" }] },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": { "path": "/up", "mode": "auto" },
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": ["h3"],
+          "certificates": [{ "certificateFile": "/etc/xray/tls/cert.pem", "keyFile": "/etc/xray/tls/key.pem" }]
+        }
+      }
+    }
+  ],
+  "outbounds": [{ "protocol": "freedom" }]
+}

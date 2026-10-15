@@ -48,15 +48,6 @@ services:
     depends_on: [socks5]
     networks: [interop]
 
-  # Не tinyproxy: образ `vimagick/tinyproxy` падает от подключения, закрытого
-  # до первой строки запроса, — эталоном такой сервер быть не может.
-  http:
-    image: gogost/gost
-    command: -L http://:8888
-    ports:
-      - "127.0.0.1:18888:8888"
-    networks: [interop]
-
   # sing-box в роли сервера. Он умеет почти все протоколы плана, поэтому
   # следующие фазы добавляют сюда файл настроек, а не новый образ.
   trojan:
@@ -119,8 +110,10 @@ services:
     volumes:
       - ./naive/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./tls:/etc/caddy/tls:ro
+    # TCP — HTTP/2, UDP — HTTP/3: Caddy слушает оба на одном порту.
     ports:
       - "127.0.0.1:14436:443"
+      - "127.0.0.1:14436:443/udp"
     networks: [interop]
 
   # Свой образ, а не sing-box: Juicity тот не умеет. Порт по UDP — под ним
@@ -142,6 +135,24 @@ services:
       - ./tls:/etc/hysteria/tls:ro
     ports:
       - "127.0.0.1:14443:443/udp"
+    networks: [interop]
+
+  # Xray: переносы `grpc` и `xhttp` у Trojan/VLESS/VMess. Форматы сверены с
+  # этой версией — тег закреплён. На каждом порту TCP — gRPC, UDP — XHTTP по
+  # HTTP/3.
+  xray:
+    image: ghcr.io/xtls/xray-core:26.3.27
+    command: run -c /etc/xray/config.json
+    volumes:
+      - ./xray/config.json:/etc/xray/config.json:ro
+      - ./tls:/etc/xray/tls:ro
+    ports:
+      - "127.0.0.1:15443:443"
+      - "127.0.0.1:15443:443/udp"
+      - "127.0.0.1:15444:444"
+      - "127.0.0.1:15444:444/udp"
+      - "127.0.0.1:15445:445"
+      - "127.0.0.1:15445:445/udp"
     networks: [interop]
 
 networks:

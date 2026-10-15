@@ -270,8 +270,6 @@ password = "secret"
 sni      = "interop.penguin.test"
 insecure = true'
 
-check http http 'server = "127.0.0.1:18888"'
-
 # UUID и пароль те же, что в `singbox/tuic.json`. Отпечаток по сети не идёт:
 # он выводится из ключевого материала самого рукопожатия TLS.
 check tuic tuic 'server   = "127.0.0.1:14433"
@@ -322,6 +320,15 @@ password = "secret"
 sni      = "interop.penguin.test"
 insecure = true'
 
+# Тот же сервер по HTTP/3: Caddy отвечает на нём же порту по UDP.
+check naive-h3 http3 'server   = "127.0.0.1:14436"
+username = "penguin"
+password = "secret"
+
+[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
 # Метод — часть договора с сервером: он же стоит в `singbox/shadowsocks.json`,
 # и разойтись им нельзя, иначе соединение откроется и ничего не передаст.
 check shadowsocks shadowsocks 'server   = "127.0.0.1:18388"
@@ -350,18 +357,65 @@ down = "50 mbps"
 sni      = "interop.penguin.test"
 insecure = true'
 
+# Переносы — о Xray (`xray/config.json`): у sing-box своя сборка gRPC и XHTTP,
+# а форматы сверялись с Xray. Порт один на протокол: TCP — gRPC, UDP — XHTTP.
+XRAY_TLS='[profiles.outbound.tls]
+sni      = "interop.penguin.test"
+insecure = true'
+
+check vless-grpc vless "server    = \"127.0.0.1:15443\"
+uuid      = \"b831381d-6324-4d53-ad4f-8cda48b30811\"
+transport = \"grpc\"
+path      = \"svc\"
+
+$XRAY_TLS"
+
+check vless-xhttp vless "server    = \"127.0.0.1:15443\"
+uuid      = \"b831381d-6324-4d53-ad4f-8cda48b30811\"
+transport = \"xhttp\"
+path      = \"/up\"
+
+$XRAY_TLS"
+
+check trojan-grpc trojan "server    = \"127.0.0.1:15444\"
+password  = \"secret\"
+transport = \"grpc\"
+path      = \"svc\"
+
+$XRAY_TLS"
+
+check trojan-xhttp trojan "server    = \"127.0.0.1:15444\"
+password  = \"secret\"
+transport = \"xhttp\"
+path      = \"/up\"
+
+$XRAY_TLS"
+
+check vmess-grpc vmess "server    = \"127.0.0.1:15445\"
+id        = \"b831381d-6324-4d53-ad4f-8cda48b30811\"
+transport = \"grpc\"
+path      = \"svc\"
+
+$XRAY_TLS"
+
+check vmess-xhttp vmess "server    = \"127.0.0.1:15445\"
+id        = \"b831381d-6324-4d53-ad4f-8cda48b30811\"
+transport = \"xhttp\"
+path      = \"/up\"
+
+$XRAY_TLS"
+
 # --- итог -----------------------------------------------------------------
 #
 # Отдельно называется и то, для чего сервера нет вовсе: без этой строки
 # «все протоколы прошли» читается как «весь клиент проверен», а это неправда.
 bold "чего эта проверка не касалась"
 cat <<'NOTE'
-  Своего эталонного сервера в наборе пока нет у четырёх протоколов, и ни один
-  из них ниже не проверялся:
+  Своего эталонного сервера в наборе пока нет у этих протоколов и переносов,
+  и ни один из них ниже не проверялся:
 
     masque         сервер CONNECT-UDP по RFC 9298 надо искать
     wireguard      служба не написана
-    openconnect    нужен `ocserv` со своими учётными данными
     trusttunnel    сервер открыт, служба не написана
 
   Ещё не проверяется UDP ни у кого: готовой утилиты, которая ходит по UDP
