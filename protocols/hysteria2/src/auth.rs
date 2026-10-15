@@ -22,9 +22,7 @@
 //!   │◄────────────────────────────────────────┤
 //! ```
 
-use bytes::Bytes;
-use h3::client::SendRequest;
-use http::{Method, Request};
+use penguin_transport::h3::{Connection, Request};
 
 use crate::error::{Hysteria2Error, Hysteria2Result};
 use crate::frame::padding::Padding;
@@ -45,9 +43,6 @@ const HEADER_AUTH: &str = "Hysteria-Auth";
 const HEADER_CC_RX: &str = "Hysteria-CC-RX";
 const HEADER_PADDING: &str = "Hysteria-Padding";
 const HEADER_UDP: &str = "Hysteria-UDP";
-
-/// Отправитель запросов HTTP/3 поверх соединения quinn.
-pub type H3SendRequest = SendRequest<h3_quinn::OpenStreams, Bytes>;
 
 /// Что ответил сервер.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,21 +72,12 @@ pub enum ServerRate {
 /// `rx_bytes_per_second` — сколько клиент готов принимать. Ноль означает «не
 /// знаю»; тогда сервер выбирает управление перегрузкой сам.
 pub async fn authenticate(
-    send_request: &mut H3SendRequest,
+    connection: &Connection,
     password: &str,
     rx_bytes_per_second: u64,
 ) -> Hysteria2Result<AuthResponse> {
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(format!("https://{AUTH_HOST}{AUTH_PATH}"))
-        .header(HEADER_AUTH, password)
-        .header(HEADER_CC_RX, rx_bytes_per_second.to_string())
-        .header(HEADER_PADDING, Padding::AUTH_REQUEST.generate())
-        .body(())
-        .map_err(|e| Hysteria2Error::Auth(format!("не удалось собрать запрос: {e}")))?;
-
-    let mut stream = send_request
-        .send_request(request)
+    let mut stream = connection
+        .send_request(&auth_request(password, rx_bytes_per_second))
         .await
         .map_err(|e| Hysteria2Error::Auth(format!("запрос не отправлен: {e}")))?;
 
@@ -99,15 +85,14 @@ pub async fn authenticate(
     // продолжения и ответа не шлёт.
     stream
         .finish()
-        .await
         .map_err(|e| Hysteria2Error::Auth(format!("не удалось закрыть поток запроса: {e}")))?;
 
     let response = stream
-        .recv_response()
+        .response()
         .await
         .map_err(|e| Hysteria2Error::Auth(format!("ответ не получен: {e}")))?;
 
-    let status = response.status().as_u16();
+    let status = response.status();
     if status != STATUS_AUTH_OK {
         // Сюда попадает и настоящий веб-сервер, случайно оказавшийся по
         // этому адресу, и наш сервер с неверным паролем. Для пользователя
@@ -115,19 +100,24 @@ pub async fn authenticate(
         return Err(Hysteria2Error::AuthRejected { status });
     }
 
-    let headers = response.headers();
-    let udp_enabled = headers
-        .get(HEADER_UDP)
-        .and_then(|v| v.to_str().ok())
+    let udp_enabled = response
+        .header(HEADER_UDP)
         .is_some_and(|v| v.eq_ignore_ascii_case("true"));
 
-    let rate = headers
-        .get(HEADER_CC_RX)
-        .and_then(|v| v.to_str().ok())
+    let rate = response
+        .header(HEADER_CC_RX)
         .map_or(ServerRate::Unknown, parse_server_rate);
 
     tracing::debug!(?rate, udp = udp_enabled, "аутентификация пройдена");
     Ok(AuthResponse { udp_enabled, rate })
+}
+
+/// Запрос `POST /auth`.
+fn auth_request(password: &str, rx_bytes_per_second: u64) -> Request {
+    Request::new("POST", AUTH_HOST, AUTH_PATH)
+        .header(HEADER_AUTH, password)
+        .header(HEADER_CC_RX, rx_bytes_per_second.to_string())
+        .header(HEADER_PADDING, Padding::AUTH_REQUEST.generate())
 }
 
 /// Разбирает значение `Hysteria-CC-RX` из ответа сервера.
@@ -145,6 +135,8 @@ fn parse_server_rate(raw: &str) -> ServerRate {
 
 #[cfg(test)]
 mod tests {
+    use penguin_transport::h3::qpack::field;
+
     use super::*;
 
     #[test]
@@ -171,21 +163,31 @@ mod tests {
 
     #[test]
     fn request_carries_the_expected_headers() {
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(format!("https://{AUTH_HOST}{AUTH_PATH}"))
-            .header(HEADER_AUTH, "hunter2")
-            .header(HEADER_CC_RX, "12500000")
-            .header(HEADER_PADDING, Padding::AUTH_REQUEST.generate())
-            .body(())
-            .expect("собирается");
+        let block = auth_request("hunter2", 12_500_000).encode();
+        let fields: Vec<(String, String)> = field::decode(&block, usize::MAX)
+            .expect("разбирается")
+            .into_iter()
+            .map(|f| {
+                let text = |b: Vec<u8>| String::from_utf8(b).expect("текст");
+                (text(f.name), text(f.value))
+            })
+            .collect();
+        let get = |name: &str| {
+            fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        };
 
-        assert_eq!(request.method(), Method::POST);
-        assert_eq!(request.uri().path(), "/auth");
-        assert_eq!(request.uri().host(), Some(AUTH_HOST));
-        assert_eq!(request.headers()[HEADER_AUTH], "hunter2");
+        assert_eq!(get(":method"), Some("POST"));
+        assert_eq!(get(":scheme"), Some("https"));
+        assert_eq!(get(":authority"), Some(AUTH_HOST));
+        assert_eq!(get(":path"), Some("/auth"));
+        // В HTTP/3 имена полей строчные (RFC 9114, §4.2).
+        assert_eq!(get("hysteria-auth"), Some("hunter2"));
+        assert_eq!(get("hysteria-cc-rx"), Some("12500000"));
 
-        let padding = request.headers()[HEADER_PADDING].to_str().expect("текст");
+        let padding = get("hysteria-padding").expect("дополнение есть");
         assert!((256..=2048).contains(&padding.len()));
     }
 }

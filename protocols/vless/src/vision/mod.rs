@@ -44,7 +44,7 @@
 //!   Vision поверх чего-то, кроме `*tls.Conn`/`*reality.UConn` без переноса
 //!   между ними и сырым сокетом (`XTLS only supports TLS and REALITY
 //!   directly for now`, `proxy/vless/outbound/outbound.go`) — перенос
-//!   `ws`/`httpupgrade` рвёт ту же прямую границу с внешним TLS, которая
+//!   `grpc`/`xhttp` рвёт ту же прямую границу с внешним TLS, которая
 //!   нужна для переключения.
 //! - **Ни OS-splice, ни `unsafe`-доступ к чужим буферам.** У этой
 //!   реализации собственный TLS 1.3, и переключение — это просто выбор

@@ -1,9 +1,9 @@
 //! Направление через сервер Trojan.
 //!
-//! Состояния между вызовами не держит: мультиплексирования у Trojan нет, и
-//! каждое подключение — это своё соединение TLS со своим заголовком. Собрано
-//! заранее ровно то, что дорого собирать заново: настройки TLS и отпечаток
-//! пароля.
+//! Мультиплексирования у Trojan нет: каждое подключение — свой поток со своим
+//! заголовком. По `tcp` и `grpc` это своё соединение TLS; по `xhttp` — свой
+//! поток HTTP/3 внутри общего соединения QUIC. Собрано заранее ровно то, что
+//! дорого собирать заново: настройки TLS и отпечаток пароля.
 
 use std::sync::Arc;
 
@@ -18,10 +18,11 @@ use penguin_proto::error::ProtocolError;
 use penguin_proto::outbound::Outbound;
 use penguin_proto::stream::ProxyStream;
 use penguin_transport::tls::TlsClient;
-use penguin_transport::{deadline, httpupgrade, ws};
+use penguin_transport::xhttp::{XhttpClient, XhttpTarget};
+use penguin_transport::{carrier, deadline};
 use tokio::io::AsyncWriteExt;
 
-use crate::config::{Transport, TrojanConfig};
+use crate::config::TrojanConfig;
 use crate::datagram::TrojanDatagram;
 use crate::error::{TrojanError, TrojanResult};
 use crate::frame::request::{self, CMD_CONNECT, CMD_UDP, HASH_LEN};
@@ -44,6 +45,8 @@ pub struct TrojanOutbound {
     /// Отпечаток пароля: считается один раз, а не на каждый поток.
     password: [u8; HASH_LEN],
     tls: TlsClient,
+    /// Клиент XHTTP — только у `transport = "xhttp"`.
+    xhttp: Option<XhttpClient>,
     dialer: Arc<dyn Dialer>,
 }
 
@@ -69,6 +72,17 @@ impl TrojanOutbound {
         config.validate()?;
         let (host, port) = config.endpoint()?;
         let tls = TlsClient::new(&config.tls, &host, config.transport.default_alpn())?;
+        let authority = config.host()?;
+        let xhttp = config.transport.is_quic().then(|| {
+            let target = XhttpTarget {
+                host: host.clone(),
+                port,
+                tls: config.tls.clone(),
+                authority,
+                path: config.path().to_owned(),
+            };
+            XhttpClient::new(target, Arc::clone(&dialer))
+        });
 
         Ok(Self {
             id,
@@ -77,47 +91,27 @@ impl TrojanOutbound {
             host,
             port,
             tls,
+            xhttp,
             dialer,
         })
     }
 
     /// Открывает поток до сервера: TLS и, если он выбран, перенос поверх него.
     async fn open(&self) -> Result<Box<dyn ProxyStream>, ProtocolError> {
+        if let Some(xhttp) = &self.xhttp {
+            return Ok(Box::new(xhttp.open().await.map_err(TrojanError::from)?));
+        }
         let plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
         let secure = self.tls.connect(plain).await.map_err(TrojanError::from)?;
-
-        Ok(match self.config.transport {
-            Transport::Tcp => Box::new(secure),
-            Transport::Ws => {
-                let request = self.http_request()?;
-                Box::new(
-                    ws::connect(secure, &request)
-                        .await
-                        .map_err(TrojanError::from)?,
-                )
-            }
-            Transport::Httpupgrade => {
-                let request = self.http_request()?;
-                let upgraded = httpupgrade::connect(secure, &request)
-                    .await
-                    .map_err(TrojanError::from)?;
-                // Хвост рукопожатия сюда прийти не может: заголовок Trojan мы
-                // ещё не отправили, и слать нам нечего. Пустым он и обязан
-                // быть — иначе на том конце не Trojan.
-                if !upgraded.tail.is_empty() {
-                    return Err(TrojanError::malformed(
-                        "сервер прислал данные до нашего заголовка",
-                    )
-                    .into());
-                }
-                Box::new(upgraded.io)
-            }
-        })
-    }
-
-    /// Запрос смены протокола для `ws` и `httpupgrade`.
-    fn http_request(&self) -> TrojanResult<ws::Request> {
-        Ok(ws::Request::new(self.config.host()?, self.config.path()))
+        let authority = self.config.host()?;
+        Ok(carrier::wrap(
+            secure,
+            self.config.transport,
+            &authority,
+            self.config.path(),
+        )
+        .await
+        .map_err(TrojanError::from)?)
     }
 
     /// Открывает поток и отправляет заголовок.
@@ -151,6 +145,9 @@ impl TrojanOutbound {
     /// отправляется — соединение до чужого адреса, о котором никто не просил,
     /// в журнале сервера выглядит чужим трафиком.
     pub async fn verify(&self) -> Result<(), ProtocolError> {
+        if let Some(xhttp) = &self.xhttp {
+            return Ok(xhttp.verify().await.map_err(TrojanError::from)?);
+        }
         let plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
         let _session = self.tls.connect(plain).await.map_err(TrojanError::from)?;
         Ok(())
@@ -200,5 +197,13 @@ impl Outbound for TrojanOutbound {
         );
         let io = self.start(CMD_UDP, &placeholder).await?;
         Ok(Box::new(TrojanDatagram::new(io)))
+    }
+
+    async fn close(&self) -> Result<(), ProtocolError> {
+        // Общее соединение QUIC есть только у `xhttp`.
+        if let Some(xhttp) = &self.xhttp {
+            xhttp.close().await;
+        }
+        Ok(())
     }
 }

@@ -72,8 +72,8 @@ mod tests {
         let params = json!({
             "server": "example.com:443",
             "id": TEXT,
-            "transport": "ws",
-            "path": "/ws",
+            "transport": "grpc",
+            "path": "svc",
             "host": "cdn.example.com",
             "udp": false,
             "cipher": "chacha20-poly1305",

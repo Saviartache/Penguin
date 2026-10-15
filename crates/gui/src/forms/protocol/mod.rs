@@ -24,15 +24,14 @@
 //! всех их тестов разом.
 
 pub mod anytls;
+pub mod carrier;
 pub mod catalog;
 pub mod dpi;
-pub mod http;
 pub mod hysteria2;
 pub mod juicity;
 pub mod masque;
 pub mod masque_ip;
 pub mod naive;
-pub mod openconnect;
 pub mod pingwin;
 pub mod shadowsocks;
 pub mod socks5;

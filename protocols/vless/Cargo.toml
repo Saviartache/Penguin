@@ -17,7 +17,8 @@ workspace = true
 # ClientHello для Reality.
 penguin-core.workspace = true
 penguin-proto.workspace = true
-penguin-transport.workspace = true
+# `h2` — перенос gRPC, `quic` — перенос XHTTP.
+penguin-transport = { workspace = true, features = ["h2", "quic"] }
 penguin-utls.workspace = true
 
 tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }

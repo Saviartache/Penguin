@@ -23,10 +23,8 @@ rustls = { workspace = true, features = ["ring", "std"] }
 # TLS, срок на рукопожатие и прочее общее для протоколов. Таблица доверия
 # (система, свой корень, отпечаток, никак) была здесь и уехала туда целиком:
 # трём копиям одного `insecure` незачем расходиться (AGENTS.md, правило 1.1.1).
-penguin-transport.workspace = true
-http.workspace = true
-h3.workspace = true
-h3-quinn.workspace = true
+# Аутентификация — запрос HTTP/3 (`quic` даёт `h3::Connection`).
+penguin-transport = { workspace = true, features = ["quic"] }
 
 tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 async-trait.workspace = true

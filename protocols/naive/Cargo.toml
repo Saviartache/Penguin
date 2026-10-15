@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "NaiveProxy: CONNECT поверх HTTP/2 с дополнением трафика"
+description = "NaiveProxy: CONNECT поверх HTTP/2 и HTTP/3 с дополнением трафика"
 
 [lints]
 workspace = true
@@ -15,7 +15,8 @@ workspace = true
 # Протокол зависит только от контракта, общих типов и общего транспорта.
 penguin-core.workspace = true
 penguin-proto.workspace = true
-penguin-transport.workspace = true
+# `quic` — HTTP/3 и соединение QUIC через `Dialer`; `h2` — поток HTTP/2.
+penguin-transport = { workspace = true, features = ["quic", "h2"] }
 
 # HTTP/2: CONNECT-туннель поверх TLS-соединения с прокси.
 h2.workspace = true

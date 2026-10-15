@@ -85,4 +85,9 @@ impl Outbound for VlessOutbound {
         }
         Ok(Box::new(VlessDatagram::new(Arc::clone(&self.connector))))
     }
+
+    async fn close(&self) -> Result<(), ProtocolError> {
+        self.connector.close().await;
+        Ok(())
+    }
 }

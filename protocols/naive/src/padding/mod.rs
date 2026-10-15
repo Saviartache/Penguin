@@ -70,6 +70,7 @@
 pub mod frame;
 
 use http::HeaderMap;
+use penguin_transport::h3::Response;
 
 pub use frame::PaddedStream;
 
@@ -151,24 +152,37 @@ pub fn request_headers() -> [(&'static str, String); 2] {
 
 /// Разбирает ответ сервера и решает, какой тип дополнения действует.
 ///
-/// Порядок проверки — как в эталоне: явный `padding-type-reply`, а если его
-/// нет — обратная совместимость по одному лишь присутствию `padding`.
-pub fn negotiate(headers: &HeaderMap) -> PaddingType {
-    if let Some(reply) = headers.get(HEADER_TYPE_REPLY) {
-        if let Ok(text) = reply.to_str()
-            && let Some(kind) = PaddingType::from_wire(text)
-        {
-            return kind;
-        }
+/// `reply` — значение `padding-type-reply`, если заголовок есть (не текст —
+/// пустая строка); `has_padding` — есть ли в ответе `padding`. Порядок
+/// проверки — как в эталоне: явный `padding-type-reply`, а если его нет —
+/// обратная совместимость по одному лишь присутствию `padding`.
+pub fn negotiate(reply: Option<&str>, has_padding: bool) -> PaddingType {
+    if let Some(reply) = reply {
         // Заголовок есть, но не разбирается: сервер имел в виду что-то, чего
         // этот клиент не понимает. Безопаснее ничего не дополнять, чем
         // угадать не тот вариант и разойтись с сервером в формате кадра.
-        return PaddingType::None;
+        return PaddingType::from_wire(reply).unwrap_or(PaddingType::None);
     }
-    if headers.contains_key(HEADER_PADDING) {
+    if has_padding {
         return PaddingType::Variant1;
     }
     PaddingType::None
+}
+
+/// [`negotiate`] по заголовкам ответа HTTP/2.
+pub fn negotiate_h2(headers: &HeaderMap) -> PaddingType {
+    let reply = headers
+        .get(HEADER_TYPE_REPLY)
+        .map(|value| value.to_str().unwrap_or_default());
+    negotiate(reply, headers.contains_key(HEADER_PADDING))
+}
+
+/// [`negotiate`] по ответу HTTP/3.
+pub fn negotiate_h3(response: &Response) -> PaddingType {
+    negotiate(
+        response.header(HEADER_TYPE_REPLY),
+        response.header(HEADER_PADDING).is_some(),
+    )
 }
 
 #[cfg(test)]
@@ -200,11 +214,11 @@ mod tests {
     #[test]
     fn an_explicit_reply_wins() {
         assert_eq!(
-            negotiate(&headers(&[(HEADER_TYPE_REPLY, "1")])),
+            negotiate_h2(&headers(&[(HEADER_TYPE_REPLY, "1")])),
             PaddingType::Variant1
         );
         assert_eq!(
-            negotiate(&headers(&[(HEADER_TYPE_REPLY, "0")])),
+            negotiate_h2(&headers(&[(HEADER_TYPE_REPLY, "0")])),
             PaddingType::None
         );
     }
@@ -214,7 +228,7 @@ mod tests {
         // Обратная совместимость с сервером, который ещё не знает про
         // `padding-type-reply`.
         assert_eq!(
-            negotiate(&headers(&[(HEADER_PADDING, "xxxxxxxxxxxxxxxx")])),
+            negotiate_h2(&headers(&[(HEADER_PADDING, "xxxxxxxxxxxxxxxx")])),
             PaddingType::Variant1
         );
     }
@@ -222,14 +236,40 @@ mod tests {
     #[test]
     fn no_headers_at_all_means_no_padding() {
         // Обычный прокси, ничего не знающий про эту схему.
-        assert_eq!(negotiate(&headers(&[])), PaddingType::None);
+        assert_eq!(negotiate_h2(&headers(&[])), PaddingType::None);
+    }
+
+    #[test]
+    fn http3_answers_the_same_way() {
+        use penguin_transport::h3::qpack::Field;
+
+        let response = |pairs: &[(&str, &str)]| {
+            let mut fields = vec![Field {
+                name: b":status".to_vec(),
+                value: b"200".to_vec(),
+            }];
+            fields.extend(pairs.iter().map(|(name, value)| Field {
+                name: name.as_bytes().to_vec(),
+                value: value.as_bytes().to_vec(),
+            }));
+            Response::from_fields(fields).expect("ответ верен")
+        };
+        assert_eq!(
+            negotiate_h3(&response(&[(HEADER_TYPE_REPLY, "1")])),
+            PaddingType::Variant1
+        );
+        assert_eq!(
+            negotiate_h3(&response(&[(HEADER_PADDING, "x")])),
+            PaddingType::Variant1
+        );
+        assert_eq!(negotiate_h3(&response(&[])), PaddingType::None);
     }
 
     #[test]
     fn an_unreadable_reply_is_treated_as_no_padding() {
         // Лучше ничего не дополнять, чем угадать не тот формат кадра.
         assert_eq!(
-            negotiate(&headers(&[(HEADER_TYPE_REPLY, "7")])),
+            negotiate_h2(&headers(&[(HEADER_TYPE_REPLY, "7")])),
             PaddingType::None
         );
     }

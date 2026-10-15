@@ -12,9 +12,9 @@ use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::outbound::Outbound;
 use penguin_proto::stream::ProxyStream;
-use tokio::task::JoinHandle;
+use penguin_transport::h3;
 
-use crate::auth::{self, AuthResponse, H3SendRequest, ServerRate};
+use crate::auth::{self, AuthResponse, ServerRate};
 use crate::config::Hysteria2Config;
 use crate::congestion::brutal::BrutalRate;
 use crate::error::{Hysteria2Error, Hysteria2Result};
@@ -35,16 +35,12 @@ pub struct Hysteria2Client {
     fast_open: bool,
     port_hopping: bool,
 
-    /// Отправитель запросов HTTP/3 — держится живым намеренно.
+    /// Соединение HTTP/3 — держится живым намеренно.
     ///
-    /// Выглядит неиспользуемым полем, но им не является: `h3` закрывает
-    /// соединение, когда исчезает последний `SendRequest`. Уронив его сразу
-    /// после аутентификации, мы получили бы закрытое соединение вместо
-    /// рабочего.
-    _h3: H3SendRequest,
-
-    /// Задача, крутящая служебные потоки HTTP/3, — по той же причине.
-    _h3_driver: JoinHandle<()>,
+    /// Выглядит неиспользуемым полем, но им не является: с ним живёт поток
+    /// управления HTTP/3, а сервер считает его закрытие ошибкой соединения
+    /// (RFC 9114, §6.2.1) и обрывает всё вместе с потоками Hysteria.
+    _h3: h3::Connection,
 }
 
 impl std::fmt::Debug for Hysteria2Client {
@@ -73,20 +69,14 @@ impl Hysteria2Client {
 
         let transport = quic::connect(config, dialer.as_ref(), server, &server_name).await?;
 
-        let (mut h3_driver, mut h3_send) =
-            h3::client::new(h3_quinn::Connection::new(transport.connection.clone()))
-                .await
-                .map_err(|e| Hysteria2Error::Auth(format!("HTTP/3 не поднялся: {e}")))?;
-
-        let driver = tokio::spawn(async move {
-            // Задача живёт, пока живо соединение: она крутит служебные потоки
-            // HTTP/3, без которых `h3` считает соединение сломанным.
-            let err = std::future::poll_fn(|cx| h3_driver.poll_close(cx)).await;
-            tracing::debug!(%err, "служебное соединение HTTP/3 завершено");
-        });
+        // Датаграммы HTTP/3 не включаются: датаграммы этого соединения —
+        // UDP Hysteria, и читает их `UdpManager`.
+        let h3 = h3::Connection::new(transport.connection.clone(), h3::Options::default())
+            .await
+            .map_err(|e| Hysteria2Error::Auth(format!("HTTP/3 не поднялся: {e}")))?;
 
         let rx_bytes = config.bandwidth.down_bps()?.map_or(0, |bits| bits / 8);
-        let response = auth::authenticate(&mut h3_send, &config.password, rx_bytes).await?;
+        let response = auth::authenticate(&h3, &config.password, rx_bytes).await?;
 
         apply_server_rate(&response, transport.brutal_rate.as_ref());
 
@@ -103,8 +93,7 @@ impl Hysteria2Client {
             fast_open: config.fast_open,
             port_hopping: endpoint.ports.is_hopping(),
             transport,
-            _h3: h3_send,
-            _h3_driver: driver,
+            _h3: h3,
         })
     }
 

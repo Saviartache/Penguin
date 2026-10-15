@@ -2,6 +2,7 @@
 
 use crate::forms::check;
 use crate::forms::link::Link;
+use crate::forms::protocol::carrier::{self, TRANSPORTS};
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 
 /// Порт, если в ссылке его не указали.
@@ -9,13 +10,6 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// 443 — не обычай, а часть замысла: сервер обязан выглядеть обычным сайтом,
 /// а сайт стоит на 443.
 const DEFAULT_PORT: u16 = 443;
-
-/// Чем поток переносится внутри TLS.
-///
-/// Порядок — это порядок в списке, и первое значение становится умолчанием
-/// нового профиля. Сверху голый поток: он и есть настоящий Trojan, остальные
-/// нужны только там, где по дороге стоит чужой обратный прокси.
-const TRANSPORTS: &[&str] = &["tcp", "ws", "httpupgrade"];
 
 /// Поля формы в том порядке, в каком они показываются.
 static FIELDS: &[FieldSpec] = &[
@@ -67,15 +61,7 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if let Some(sni) = link.query.get("sni").or_else(|| link.query.get("peer")) {
         values.push(("sni", sni));
     }
-    if let Some(transport) = link.query.get("type") {
-        values.push(("transport", transport));
-    }
-    if let Some(path) = link.query.get("path") {
-        values.push(("path", path));
-    }
-    if let Some(host) = link.query.get("host") {
-        values.push(("host", host));
-    }
+    values.extend(carrier::from_link(link)?);
     // Оба написания встречаются; смысл один — проверки сертификата не будет.
     if link.query.flag("allowInsecure") || link.query.flag("insecure") {
         values.push(("insecure", "1".to_owned()));
@@ -130,11 +116,20 @@ mod tests {
     }
 
     #[test]
-    fn the_websocket_settings_are_carried_over() {
-        let values = parse("trojan://secret@example.com:443?type=ws&path=/ws&host=cdn.example.com");
-        assert_eq!(value(&values, "transport"), Some("ws"));
-        assert_eq!(value(&values, "path"), Some("/ws"));
+    fn the_grpc_settings_are_carried_over() {
+        // У gRPC путь в ссылке Xray зовётся `serviceName`.
+        let values =
+            parse("trojan://secret@example.com:443?type=grpc&serviceName=svc&host=cdn.example.com");
+        assert_eq!(value(&values, "transport"), Some("grpc"));
+        assert_eq!(value(&values, "path"), Some("svc"));
         assert_eq!(value(&values, "host"), Some("cdn.example.com"));
+    }
+
+    #[test]
+    fn a_websocket_link_is_refused() {
+        let link =
+            link::split("trojan://secret@example.com:443?type=ws&path=/ws").expect("разбирается");
+        assert!(from_link(&link).is_err());
     }
 
     #[test]

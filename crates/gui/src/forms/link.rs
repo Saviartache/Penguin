@@ -335,17 +335,6 @@ mod tests {
     }
 
     #[test]
-    fn an_http_proxy_link_parses_under_both_schemes() {
-        let draft = parse("http://proxy.example.com:8080").expect("разбирается");
-        assert_eq!(draft.protocol(), "http");
-
-        let draft = parse("https://user:pass@proxy.example.com:8443").expect("разбирается");
-        assert_eq!(draft.protocol(), "https");
-        assert_eq!(draft.text("username"), "user");
-        assert_eq!(draft.text("password"), "pass");
-    }
-
-    #[test]
     fn a_missing_port_falls_back_to_the_usual_one_of_that_protocol() {
         // У каждого протокола он свой, и общего умолчания тут быть не может.
         assert_eq!(
@@ -360,17 +349,6 @@ mod tests {
                 .text("server"),
             "example.com:1080"
         );
-    }
-
-    #[test]
-    fn a_web_address_is_not_taken_for_a_proxy() {
-        // `http://` и `https://` — это ещё и любая ссылка на страницу, и
-        // вставляют их сюда чаще по ошибке, чем нарочно. Отличает их порт: у
-        // прокси он написан почти всегда, у страницы — почти никогда.
-        let reason = parse("https://example.com").expect_err("это не прокси");
-        assert_eq!(reason, crate::i18n::s().link_no_port);
-
-        parse("https://example.com:8443").expect("а это прокси");
     }
 
     #[test]

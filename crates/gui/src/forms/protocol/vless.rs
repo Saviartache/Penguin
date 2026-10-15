@@ -2,6 +2,7 @@
 
 use crate::forms::check;
 use crate::forms::link::Link;
+use crate::forms::protocol::carrier::{self, TRANSPORTS};
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 
 /// Порт, если в ссылке его не указали.
@@ -22,16 +23,13 @@ const DEFAULT_PORT: u16 = 443;
 /// (`SPEC.note`, `crate::i18n::Strings::reality_unverified`), а не молчит.
 const SECURITY: &[&str] = &["tls", "none", "reality"];
 
-/// Чем переносится поток.
-const TRANSPORTS: &[&str] = &["tcp", "ws", "httpupgrade"];
-
 /// Поля формы в том порядке, в каком они показываются.
 ///
 /// Поля Reality (`reality_*`) не помечены `.required()`, хотя без них
 /// `security = "reality"` не поднимется, — конфликта с `tls`/`none` тогда бы
 /// не было, потому что этой форме нечем спросить «обязательно, только если
 /// security = reality» (`FieldSpec::required` не видит других полей). Как и
-/// у `path`/`host` под `ws`/`httpupgrade`, недостающее здесь ловит
+/// у `path`/`host` под `grpc`/`xhttp`, недостающее здесь ловит
 /// `RealityConfig::validate` — понятной ошибкой, а не пустым ключом сервера.
 ///
 /// Отпечатка браузера (`penguin_utls::Fingerprint`) в форме нет нарочно:
@@ -94,7 +92,7 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
 /// Как ссылка ложится в поля.
 ///
 /// ```text
-///  vless://uuid@хост:порт?encryption=none&security=tls&type=ws&path=/…#имя
+///  vless://uuid@хост:порт?encryption=none&security=tls&type=xhttp&path=/…#имя
 /// ```
 ///
 /// `encryption` в ссылке всегда `none` и означает не «без шифрования», а
@@ -113,15 +111,7 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if let Some(security) = link.query.get("security") {
         values.push(("security", security));
     }
-    if let Some(transport) = link.query.get("type") {
-        values.push(("transport", transport));
-    }
-    if let Some(path) = link.query.get("path") {
-        values.push(("path", path));
-    }
-    if let Some(host) = link.query.get("host") {
-        values.push(("host", host));
-    }
+    values.extend(carrier::from_link(link)?);
     // Одно и то же имя сайта у обычного TLS (`tls.sni`) и у Reality
     // (`reality.server_name`) значит разное — совсем не подделка личности
     // против ровно этой подделки — и лежит в разных полях
@@ -213,13 +203,13 @@ mod tests {
     }
 
     #[test]
-    fn the_websocket_settings_are_carried_over() {
+    fn the_xhttp_settings_are_carried_over() {
         let values = parse(&format!(
-            "vless://{UUID}@example.com:443?security=tls&type=ws&path=/ws&host=cdn.example.com&sni=cdn.example.com"
+            "vless://{UUID}@example.com:443?security=tls&type=xhttp&path=/up&host=cdn.example.com&sni=cdn.example.com"
         ));
         assert_eq!(value(&values, "security"), Some("tls"));
-        assert_eq!(value(&values, "transport"), Some("ws"));
-        assert_eq!(value(&values, "path"), Some("/ws"));
+        assert_eq!(value(&values, "transport"), Some("xhttp"));
+        assert_eq!(value(&values, "path"), Some("/up"));
         assert_eq!(value(&values, "host"), Some("cdn.example.com"));
         assert_eq!(value(&values, "sni"), Some("cdn.example.com"));
     }

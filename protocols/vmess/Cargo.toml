@@ -16,7 +16,8 @@ workspace = true
 # (AGENTS.md §1.1).
 penguin-core.workspace = true
 penguin-proto.workspace = true
-penguin-transport.workspace = true
+# `h2` — перенос gRPC, `quic` — перенос XHTTP.
+penguin-transport = { workspace = true, features = ["h2", "quic"] }
 
 tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
 async-trait.workspace = true

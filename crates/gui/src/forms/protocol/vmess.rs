@@ -4,6 +4,7 @@ use penguin_core::base64;
 
 use crate::forms::check;
 use crate::forms::link::Link;
+use crate::forms::protocol::carrier::{self, TRANSPORTS};
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 
 /// Порт, если в ссылке его не указали.
@@ -18,9 +19,6 @@ const CIPHERS: &[&str] = &["auto", "aes-128-gcm", "chacha20-poly1305", "none", "
 
 /// Чем шифруется соединение до сервера — то же различие, что у VLESS.
 const SECURITY: &[&str] = &["tls", "none"];
-
-/// Чем переносится поток.
-const TRANSPORTS: &[&str] = &["tcp", "ws", "httpupgrade"];
 
 /// `alterId` обязан быть пустым или числом — сам протокол принимает только
 /// `0`, но сказать это тут же, не дожидаясь сохранения, дешевле для того, кто
@@ -111,14 +109,19 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if let Some(aid) = text_field(&json, "aid") {
         values.push(("alter_id", aid));
     }
-    if let Some(net) = json.get("net").and_then(serde_json::Value::as_str) {
-        values.push(("transport", net.to_owned()));
+    // У v2rayN имя службы gRPC тоже лежит в `path`.
+    let net = json.get("net").and_then(serde_json::Value::as_str);
+    let transport = carrier::transport(net.unwrap_or_default())?;
+    if net.is_some() {
+        values.push(("transport", transport.to_owned()));
     }
-    if let Some(path) = json.get("path").and_then(serde_json::Value::as_str) {
-        values.push(("path", path.to_owned()));
-    }
-    if let Some(http_host) = json.get("host").and_then(serde_json::Value::as_str) {
-        values.push(("host", http_host.to_owned()));
+    if transport != "tcp" {
+        if let Some(path) = json.get("path").and_then(serde_json::Value::as_str) {
+            values.push(("path", path.to_owned()));
+        }
+        if let Some(http_host) = json.get("host").and_then(serde_json::Value::as_str) {
+            values.push(("host", http_host.to_owned()));
+        }
     }
     if let Some(sni) = json.get("sni").and_then(serde_json::Value::as_str) {
         values.push(("sni", sni.to_owned()));
@@ -203,12 +206,12 @@ mod tests {
     fn tls_and_transport_settings_are_carried_over() {
         let json = serde_json::json!({
             "add": "example.com", "port": 443, "id": "id",
-            "net": "ws", "path": "/ws", "host": "cdn.example.com",
+            "net": "grpc", "path": "svc", "host": "cdn.example.com",
             "tls": "tls", "sni": "cdn.example.com", "aid": "0",
         });
         let values = parse(&json);
-        assert_eq!(value(&values, "transport"), Some("ws"));
-        assert_eq!(value(&values, "path"), Some("/ws"));
+        assert_eq!(value(&values, "transport"), Some("grpc"));
+        assert_eq!(value(&values, "path"), Some("svc"));
         assert_eq!(value(&values, "host"), Some("cdn.example.com"));
         assert_eq!(value(&values, "sni"), Some("cdn.example.com"));
         assert_eq!(value(&values, "security"), Some("tls"));

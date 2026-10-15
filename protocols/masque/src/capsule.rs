@@ -19,17 +19,16 @@
 //! Капсула типа `DATAGRAM` переносит по потоку то же самое, что кадр
 //! `HTTP/3 DATAGRAM` переносит поверх QUIC напрямую (RFC 9297, §3.5:
 //! «семантика одинакова»), только надёжно и по порядку, а не best-effort.
-//! Этот крейт использует только этот путь — почему, написано в
-//! [`crate::flow`].
+//! Когда какой путь выбирается, написано в [`crate::flow`].
 //!
 //! Приёмник обязан молча пропускать капсулы незнакомого типа и переходить к
 //! следующей (RFC 9297, §3.2) — здесь это [`CapsuleReader::next_datagram`]:
 //! он этим и занимается, а не сообщает об ошибке.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use penguin_transport::varint;
 
 use crate::error::MasqueError;
-use crate::varint;
 
 /// Тип капсулы `DATAGRAM` (RFC 9297, §3.5): несёт HTTP-датаграмму по потоку.
 pub const CAPSULE_TYPE_DATAGRAM: u64 = 0x00;
@@ -48,13 +47,30 @@ pub const MAX_UDP_PAYLOAD: usize = 65527;
 /// Возвращает ошибку конфигурации, а не обрезает нагрузку молча: пакет
 /// длиннее предела — это то, что должен был поймать вызывающий раньше.
 pub fn encode_udp_datagram(payload: &[u8]) -> Result<Bytes, MasqueError> {
+    Ok(encode_capsule(
+        CAPSULE_TYPE_DATAGRAM,
+        &encode_udp_payload(payload)?,
+    ))
+}
+
+/// Содержимое датаграммы HTTP с нагрузкой UDP: `Context ID = 0` и пакет
+/// (RFC 9298, §5). Одно и то же — в капсуле и в кадре датаграммы HTTP/3.
+pub fn encode_udp_payload(payload: &[u8]) -> Result<Bytes, MasqueError> {
     if payload.len() > MAX_UDP_PAYLOAD {
         return Err(MasqueError::malformed(format!(
             "датаграмма UDP длиннее {MAX_UDP_PAYLOAD} байт: {}",
             payload.len()
         )));
     }
-    Ok(encode_datagram_capsule(CONTEXT_ID_UDP, payload))
+    Ok(encode_datagram_payload(CONTEXT_ID_UDP, payload))
+}
+
+/// Нагрузка UDP из содержимого датаграммы HTTP. `None` — чужой контекст:
+/// его этот клиент не регистрировал, и RFC 9298 не даёт ему формата.
+pub fn decode_udp_payload(mut value: Bytes) -> Result<Option<Bytes>, MasqueError> {
+    let context_id = varint::decode_prefix(&mut value)
+        .ok_or_else(|| MasqueError::malformed("датаграмма HTTP без context ID"))?;
+    Ok((context_id == CONTEXT_ID_UDP).then_some(value))
 }
 
 /// Собирает капсулу `DATAGRAM` с произвольным Context ID.
@@ -64,10 +80,17 @@ pub fn encode_udp_datagram(payload: &[u8]) -> Result<Bytes, MasqueError> {
 /// + Payload` один и тот же в обоих документах, разница только в том, что
 /// лежит в `Payload` — UDP-датаграмма там и целый IP-пакет здесь.
 pub(crate) fn encode_datagram_capsule(context_id: u64, payload: &[u8]) -> Bytes {
+    encode_capsule(
+        CAPSULE_TYPE_DATAGRAM,
+        &encode_datagram_payload(context_id, payload),
+    )
+}
+
+fn encode_datagram_payload(context_id: u64, payload: &[u8]) -> Bytes {
     let mut value = BytesMut::with_capacity(varint::encoded_len(context_id) + payload.len());
     varint::encode(context_id, &mut value);
     value.put_slice(payload);
-    encode_capsule(CAPSULE_TYPE_DATAGRAM, &value)
+    value.freeze()
 }
 
 /// Собирает капсулу произвольного типа.
@@ -111,24 +134,16 @@ impl CapsuleReader {
     /// сегодня, для целой капсулы не хватает.
     pub fn next_datagram(&mut self) -> Result<Option<Bytes>, MasqueError> {
         loop {
-            let Some((capsule_type, mut value)) = self.next_capsule()? else {
+            let Some((capsule_type, value)) = self.next_capsule()? else {
                 return Ok(None);
             };
-
+            // Неизвестный тип и чужой контекст пропускаются.
             if capsule_type != CAPSULE_TYPE_DATAGRAM {
-                // Неизвестный тип — переходим к следующей капсуле.
                 continue;
             }
-
-            let context_id = varint::decode_prefix(&mut value)
-                .ok_or_else(|| MasqueError::malformed("капсула DATAGRAM без context ID"))?;
-            if context_id != CONTEXT_ID_UDP {
-                // Контекст сжатия, которого этот клиент не регистрировал —
-                // разбирать нечем, и RFC не определяет для него формат.
-                continue;
+            if let Some(payload) = decode_udp_payload(value)? {
+                return Ok(Some(payload));
             }
-
-            return Ok(Some(value));
         }
     }
 
@@ -177,6 +192,22 @@ mod tests {
             .expect("разбирается")
             .expect("капсула целиком пришла");
         assert_eq!(&decoded[..], payload);
+    }
+
+    #[test]
+    fn a_datagram_payload_names_its_context() {
+        // RFC 9298, §5: `Context ID = 0` — пакет UDP, остальные — не наши.
+        let payload = encode_udp_payload(b"dns").expect("в пределах");
+        assert_eq!(&payload[..], b"\x00dns");
+        assert_eq!(
+            decode_udp_payload(payload).expect("разбирается").as_deref(),
+            Some(&b"dns"[..])
+        );
+        assert_eq!(
+            decode_udp_payload(Bytes::from_static(b"\x02dns")).expect("разбирается"),
+            None
+        );
+        assert!(decode_udp_payload(Bytes::new()).is_err());
     }
 
     #[test]

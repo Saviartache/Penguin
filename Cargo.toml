@@ -27,7 +27,6 @@ members = [
     "protocols/juicity",
     "protocols/masque",
     "protocols/naive",
-    "protocols/openconnect",
     "protocols/trusttunnel",
     "protocols/utls",
     "protocols/wireguard",
@@ -38,7 +37,6 @@ members = [
     "protocols/shadowsocks",
     "protocols/trojan",
     "protocols/socks5",
-    "protocols/http-proxy",
     "servers/pingwin",
 ]
 
@@ -82,7 +80,6 @@ penguin-anytls = { path = "protocols/anytls" }
 penguin-juicity = { path = "protocols/juicity" }
 penguin-masque = { path = "protocols/masque" }
 penguin-naive = { path = "protocols/naive" }
-penguin-openconnect = { path = "protocols/openconnect" }
 penguin-trusttunnel = { path = "protocols/trusttunnel" }
 penguin-utls = { path = "protocols/utls" }
 penguin-wireguard = { path = "protocols/wireguard" }
@@ -94,7 +91,6 @@ penguin-pingwin = { path = "protocols/pingwin" }
 penguin-shadowsocks = { path = "protocols/shadowsocks" }
 penguin-trojan = { path = "protocols/trojan" }
 penguin-socks5 = { path = "protocols/socks5" }
-penguin-http-proxy = { path = "protocols/http-proxy" }
 
 # --- UI ---
 uikit = { package = "rust-ui-kit", path = "vendor/rust-ui-kit" }
@@ -121,15 +117,11 @@ http = "1"
 # нужен — HTTP/2 в проекте есть только затем, чтобы NaiveProxy маскировался
 # под обычный веб-трафик.
 h2 = "0.4"
+# HTTP/3 у клиента свой (`penguin_transport::h3`). `h3` — только сервер в
+# тестах: независимая реализация, о которую проверяется своя.
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 smoltcp = { version = "0.12", default-features = false }
-
-# Только ради OpenConnect: опознание на сервере ocserv устроено как обмен
-# HTTPS-запросами с телом XML. Свой разбор XML — это либо утиный разбор
-# строк, который молча ломается на первом же CDATA, либо копия этого
-# крейта, написанная хуже.
-quick-xml = "0.42"
 
 # --- данные ---
 serde = { version = "1", features = ["derive", "rc"] }

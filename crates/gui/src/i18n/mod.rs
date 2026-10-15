@@ -153,10 +153,6 @@ pub struct Strings {
     pub proxy_address: &'static str,
     /// Пример адреса прокси SOCKS5.
     pub socks_address_example: &'static str,
-    /// Пример адреса прокси HTTP.
-    pub http_address_example: &'static str,
-    /// Пример адреса прокси HTTPS.
-    pub https_address_example: &'static str,
     /// Поле можно не заполнять — подсказкой внутри него.
     pub optional_hint: &'static str,
     /// Пускать ли UDP через прокси.
@@ -169,7 +165,7 @@ pub struct Strings {
     pub proxy_udp_plain: &'static str,
     /// Имя для TLS.
     pub sni: &'static str,
-    /// Чем переносится поток: голый TCP, WebSocket, `Upgrade`.
+    /// Чем переносится поток: голый TCP, gRPC, XHTTP.
     pub transport: &'static str,
     /// Метод шифрования.
     pub method: &'static str,
@@ -209,10 +205,6 @@ pub struct Strings {
     pub chain_fingerprint: &'static str,
     /// Что вписать в поле отпечатка цепочки.
     pub chain_fingerprint_example: &'static str,
-    /// Группа входа на сервере.
-    pub login_group: &'static str,
-    /// Предупреждение: у OpenConnect нет DTLS.
-    pub openconnect_no_dtls: &'static str,
     /// Приватный ключ.
     pub private_key: &'static str,
     /// Не задан приватный ключ.
@@ -297,8 +289,8 @@ pub struct Strings {
     pub link_bad_host: &'static str,
     /// В ссылке нет пароля.
     pub link_no_password: &'static str,
-    /// В ссылке нет порта.
-    pub link_no_port: &'static str,
+    /// В ссылке перенос, которого клиент не говорит.
+    pub link_unsupported_transport: &'static str,
     /// Идентичность пользователя у VMess: канонический UUID или, если
     /// провайдер прислал не его, произвольный текст.
     pub vmess_id: &'static str,
@@ -517,12 +509,9 @@ mod tests {
                 table.username,
                 table.proxy_address,
                 table.socks_address_example,
-                table.http_address_example,
-                table.https_address_example,
                 table.optional_hint,
                 table.proxy_udp,
                 table.proxy_udp_plain,
-                table.link_no_port,
                 table.vmess_id,
                 table.need_vmess_id,
                 table.alter_id,
@@ -543,6 +532,7 @@ mod tests {
                 table.need_uuid,
                 table.bad_uuid,
                 table.link_no_uuid,
+                table.link_unsupported_transport,
                 table.need_method,
                 table.path,
                 table.path_example,
@@ -554,8 +544,6 @@ mod tests {
                 table.insecure,
                 table.chain_fingerprint,
                 table.chain_fingerprint_example,
-                table.login_group,
-                table.openconnect_no_dtls,
                 table.private_key,
                 table.need_private_key,
                 table.server_public_key,

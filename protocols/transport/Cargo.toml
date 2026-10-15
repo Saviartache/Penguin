@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Общий транспорт протоколов: TLS, WebSocket, адреса, сроки"
+description = "Общий транспорт протоколов: TLS, HTTP/3, HTTP/2, адреса, сроки"
 
 [lints]
 workspace = true
@@ -22,21 +22,43 @@ rustls = { workspace = true, features = ["ring", "std"] }
 rustls-platform-verifier.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
-# `ring` уже собран в дереве — его тянет `rustls`. Здесь он нужен ради SHA-1
-# в рукопожатии WebSocket и ради шифров, которыми пользуются протоколы.
+# `ring` уже собран в дереве — его тянет `rustls`. Здесь он нужен ради
+# отпечатков сертификатов и шифров, которыми пользуются протоколы.
 ring.workspace = true
 # Не через `ring`: MD5 там нет нарочно, а `EVP_BytesToKey` без него не
 # повторить — так выводит ключ сервер (см. `kdf`).
 md-5.workspace = true
 
+# HTTP/3 и соединение QUIC — только у тех, кто включил фичу `quic`.
+quinn = { workspace = true, features = ["rustls", "runtime-tokio"], optional = true }
+# HTTP/2 для gRPC и `CONNECT` — только с фичей `h2`.
+h2 = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+
 # `net` — ради `desync`: он меняет TTL уже открытого `TcpStream`. Сокетов
 # крейт по-прежнему не открывает: соединение приходит от `Dialer`.
-tokio = { workspace = true, features = ["rt", "io-util", "net", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "io-util", "net", "time", "macros", "sync"] }
 bytes.workspace = true
 rand.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
+[features]
+# HTTP/3 поверх `quinn` и соединение QUIC через `Dialer`.
+quic = ["dep:quinn"]
+# Поток HTTP/2 и gRPC поверх `h2`.
+h2 = ["dep:h2", "dep:http"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time"] }
+# Сервер для `tests/h3.rs`: чужая реализация HTTP/3, о которую проверяется своя.
+h3.workspace = true
+h3-quinn.workspace = true
+http.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+
+[[test]]
+name = "h3"
+required-features = ["quic"]

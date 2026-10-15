@@ -1,4 +1,4 @@
-//! Параметры: адрес сервера, имя и пароль, TLS.
+//! Параметры: адрес сервера, имя и пароль, перенос, TLS.
 //!
 //! TLS обязателен всегда, а не флагом: у TrustTunnel нет своего рукопожатия
 //! вовсе (`PROTOCOL.md`, §1.1) — вся конфиденциальность на TLS, и разговор в
@@ -11,6 +11,17 @@ use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{TrustTunnelError, TrustTunnelResult};
+
+/// Чем несётся `CONNECT` (`PROTOCOL.md`, §3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// HTTP/2 поверх TLS (§3.1).
+    #[default]
+    H2,
+    /// HTTP/3 поверх QUIC (§3.2).
+    H3,
+}
 
 /// Настройки подключения к серверу TrustTunnel.
 ///
@@ -28,6 +39,10 @@ pub struct TrustTunnelConfig {
     ///
     /// В `Debug` не попадает: вывод пишется вручную ниже.
     pub password: String,
+
+    /// Перенос. Не задан — HTTP/2, как было до появления HTTP/3.
+    #[serde(default)]
+    pub transport: Transport,
 
     /// TLS до сервера.
     #[serde(default)]
@@ -101,6 +116,7 @@ impl std::fmt::Debug for TrustTunnelConfig {
             .field("server", &self.server)
             .field("username", &self.username)
             .field("password", &"<скрыт>")
+            .field("transport", &self.transport)
             .field("tls", &self.tls)
             .finish()
     }
@@ -178,6 +194,22 @@ mod tests {
             "user": "penguin",
         });
         assert!(serde_json::from_value::<TrustTunnelConfig>(raw).is_err());
+    }
+
+    #[test]
+    fn the_transport_defaults_to_http2_and_reads_h3() {
+        let base = json!({
+            "server": "example.com:443",
+            "username": "penguin",
+            "password": "secret",
+        });
+        let config: TrustTunnelConfig = serde_json::from_value(base.clone()).expect("читается");
+        assert_eq!(config.transport, Transport::H2);
+
+        let mut raw = base;
+        raw["transport"] = json!("h3");
+        let config: TrustTunnelConfig = serde_json::from_value(raw).expect("читается");
+        assert_eq!(config.transport, Transport::H3);
     }
 
     #[test]

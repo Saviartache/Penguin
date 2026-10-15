@@ -26,13 +26,15 @@
 //! экранируются той же функцией — так домен с символом вне `unreserved`
 //! (RFC 3986, §2.3) не ломает путь молча.
 
-use h3::ext::Protocol;
 use http::uri::Authority;
 use penguin_core::address::{Address, SocketAddress};
-use penguin_transport::deadline;
+use penguin_transport::h3::{self, RequestStream, Response};
+use penguin_transport::{TransportError, deadline};
 
 use crate::error::{MasqueError, MasqueResult};
-use crate::transport::{H3BidiStream, H3SendRequest};
+
+/// Значение `:protocol` расширенного `CONNECT` (RFC 9298, §3.4).
+const PROTOCOL_CONNECT_UDP: &str = "connect-udp";
 
 /// Значение заголовка, которым сервер подтверждает протокол капсул
 /// (RFC 9297, §3.2; структурное булево «истина», RFC 8941, §3.3.6).
@@ -43,33 +45,18 @@ pub fn request(
     authority: &Authority,
     target: &SocketAddress,
     authorization: Option<&str>,
-) -> MasqueResult<http::Request<()>> {
+) -> h3::Request {
     let path = format!(
         "/.well-known/masque/udp/{}/{}/",
         encode_target_host(&target.host),
         target.port
     );
-
-    let mut builder = http::Request::builder()
-        .method(http::Method::CONNECT)
-        .extension(Protocol::CONNECT_UDP)
-        .uri(
-            http::Uri::builder()
-                .scheme("https")
-                .authority(authority.clone())
-                .path_and_query(path)
-                .build()
-                .map_err(|e| MasqueError::malformed(format!("URI CONNECT-UDP: {e}")))?,
-        )
+    let request = h3::Request::extended_connect(PROTOCOL_CONNECT_UDP, authority.as_str(), path)
         .header("capsule-protocol", CAPSULE_PROTOCOL_CONFIRMED);
-
-    if let Some(value) = authorization {
-        builder = builder.header(http::header::AUTHORIZATION, value);
+    match authorization {
+        Some(value) => request.header("authorization", value),
+        None => request,
     }
-
-    builder
-        .body(())
-        .map_err(|e| MasqueError::malformed(format!("запрос CONNECT-UDP не собирается: {e}")))
 }
 
 /// Кодирует `target_host` для подстановки в путь (RFC 9298, §2).
@@ -112,36 +99,31 @@ fn outcome(status: u16, target: &str) -> Option<MasqueError> {
 /// Это отдельная проверка от [`outcome`]: `2xx` без `capsule-protocol: ?1` —
 /// не отказ прокси, а нарушение формата (RFC 9298, §3.5), и `supervisor`
 /// не должен путать его с обрывом сети.
-fn confirms_capsule_protocol(headers: &http::HeaderMap) -> bool {
-    headers
-        .get("capsule-protocol")
-        .and_then(|value| value.to_str().ok())
-        == Some(CAPSULE_PROTOCOL_CONFIRMED)
+fn confirms_capsule_protocol(response: &Response) -> bool {
+    response.header("capsule-protocol") == Some(CAPSULE_PROTOCOL_CONFIRMED)
 }
 
 /// Открывает поток `CONNECT-UDP`: срок на рукопожатие, разбор кода и
 /// подтверждения протокола капсул.
+///
+/// Прокси, не объявивший расширенный `CONNECT`, отказывает ещё до запроса:
+/// [`h3::H3Error::Unsupported`] — ошибка настроек, повторять её незачем.
 pub async fn perform(
     target: &SocketAddress,
-    mut send_request: H3SendRequest,
-    request: http::Request<()>,
-) -> MasqueResult<h3::client::RequestStream<H3BidiStream, bytes::Bytes>> {
+    connection: &h3::Connection,
+    request: &h3::Request,
+) -> MasqueResult<RequestStream> {
     deadline::handshake("ответ прокси на CONNECT-UDP", async {
-        let mut stream = send_request
+        let mut stream = connection
             .send_request(request)
             .await
-            .map_err(|e| MasqueError::Disconnected(e.to_string()))?;
+            .map_err(TransportError::from)?;
+        let response = stream.response().await.map_err(TransportError::from)?;
 
-        let response = stream
-            .recv_response()
-            .await
-            .map_err(|e| MasqueError::Disconnected(e.to_string()))?;
-
-        let status = response.status().as_u16();
-        if let Some(err) = outcome(status, &target.to_wire()) {
+        if let Some(err) = outcome(response.status(), &target.to_wire()) {
             return Err(err);
         }
-        if !confirms_capsule_protocol(response.headers()) {
+        if !confirms_capsule_protocol(&response) {
             return Err(MasqueError::malformed(
                 "успешный ответ без заголовка `capsule-protocol: ?1`",
             ));
@@ -154,6 +136,8 @@ pub async fn perform(
 
 #[cfg(test)]
 mod tests {
+    use penguin_transport::h3::qpack::{Field, field};
+
     use super::*;
 
     fn authority() -> Authority {
@@ -164,23 +148,43 @@ mod tests {
         SocketAddress::domain("target.example.com", 53)
     }
 
+    /// Поля запроса, как их увидит прокси.
+    fn fields(request: &h3::Request) -> Vec<(String, String)> {
+        field::decode(&request.encode(), usize::MAX)
+            .expect("разбирается")
+            .into_iter()
+            .map(|f| {
+                let text = |b: Vec<u8>| String::from_utf8(b).expect("текст");
+                (text(f.name), text(f.value))
+            })
+            .collect()
+    }
+
+    fn get<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        fields
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+
     #[test]
     fn the_request_uses_extended_connect_with_the_connect_udp_protocol() {
-        let request = request(&authority(), &target(), None).expect("собирается");
-        assert_eq!(request.method(), http::Method::CONNECT);
-        assert_eq!(
-            request.extensions().get::<Protocol>().copied(),
-            Some(Protocol::CONNECT_UDP)
-        );
-        assert_eq!(request.headers()["capsule-protocol"], "?1");
+        let request = request(&authority(), &target(), None);
+        assert!(request.is_extended_connect());
+        let fields = fields(&request);
+        assert_eq!(get(&fields, ":method"), Some("CONNECT"));
+        assert_eq!(get(&fields, ":protocol"), Some("connect-udp"));
+        assert_eq!(get(&fields, ":scheme"), Some("https"));
+        assert_eq!(get(&fields, ":authority"), Some("proxy.example.com:443"));
+        assert_eq!(get(&fields, "capsule-protocol"), Some("?1"));
     }
 
     #[test]
     fn the_path_carries_the_default_uri_template() {
-        let request = request(&authority(), &target(), None).expect("собирается");
+        let fields = fields(&request(&authority(), &target(), None));
         assert_eq!(
-            request.uri().path(),
-            "/.well-known/masque/udp/target.example.com/53/"
+            get(&fields, ":path"),
+            Some("/.well-known/masque/udp/target.example.com/53/")
         );
     }
 
@@ -188,27 +192,27 @@ mod tests {
     fn an_ipv6_target_has_its_colons_escaped() {
         // Пример из RFC 9298, §2: `2001:db8::42` → `2001%3Adb8%3A%3A42`.
         let target = SocketAddress::new(Address::Ip("2001:db8::42".parse().expect("адрес")), 443);
-        let request = request(&authority(), &target, None).expect("собирается");
+        let fields = fields(&request(&authority(), &target, None));
         assert_eq!(
-            request.uri().path(),
-            "/.well-known/masque/udp/2001%3Adb8%3A%3A42/443/"
+            get(&fields, ":path"),
+            Some("/.well-known/masque/udp/2001%3Adb8%3A%3A42/443/")
         );
     }
 
     #[test]
     fn authorization_is_attached_when_configured() {
-        let request =
-            request(&authority(), &target(), Some("Bearer секрет-токен")).expect("собирается");
-        assert_eq!(
-            request.headers()[http::header::AUTHORIZATION],
-            "Bearer секрет-токен"
-        );
+        let fields = fields(&request(
+            &authority(),
+            &target(),
+            Some("Bearer секрет-токен"),
+        ));
+        assert_eq!(get(&fields, "authorization"), Some("Bearer секрет-токен"));
     }
 
     #[test]
     fn no_authorization_header_without_configuration() {
-        let request = request(&authority(), &target(), None).expect("собирается");
-        assert!(!request.headers().contains_key(http::header::AUTHORIZATION));
+        let fields = fields(&request(&authority(), &target(), None));
+        assert_eq!(get(&fields, "authorization"), None);
     }
 
     #[test]
@@ -225,13 +229,19 @@ mod tests {
 
     #[test]
     fn a_success_without_the_capsule_header_is_malformed_not_a_refusal() {
-        let mut headers = http::HeaderMap::new();
-        assert!(!confirms_capsule_protocol(&headers));
-
-        headers.insert("capsule-protocol", http::HeaderValue::from_static("?0"));
-        assert!(!confirms_capsule_protocol(&headers));
-
-        headers.insert("capsule-protocol", http::HeaderValue::from_static("?1"));
-        assert!(confirms_capsule_protocol(&headers));
+        let response = |capsule: Option<&str>| {
+            let mut fields = vec![Field {
+                name: b":status".to_vec(),
+                value: b"200".to_vec(),
+            }];
+            fields.extend(capsule.map(|value| Field {
+                name: b"capsule-protocol".to_vec(),
+                value: value.as_bytes().to_vec(),
+            }));
+            Response::from_fields(fields).expect("ответ верен")
+        };
+        assert!(!confirms_capsule_protocol(&response(None)));
+        assert!(!confirms_capsule_protocol(&response(Some("?0"))));
+        assert!(confirms_capsule_protocol(&response(Some("?1"))));
     }
 }

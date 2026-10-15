@@ -45,7 +45,7 @@ libc.workspace = true
 [features]
 # Набор протоколов задаётся движком; перечисление здесь нужно только затем,
 # чтобы `--no-default-features` собирал демона без единого протокола.
-default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "openconnect", "trusttunnel", "socks5", "http-proxy"]
+default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "trusttunnel", "socks5"]
 pingwin = ["penguin-engine/pingwin"]
 dpi = ["penguin-engine/dpi"]
 hysteria2 = ["penguin-engine/hysteria2"]
@@ -60,9 +60,7 @@ juicity = ["penguin-engine/juicity"]
 naive = ["penguin-engine/naive"]
 masque = ["penguin-engine/masque"]
 wireguard = ["penguin-engine/wireguard"]
-openconnect = ["penguin-engine/openconnect"]
 trusttunnel = ["penguin-engine/trusttunnel"]
-http-proxy = ["penguin-engine/http-proxy"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -3,7 +3,8 @@
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
 use penguin_core::uuid::Uuid;
-use penguin_transport::tls::{ALPN_H2, ALPN_HTTP11, TlsConfig};
+pub use penguin_transport::carrier::Carrier as Transport;
+use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{VlessError, VlessResult};
@@ -38,34 +39,6 @@ pub enum Security {
     /// перешлёт `ClientHello` настоящему сайту, за который себя выдаёт, и
     /// TLS 1.3 с этим сайтом тоже успешно откроется.
     Reality,
-}
-
-/// Чем поток переносится.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Transport {
-    /// Голый поток.
-    #[default]
-    Tcp,
-    /// WebSocket: соединение выглядит долгоживущей веб-страницей.
-    Ws,
-    /// `Upgrade` без кадров: то же рукопожатие, дешевле на каждом куске.
-    Httpupgrade,
-}
-
-impl Transport {
-    /// Нужны ли путь и заголовок `Host`.
-    pub fn is_http(self) -> bool {
-        matches!(self, Self::Ws | Self::Httpupgrade)
-    }
-
-    /// Что объявлять в ALPN, если человек не задал своё.
-    pub fn default_alpn(self) -> &'static [&'static [u8]] {
-        match self {
-            Self::Tcp => &[ALPN_H2, ALPN_HTTP11],
-            Self::Ws | Self::Httpupgrade => &[ALPN_HTTP11],
-        }
-    }
 }
 
 /// Настройки подключения к серверу VLESS.
@@ -103,15 +76,15 @@ pub struct VlessConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reality: Option<RealityConfig>,
 
-    /// Чем переносится поток.
+    /// Чем переносится поток: `tcp`, `grpc` или `xhttp`.
     #[serde(default)]
     pub transport: Transport,
 
-    /// Путь запроса для `ws` и `httpupgrade`.
+    /// Путь `xhttp` или `serviceName` у `grpc` — как в настройках Xray.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 
-    /// Заголовок `Host` для них же.
+    /// `:authority` для них же.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
 
@@ -141,12 +114,9 @@ impl VlessConfig {
         Ok((endpoint.host, endpoint.ports.first()))
     }
 
-    /// Путь запроса для `ws` и `httpupgrade`.
+    /// Путь или `serviceName` как задан; умолчание у каждого переноса своё.
     pub fn path(&self) -> &str {
-        match self.path.as_deref().map(str::trim) {
-            Some(path) if !path.is_empty() => path,
-            _ => "/",
-        }
+        self.path.as_deref().map_or("", str::trim)
     }
 
     /// `flow`, обрезанный по краям и приведённый к `None`, если пуст — так
@@ -158,7 +128,7 @@ impl VlessConfig {
             .filter(|flow| !flow.is_empty())
     }
 
-    /// Имя узла в заголовке `Host`.
+    /// `:authority` запросов `grpc` и `xhttp`: `host`, имя из TLS или адрес.
     pub fn host(&self) -> VlessResult<String> {
         if let Some(host) = self
             .host
@@ -262,13 +232,17 @@ impl VlessConfig {
                 }
             }
         }
-        if !self.transport.is_http() && (self.path.is_some() || self.host.is_some()) {
+        if !self.transport.uses_path() && (self.path.is_some() || self.host.is_some()) {
             return Err(VlessError::config(
-                "путь и `Host` заданы у переноса без HTTP: выберите `ws` или `httpupgrade`",
+                "путь и `host` заданы у голого потока: выберите `grpc` или `xhttp`",
             ));
         }
-        if self.transport.is_http() && !self.path().starts_with('/') {
-            return Err(VlessError::config("путь обязан начинаться с `/`"));
+        // QUIC несёт свой TLS 1.3: ни Reality, ни поток без шифрования
+        // поверх него не лягут.
+        if self.transport.is_quic() && self.security != Security::Tls {
+            return Err(VlessError::config(
+                "`transport = \"xhttp\"` идёт по HTTP/3 и требует `security = \"tls\"`",
+            ));
         }
         Ok(())
     }
@@ -360,8 +334,8 @@ mod tests {
         let config = VlessConfig {
             security: Security::Reality,
             reality: Some(reality()),
-            transport: Transport::Ws,
-            path: Some("/ws".to_owned()),
+            transport: Transport::Grpc,
+            path: Some("svc".to_owned()),
             flow: Some("xtls-rprx-vision".to_owned()),
             ..config()
         };
@@ -472,16 +446,42 @@ mod tests {
     #[test]
     fn http_settings_belong_to_http_transports() {
         let config = VlessConfig {
-            path: Some("/ws".to_owned()),
+            path: Some("svc".to_owned()),
             ..config()
         };
         assert!(config.validate().is_err());
 
-        let config = VlessConfig {
-            transport: Transport::Ws,
-            ..config
+        for transport in [Transport::Grpc, Transport::Xhttp] {
+            let config = VlessConfig {
+                transport,
+                ..config.clone()
+            };
+            config.validate().expect("под `grpc` и `xhttp` это законно");
+        }
+    }
+
+    #[test]
+    fn xhttp_needs_plain_tls() {
+        // HTTP/3 несёт свой TLS 1.3 в QUIC: Reality и `none` на него не лягут.
+        let over_quic = VlessConfig {
+            security: Security::Reality,
+            reality: Some(reality()),
+            transport: Transport::Xhttp,
+            ..config()
         };
-        config.validate().expect("под `ws` это законно");
+        assert!(over_quic.validate().is_err());
+
+        let over_h2 = VlessConfig {
+            transport: Transport::Grpc,
+            ..over_quic
+        };
+        over_h2.validate().expect("gRPC поверх Reality законен");
+    }
+
+    #[test]
+    fn websocket_is_gone() {
+        let params = json!({ "server": "a.io:443", "uuid": TEXT, "transport": "ws" });
+        assert!(serde_json::from_value::<VlessConfig>(params).is_err());
     }
 
     #[test]

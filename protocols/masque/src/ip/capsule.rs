@@ -33,10 +33,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use penguin_transport::varint;
 
 use crate::capsule::encode_capsule;
 use crate::error::MasqueError;
-use crate::varint;
 
 /// Тип капсулы `ADDRESS_ASSIGN` (RFC 9484, §4.7.1).
 pub(super) const CAPSULE_TYPE_ADDRESS_ASSIGN: u64 = 0x01;

@@ -2,9 +2,8 @@
 //!
 //! Один поток на весь профиль — в отличие от CONNECT-UDP, где на каждый
 //! адрес назначения открывается свой канал ([`crate::datagram`]).
-//! `CONNECT-IP` целиком реализован через капсулы над HTTP/1.1 `Upgrade`
-//! (RFC 9484, §4.2—4.3), а не через расширенный CONNECT у HTTP/2/3 — почему,
-//! см. [`crate::ip`].
+//! `CONNECT-IP` целиком реализован через капсулы по одному потоку — какой
+//! перенос его несёт, здесь не важно, см. [`crate::ip`].
 
 use std::sync::Arc;
 
@@ -15,6 +14,7 @@ use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::packet::{PacketInterface, PacketOutbound};
 use penguin_proto::stream::ProxyStream;
+use penguin_transport::varint;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
@@ -27,12 +27,11 @@ use super::{connect, negotiate};
 use crate::capsule::{CAPSULE_TYPE_DATAGRAM, CapsuleReader, encode_datagram_capsule};
 use crate::config::MasqueConfig;
 use crate::error::{MasqueError, MasqueResult};
-use crate::varint;
 
 /// MTU тоннеля `CONNECT-IP`.
 ///
-/// RFC 9484 не даёт способа сервера назвать MTU (в отличие от `X-CSTP-MTU` у
-/// OpenConnect) — документ вообще не определяет такое согласование. Значение
+/// RFC 9484 не даёт способа сервера назвать MTU — документ вообще не
+/// определяет такое согласование. Значение
 /// не придумано: RFC 9484, §7.2 требует, чтобы звено, переносящее IPv6, было
 /// не меньше 1280 байт. Это floor из самого документа, а не измеренный путь
 /// — профиль, которому нужно больше, лечится отдельной работой.
@@ -94,11 +93,8 @@ impl MasqueIpOutbound {
         config: MasqueConfig,
         dialer: Arc<dyn Dialer>,
     ) -> MasqueResult<Self> {
-        let (mut io, tail) = connect::open(dialer.as_ref(), &config).await?;
-
+        let mut io = connect::open(dialer.as_ref(), &config).await?;
         let mut reader = CapsuleReader::new();
-        reader.push(Bytes::from(tail));
-
         let interface = negotiate::assign_interface(&mut io, &mut reader).await?;
 
         Ok(Self::new(id, io, reader, interface))
@@ -224,7 +220,7 @@ fn dispatch_ready(reader: &mut CapsuleReader) -> MasqueResult<Option<Option<Byte
 
     if capsule_type == CAPSULE_TYPE_ADDRESS_ASSIGN {
         // Переназначение адреса на лету не поддержано: интерфейс — снимок на
-        // момент подключения, как и у WireGuard/OpenConnect.
+        // момент подключения, как и у WireGuard.
         tracing::debug!(
             "сервер прислал повторный ADDRESS_ASSIGN — уже поднятый интерфейс не меняется"
         );

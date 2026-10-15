@@ -7,8 +7,8 @@
 
 use crate::forms::protocol::spec::ProtocolSpec;
 use crate::forms::protocol::{
-    anytls, dpi, http, hysteria2, juicity, masque, masque_ip, naive, openconnect, pingwin,
-    shadowsocks, socks5, trojan, trusttunnel, tuic, vless, vmess, wireguard,
+    anytls, dpi, hysteria2, juicity, masque, masque_ip, naive, pingwin, shadowsocks, socks5,
+    trojan, trusttunnel, tuic, vless, vmess, wireguard,
 };
 
 /// Протоколы в порядке показа.
@@ -23,7 +23,6 @@ pub static ALL: &[&ProtocolSpec] = &[
     // сервер: он лечит блокировку по имени узла, и настроить в нём нечего.
     &dpi::SPEC,
     &wireguard::SPEC,
-    &openconnect::SPEC,
     &hysteria2::SPEC,
     &tuic::SPEC,
     &juicity::SPEC,
@@ -33,13 +32,12 @@ pub static ALL: &[&ProtocolSpec] = &[
     &trojan::SPEC,
     &shadowsocks::SPEC,
     &trusttunnel::SPEC,
+    &naive::HTTP3,
     &naive::HTTP2,
     &masque::SPEC,
     &masque_ip::SPEC,
     &socks5::TLS,
     &socks5::SPEC,
-    &http::HTTPS,
-    &http::HTTP,
 ];
 
 /// Чем заполняется форма, когда протокол не выбирали.

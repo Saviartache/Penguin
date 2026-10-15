@@ -32,7 +32,7 @@ const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 
 /// Кодирует байты обычным алфавитом с дополнением.
 ///
-/// Такой вид ждут заголовки HTTP — в частности `Sec-WebSocket-Key`.
+/// Такой вид ждут заголовки HTTP — в частности `proxy-authorization`.
 pub fn encode(bytes: &[u8]) -> String {
     encode_with(bytes, STANDARD, true)
 }

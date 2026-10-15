@@ -16,8 +16,8 @@ use crate::config::NaiveConfig;
 use crate::connect;
 use crate::error::{NaiveError, NaiveResult};
 use crate::padding::{self, PaddedStream};
-use crate::stream::h2::H2Stream;
 use crate::transport::h2::{self as transport, Http2Transport};
+use penguin_transport::h2::H2Stream;
 
 /// Направление через сервер naive поверх HTTP/2.
 pub struct NaiveHttp2Outbound {
@@ -77,7 +77,7 @@ impl NaiveHttp2Outbound {
             // Тип дополнения решается по ответу на этот конкретный CONNECT —
             // не по соединению целиком: так делает и эталон, см.
             // `crate::padding`.
-            let mode = padding::negotiate(response.headers());
+            let mode = padding::negotiate_h2(response.headers());
             let recv_stream = response.into_body();
             let io = PaddedStream::new(H2Stream::new(send_stream, recv_stream), mode);
             Ok((status, io))

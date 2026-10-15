@@ -15,10 +15,10 @@ workspace = true
 # Протокол зависит только от контракта, общих типов и общего транспорта.
 penguin-core.workspace = true
 penguin-proto.workspace = true
-penguin-transport.workspace = true
+# `quic` — HTTP/3 и соединение QUIC через `Dialer`.
+penguin-transport = { workspace = true, features = ["quic", "h2"] }
 
-# CONNECT-туннель поверх HTTP/2. HTTP/3 не реализован — см. документацию
-# крейта: спецификация прямо разрешает ограничиться одной ногой.
+# CONNECT-туннель поверх HTTP/2; HTTP/3 — из `penguin-transport`.
 h2.workspace = true
 http.workspace = true
 

@@ -10,6 +10,7 @@
 use bytes::Bytes;
 use penguin_core::address::SocketAddress;
 use penguin_proto::dialer::Dialer;
+use penguin_transport::h3::code::H3_NO_ERROR;
 use tokio::sync::mpsc;
 
 use crate::config::MasqueConfig;
@@ -40,14 +41,12 @@ impl Session {
         config.validate()?;
         let (host, port) = config.endpoint()?;
         let server_name = config.server_name()?;
-        let server = resolve_server(&host, port, dialer).await?;
 
-        let transport = transport::connect(config, dialer, server, &server_name).await?;
-
-        let authority_text = SocketAddress::new(host, port).to_wire();
+        let authority_text = SocketAddress::new(host.clone(), port).to_wire();
         let authority = http::uri::Authority::try_from(authority_text.as_str())
             .map_err(|e| MasqueError::config(format!("адрес прокси `{authority_text}`: {e}")))?;
 
+        let transport = transport::connect(config, dialer, &host, port, &server_name).await?;
         Ok(Self {
             transport,
             authority,
@@ -65,11 +64,10 @@ impl Session {
         target: &SocketAddress,
         incoming: mpsc::Sender<(Bytes, SocketAddress)>,
     ) -> MasqueResult<Flow> {
-        let request = request::request(&self.authority, target, self.authorization.as_deref())?;
-        let stream = request::perform(target, self.transport.send_request.clone(), request).await?;
-
-        let (send, recv) = stream.split();
-        Ok(Flow::new(target.clone(), send, recv, incoming))
+        let request = request::request(&self.authority, target, self.authorization.as_deref());
+        let h3 = &self.transport.h3;
+        let stream = request::perform(target, h3, &request).await?;
+        Ok(Flow::new(target.clone(), stream, h3.clone(), incoming))
     }
 
     /// Закрывает соединение с прокси.
@@ -79,30 +77,6 @@ impl Session {
     /// закрытие транспорта здесь обрывает и их половины потоков, но не ждёт
     /// этого явно.
     pub async fn close(&self) {
-        self.transport
-            .connection
-            .close(0u32.into(), "closed by client".as_bytes());
-        // Ждать эндпойнт обязательно: без этого прощальный пакет может не
-        // успеть уйти, и прокси продержит сессию до истечения тайм-аута.
-        self.transport.endpoint.wait_idle().await;
+        self.transport.link.close(H3_NO_ERROR, b"").await;
     }
-}
-
-/// Разрешает имя прокси мимо тоннеля.
-///
-/// QUIC поднимается не поверх `TcpStream`, а поверх голого UDP-сокета —
-/// адрес нужен раньше, до того как `Dialer` вообще появляется в игре
-/// (тот же приём, что у `naive`, см. `protocols/naive/src/outbound/h3.rs`).
-async fn resolve_server(
-    host: &penguin_core::address::Address,
-    port: u16,
-    dialer: &dyn Dialer,
-) -> MasqueResult<std::net::SocketAddr> {
-    let addresses = penguin_proto::connect::resolve(dialer, host, port)
-        .await
-        .map_err(|e| MasqueError::Disconnected(e.to_string()))?;
-    addresses
-        .into_iter()
-        .next()
-        .ok_or_else(|| MasqueError::transport(format!("`{host}` не разрешился ни в один адрес")))
 }

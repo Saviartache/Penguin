@@ -56,14 +56,12 @@ penguin-tuic = { workspace = true, optional = true }
 penguin-anytls = { workspace = true, optional = true }
 penguin-juicity = { workspace = true, optional = true }
 penguin-masque = { workspace = true, optional = true }
-penguin-openconnect = { workspace = true, optional = true }
 penguin-trusttunnel = { workspace = true, optional = true }
 penguin-wireguard = { workspace = true, optional = true }
 penguin-naive = { workspace = true, optional = true }
-penguin-http-proxy = { workspace = true, optional = true }
 
 [features]
-default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "openconnect", "trusttunnel", "socks5", "http-proxy"]
+default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "trusttunnel", "socks5"]
 pingwin = ["dep:penguin-pingwin"]
 # Не протокол в обычном смысле: сервера у него нет вовсе, есть только обход
 # DPI на прямом соединении. Фича своя, потому что и крейт свой.
@@ -80,8 +78,4 @@ juicity = ["dep:penguin-juicity"]
 naive = ["dep:penguin-naive"]
 masque = ["dep:penguin-masque"]
 wireguard = ["dep:penguin-wireguard"]
-openconnect = ["dep:penguin-openconnect"]
 trusttunnel = ["dep:penguin-trusttunnel"]
-# Одна фича на два протокола: `http` и `https` — это один крейт и одна строка
-# настройки; собрать половину крейта всё равно нельзя.
-http-proxy = ["dep:penguin-http-proxy"]

@@ -86,4 +86,9 @@ impl Outbound for VmessOutbound {
         }
         Ok(Box::new(VmessDatagram::new(Arc::clone(&self.connector))))
     }
+
+    async fn close(&self) -> Result<(), ProtocolError> {
+        self.connector.close().await;
+        Ok(())
+    }
 }

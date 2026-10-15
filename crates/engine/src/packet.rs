@@ -3,7 +3,7 @@
 //! Тот самый шов, ради которого `PacketOutbound` и объявлен так, как объявлен.
 //! У него `mtu`, `send`, `recv` — ровно то же, что у [`penguin_tun::TunDevice`].
 //! Значит направление подставляется исходящему стеку **как устройство**, и
-//! `netstack` про WireGuard, OpenConnect и `CONNECT-IP` по-прежнему не знает
+//! `netstack` про WireGuard и `CONNECT-IP` по-прежнему не знает
 //! ничего.
 //!
 //! ```text
@@ -56,7 +56,7 @@ impl PacketDevice {
     /// Настройки стека по интерфейсу, который выдал сервер.
     ///
     /// Адреса берутся у направления, а не из настроек профиля: у WireGuard они
-    /// в конфигурации, а у OpenConnect приходят при входе вместе с маршрутами.
+    /// в конфигурации, а у `CONNECT-IP` приходят капсулами после подключения.
     pub fn stack_config(&self) -> StackConfig {
         let interface = self.outbound.interface();
         StackConfig {
@@ -184,8 +184,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_interface_the_server_gave_becomes_the_stack_settings() {
-        // Адреса приходят от сервера, а не из настроек профиля: у OpenConnect
-        // они выдаются при входе вместе с маршрутами.
+        // Адреса приходят от сервера, а не из настроек профиля: у
+        // `CONNECT-IP` они выдаются капсулами после подключения.
         let device = PacketDevice::new(Fake::new(Vec::new()));
         let config = device.stack_config();
 

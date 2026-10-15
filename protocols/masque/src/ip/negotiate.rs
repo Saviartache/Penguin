@@ -1,5 +1,5 @@
 //! Согласование адреса интерфейса: капсулы `ADDRESS_REQUEST`/`ADDRESS_ASSIGN`
-//! (RFC 9484, §4.7.1—4.7.2) сразу после успешного апгрейда.
+//! (RFC 9484, §4.7.1—4.7.2) сразу после открытия потока капсул.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -134,7 +134,7 @@ fn interface_from(entries: Vec<capsule::AssignedAddress>) -> MasqueResult<Packet
         ipv6,
         mtu: INTERFACE_MTU,
         // RFC 9484 не даёт способа сервера назвать сервер имён внутри
-        // тоннеля (в отличие от `X-CSTP-DNS` у OpenConnect) — доменные имена
+        // тоннеля — доменные имена
         // через это направление честно не разрешаются, а не уходят мимо
         // тоннеля молча (см. `crate::ip`).
         dns: Vec::new(),
@@ -157,12 +157,12 @@ fn pick(
 #[cfg(test)]
 mod tests {
     use bytes::{BufMut, BytesMut};
+    use penguin_transport::varint;
     use tokio::io::{AsyncReadExt, duplex};
 
     use super::*;
     use crate::capsule::encode_capsule;
     use crate::ip::capsule::AssignedAddress;
-    use crate::varint;
 
     fn encode_address_assign(addresses: &[AssignedAddress]) -> Bytes {
         let mut value = BytesMut::new();

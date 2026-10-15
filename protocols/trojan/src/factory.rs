@@ -75,8 +75,8 @@ mod tests {
         let params = json!({
             "server": "example.com:443",
             "password": "secret",
-            "transport": "ws",
-            "path": "/ws",
+            "transport": "grpc",
+            "path": "svc",
             "host": "cdn.example.com",
             "udp": false,
             "tls": { "sni": "cdn.example.com" }
@@ -108,7 +108,7 @@ mod tests {
         let params = json!({
             "server": "example.com:443",
             "password": "secret",
-            "transport": "grpc"
+            "transport": "kcp"
         });
         assert!(TrojanFactory::new().validate(&params).is_err());
     }

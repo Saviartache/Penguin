@@ -1,7 +1,7 @@
 //! Единый поток `CONNECT _udp2` на весь UDP-трафик направления.
 //!
 //! Спецификация мультиплексирует **все** UDP-«соединения» в один поток
-//! HTTP/2 (`PROTOCOL.md`, §6.1), а не заводит по потоку на каждый сокет
+//! HTTP/2 или HTTP/3 (`PROTOCOL.md`, §6.1), а не заводит по потоку на каждый сокет
 //! приложения, как это устроено с TCP. Значит, здесь ровно одна пара
 //! читающей и пишущей задачи на направление, а не на вызов `bind_udp` —
 //! то же устройство, что у `protocols/hysteria2` (`src/session/udp.rs`),
@@ -37,14 +37,14 @@ use penguin_core::address::SocketAddress;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
+use penguin_proto::stream::ProxyStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::connect;
 use crate::error::{TrustTunnelError, TrustTunnelResult};
-use crate::stream::H2Stream;
-use crate::transport::H2SendRequest;
+use crate::transport::Link;
 use crate::udp::frame;
 
 /// Адрес источника у синтетических сессий этого крейта.
@@ -87,28 +87,12 @@ impl std::fmt::Debug for UdpManager {
 impl UdpManager {
     /// Открывает поток `CONNECT _udp2` и заводит читающую и пишущую задачи.
     pub async fn connect(
-        send_request: H2SendRequest,
+        link: &Link,
         credentials: (&str, &str),
         dialer: Arc<dyn Dialer>,
     ) -> TrustTunnelResult<Arc<Self>> {
-        let mut send_request = send_request
-            .ready()
-            .await
-            .map_err(|e| TrustTunnelError::disconnected(e.to_string()))?;
-        let request = connect::request_pseudo(connect::UDP_AUTHORITY, credentials)?;
-        let (response, send_stream) = send_request
-            .send_request(request, false)
-            .map_err(|e| TrustTunnelError::transport(format!("запрос CONNECT _udp2: {e}")))?;
-
-        let stream = connect::perform(connect::UDP_AUTHORITY, async {
-            let response = response
-                .await
-                .map_err(|e| TrustTunnelError::disconnected(e.to_string()))?;
-            let status = response.status().as_u16();
-            let recv_stream = response.into_body();
-            Ok((status, H2Stream::new(send_stream, recv_stream)))
-        })
-        .await?;
+        let open = link.open(connect::UDP_AUTHORITY, credentials, false);
+        let stream = connect::perform(connect::UDP_AUTHORITY, open).await?;
 
         let (read_half, write_half) = tokio::io::split(stream);
         let (outbox, inbox) = mpsc::channel(SESSION_QUEUE);
@@ -159,9 +143,12 @@ impl UdpManager {
 /// Пишет кадры в поток `_udp2` по мере поступления.
 ///
 /// Отдельная задача, а не блокировка вокруг `WriteHalf`: несколько сессий
-/// шлют кадры параллельно, а сам HTTP/2-поток — один, и писать в него нужно
+/// шлют кадры параллельно, а сам поток — один, и писать в него нужно
 /// строго по очереди.
-async fn write_loop(mut write_half: WriteHalf<H2Stream>, mut inbox: mpsc::Receiver<Bytes>) {
+async fn write_loop(
+    mut write_half: WriteHalf<Box<dyn ProxyStream>>,
+    mut inbox: mpsc::Receiver<Bytes>,
+) {
     while let Some(frame) = inbox.recv().await {
         if let Err(err) = write_half.write_all(&frame).await {
             tracing::debug!(%err, "запись в поток _udp2 не удалась");
@@ -172,7 +159,7 @@ async fn write_loop(mut write_half: WriteHalf<H2Stream>, mut inbox: mpsc::Receiv
 
 /// Читает поток `_udp2`, собирает кадры и раскладывает их по сессиям.
 async fn read_loop(
-    mut read_half: ReadHalf<H2Stream>,
+    mut read_half: ReadHalf<Box<dyn ProxyStream>>,
     sessions: Arc<DashMap<SocketAddr, mpsc::Sender<(Bytes, SocketAddress)>>>,
 ) {
     let mut buffer = BytesMut::with_capacity(READ_CHUNK);

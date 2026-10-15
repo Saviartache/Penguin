@@ -61,7 +61,7 @@ pub enum VmessError {
     )]
     Disconnected(String),
 
-    /// Ошибка общего транспорта: TLS, WebSocket, срок рукопожатия, адрес.
+    /// Ошибка общего транспорта: TLS, gRPC, XHTTP, срок рукопожатия, адрес.
     #[error(transparent)]
     Transport(#[from] penguin_transport::TransportError),
 

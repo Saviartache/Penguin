@@ -1,9 +1,12 @@
-//! Запрос `CONNECT-IP` через HTTP/1.1 `Upgrade` (RFC 9484, §3, §4.2, §4.3).
-//!
-//! Почему через HTTP/1.1, а не расширенный CONNECT у HTTP/2/3, — в
-//! документе [`crate::ip`].
+//! Запрос `CONNECT-IP`: расширенный `CONNECT` поверх HTTP/3 (RFC 9484,
+//! §4.4–4.5).
+
+use penguin_transport::h3;
 
 use crate::error::{MasqueError, MasqueResult};
+
+/// Значение `:protocol` расширенного `CONNECT` (§4.4).
+const PROTOCOL_CONNECT_IP: &str = "connect-ip";
 
 /// Путь по умолчанию: полный туннель, без ограничения на цель или протокол.
 ///
@@ -19,72 +22,31 @@ const PATH_FULL_TUNNEL: &str = "/.well-known/masque/ip/*/*/";
 /// (RFC 9297, §3.2).
 const CAPSULE_PROTOCOL_CONFIRMED: &str = "?1";
 
-/// Собирает текст запроса (RFC 9484, §4.2, Figure 2).
-pub(super) fn request_text(host_header: &str, authorization: Option<&str>) -> String {
-    let mut text = format!(
-        "GET {PATH_FULL_TUNNEL} HTTP/1.1\r\n\
-         Host: {host_header}\r\n\
-         Connection: Upgrade\r\n\
-         Upgrade: connect-ip\r\n\
-         Capsule-Protocol: {CAPSULE_PROTOCOL_CONFIRMED}\r\n"
-    );
-    if let Some(value) = authorization {
-        text.push_str(&format!("Authorization: {value}\r\n"));
+/// Собирает запрос (§4.4, Figure 4).
+pub(super) fn request(authority: &str, authorization: Option<&str>) -> h3::Request {
+    let request = h3::Request::extended_connect(PROTOCOL_CONNECT_IP, authority, PATH_FULL_TUNNEL)
+        .header("capsule-protocol", CAPSULE_PROTOCOL_CONFIRMED);
+    match authorization {
+        Some(value) => request.header("authorization", value),
+        None => request,
     }
-    text.push_str("\r\n");
-    text
 }
 
-/// Проверяет заголовок ответа (RFC 9484, §4.3, Figure 3).
-///
-/// `head` — всё до пустой строки, без неё самой.
-pub(super) fn check_response(head: &str) -> MasqueResult<()> {
-    let mut lines = head.split("\r\n");
-    let status_line = lines
-        .next()
-        .ok_or_else(|| MasqueError::malformed("пустой ответ"))?;
-    let status = parse_status(status_line)?;
-
-    if status != 101 {
+/// Проверяет ответ (§4.5): код `2xx` и подтверждённый протокол капсул.
+pub(super) fn check_response(response: &h3::Response) -> MasqueResult<()> {
+    let status = response.status();
+    if !(200..300).contains(&status) {
         return Err(outcome(status));
     }
-
-    let mut upgraded = false;
-    let mut confirmed = false;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        match name.trim().to_ascii_lowercase().as_str() {
-            "upgrade" => upgraded = value.eq_ignore_ascii_case("connect-ip"),
-            "capsule-protocol" => confirmed = value == CAPSULE_PROTOCOL_CONFIRMED,
-            _ => {}
-        }
-    }
-
-    if !upgraded {
+    if response.header("capsule-protocol") != Some(CAPSULE_PROTOCOL_CONFIRMED) {
         return Err(MasqueError::malformed(
-            "ответ 101 без заголовка `Upgrade: connect-ip`",
-        ));
-    }
-    if !confirmed {
-        return Err(MasqueError::malformed(
-            "ответ 101 без заголовка `capsule-protocol: ?1`",
+            "ответ 2xx без заголовка `capsule-protocol: ?1`",
         ));
     }
     Ok(())
 }
 
-fn parse_status(status_line: &str) -> MasqueResult<u16> {
-    status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .ok_or_else(|| MasqueError::malformed(format!("код ответа не разобрать: `{status_line}`")))
-}
-
-/// Ошибка, соответствующая коду ответа, когда апгрейд не удался.
+/// Ошибка, соответствующая коду ответа, когда прокси отказал.
 fn outcome(status: u16) -> MasqueError {
     match status {
         401 | 407 => MasqueError::AuthRejected { status },
@@ -94,84 +56,74 @@ fn outcome(status: u16) -> MasqueError {
 
 #[cfg(test)]
 mod tests {
+    use penguin_transport::h3::qpack::{Field, field};
+
     use super::*;
 
+    fn fields(request: &h3::Request) -> Vec<(String, String)> {
+        field::decode(&request.encode(), usize::MAX)
+            .expect("разбирается")
+            .into_iter()
+            .map(|f| {
+                let text = |b: Vec<u8>| String::from_utf8(b).expect("текст");
+                (text(f.name), text(f.value))
+            })
+            .collect()
+    }
+
+    fn response(status: &str, capsule: bool) -> h3::Response {
+        let mut fields = vec![Field {
+            name: b":status".to_vec(),
+            value: status.as_bytes().to_vec(),
+        }];
+        if capsule {
+            fields.push(Field {
+                name: b"capsule-protocol".to_vec(),
+                value: b"?1".to_vec(),
+            });
+        }
+        h3::Response::from_fields(fields).expect("ответ верен")
+    }
+
     #[test]
-    fn the_request_asks_for_the_full_tunnel_wildcard() {
-        let text = request_text("proxy.example.com", None);
-        assert!(
-            text.starts_with("GET /.well-known/masque/ip/*/*/ HTTP/1.1\r\n"),
-            "{text}"
-        );
-        assert!(text.contains("Host: proxy.example.com\r\n"), "{text}");
-        assert!(text.contains("Connection: Upgrade\r\n"), "{text}");
-        assert!(text.contains("Upgrade: connect-ip\r\n"), "{text}");
-        assert!(text.contains("Capsule-Protocol: ?1\r\n"), "{text}");
-        assert!(text.ends_with("\r\n\r\n"));
+    fn the_request_matches_figure_4() {
+        // RFC 9484, §4.4, Figure 4.
+        let fields = fields(&request("example.org", None));
+        let expected = [
+            (":method", "CONNECT"),
+            (":protocol", "connect-ip"),
+            (":scheme", "https"),
+            (":authority", "example.org"),
+            (":path", "/.well-known/masque/ip/*/*/"),
+            ("capsule-protocol", "?1"),
+        ];
+        for (name, value) in expected {
+            assert!(
+                fields.contains(&(name.to_owned(), value.to_owned())),
+                "{name}: {fields:?}"
+            );
+        }
+        assert!(!fields.iter().any(|(name, _)| name == "authorization"));
     }
 
     #[test]
     fn authorization_is_attached_when_configured() {
-        let text = request_text("proxy.example.com", Some("Bearer секрет-токен"));
-        assert!(
-            text.contains("Authorization: Bearer секрет-токен\r\n"),
-            "{text}"
-        );
+        let fields = fields(&request("example.org", Some("Bearer секрет-токен")));
+        assert!(fields.contains(&("authorization".to_owned(), "Bearer секрет-токен".to_owned())));
     }
 
     #[test]
-    fn no_authorization_header_without_configuration() {
-        let text = request_text("proxy.example.com", None);
-        assert!(!text.contains("Authorization"));
-    }
-
-    #[test]
-    fn a_good_response_passes() {
-        let head = "HTTP/1.1 101 Switching Protocols\r\n\
-                     Connection: Upgrade\r\n\
-                     Upgrade: connect-ip\r\n\
-                     Capsule-Protocol: ?1";
-        check_response(head).expect("ответ верный");
-    }
-
-    #[test]
-    fn header_names_and_the_upgrade_value_are_case_insensitive() {
-        let head = "HTTP/1.1 101 Switching Protocols\r\n\
-                     upgrade: Connect-IP\r\n\
-                     CAPSULE-PROTOCOL: ?1";
-        check_response(head).expect("ответ верный");
-    }
-
-    #[test]
-    fn an_ordinary_web_page_is_a_refusal_not_a_malformed_response() {
-        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/html";
-        let err = check_response(head).expect_err("не 101");
-        assert!(
-            matches!(err, MasqueError::RefusedIp { status: 200 }),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn a_401_is_told_apart_from_a_refusal() {
-        let head = "HTTP/1.1 401 Unauthorized\r\n";
-        let err = check_response(head).expect_err("не подтверждено");
-        assert!(
-            matches!(err, MasqueError::AuthRejected { status: 401 }),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn a_101_without_the_capsule_header_is_malformed() {
-        let head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: connect-ip";
-        let err = check_response(head).expect_err("нет capsule-protocol");
-        assert!(err.to_string().contains("capsule-protocol"), "{err}");
-    }
-
-    #[test]
-    fn a_101_without_upgrade_is_malformed() {
-        let head = "HTTP/1.1 101 Switching Protocols\r\nCapsule-Protocol: ?1";
-        assert!(check_response(head).is_err());
+    fn responses_are_checked_like_figure_5() {
+        check_response(&response("200", true)).expect("Figure 5");
+        assert!(check_response(&response("200", false)).is_err());
+        assert!(matches!(
+            check_response(&response("407", true)),
+            Err(MasqueError::AuthRejected { status: 407 })
+        ));
+        // 3xx — тоже отказ (§4.5).
+        assert!(matches!(
+            check_response(&response("302", true)),
+            Err(MasqueError::RefusedIp { status: 302 })
+        ));
     }
 }

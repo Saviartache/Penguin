@@ -2,51 +2,11 @@
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
-use penguin_transport::tls::{ALPN_H2, ALPN_HTTP11, TlsConfig};
+pub use penguin_transport::carrier::Carrier as Transport;
+use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{TrojanError, TrojanResult};
-
-/// Чем поток переносится внутри TLS.
-///
-/// Смысл у всех трёх один: доставить байты. Различаются они тем, на что похожи
-/// по дороге, и ценой этого сходства.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Transport {
-    /// Голый поток внутри TLS. Дешевле всех, и это настоящий Trojan.
-    #[default]
-    Tcp,
-    /// WebSocket: соединение выглядит долгоживущей веб-страницей.
-    ///
-    /// Нужен там, где перед сервером стоит чужой обратный прокси или сеть
-    /// доставки: они разбирают HTTP и голый поток до сервера не доносят.
-    Ws,
-    /// `Upgrade` без кадров: то же рукопожатие, дешевле на каждом куске.
-    ///
-    /// Годится, когда путь до сервера свой и разбирать кадры по дороге некому.
-    Httpupgrade,
-}
-
-impl Transport {
-    /// Нужны ли путь и заголовок `Host`.
-    pub fn is_http(self) -> bool {
-        matches!(self, Self::Ws | Self::Httpupgrade)
-    }
-
-    /// Что объявлять в ALPN, если человек не задал своё.
-    ///
-    /// У голого потока — то же, что у браузера на обычном сайте: сервер Trojan
-    /// обязан выглядеть этим сайтом, и любое другое объявление выдало бы его
-    /// первым же пакетом рукопожатия. У остальных — только `http/1.1`:
-    /// рукопожатие там HTTP/1.1, и обещание HTTP/2 сломает обратный прокси.
-    pub fn default_alpn(self) -> &'static [&'static [u8]] {
-        match self {
-            Self::Tcp => &[ALPN_H2, ALPN_HTTP11],
-            Self::Ws | Self::Httpupgrade => &[ALPN_HTTP11],
-        }
-    }
-}
 
 /// Настройки подключения к серверу Trojan.
 ///
@@ -66,15 +26,15 @@ pub struct TrojanConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// Чем переносится поток внутри TLS.
+    /// Чем переносится поток: `tcp`, `grpc` или `xhttp`.
     #[serde(default)]
     pub transport: Transport,
 
-    /// Путь запроса для `ws` и `httpupgrade`.
+    /// Путь `xhttp` или `serviceName` у `grpc` — как в настройках Xray.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 
-    /// Заголовок `Host` для них же.
+    /// `:authority` для них же.
     ///
     /// Отдельно от адреса: у сервера за общим входом это имя решает, кому
     /// достанется соединение, и совпадать с адресом оно не обязано. Не задан —
@@ -110,18 +70,15 @@ impl TrojanConfig {
         Ok((endpoint.host, endpoint.ports.first()))
     }
 
-    /// Путь запроса для `ws` и `httpupgrade`.
+    /// Путь или `serviceName` как задан; умолчание у каждого переноса своё.
     pub fn path(&self) -> &str {
-        match self.path.as_deref().map(str::trim) {
-            Some(path) if !path.is_empty() => path,
-            _ => "/",
-        }
+        self.path.as_deref().map_or("", str::trim)
     }
 
-    /// Имя узла в заголовке `Host`.
+    /// `:authority` запросов `grpc` и `xhttp`.
     ///
-    /// Порядок: явный `host`, потом имя из TLS, потом адрес сервера. Пустым он
-    /// не бывает: запрос без `Host` — это 400 у любого обратного прокси.
+    /// Порядок: явный `host`, потом имя из TLS, потом адрес сервера — как у
+    /// Xray. Пустым он не бывает.
     pub fn host(&self) -> TrojanResult<String> {
         if let Some(host) = self
             .host
@@ -156,13 +113,10 @@ impl TrojanConfig {
                 "пароль не задан: сервер отличает своих только по нему",
             ));
         }
-        if !self.transport.is_http() && (self.path.is_some() || self.host.is_some()) {
+        if !self.transport.uses_path() && (self.path.is_some() || self.host.is_some()) {
             return Err(TrojanError::config(
-                "путь и `Host` заданы у переноса без HTTP: выберите `ws` или `httpupgrade`",
+                "путь и `host` заданы у голого потока: выберите `grpc` или `xhttp`",
             ));
-        }
-        if self.transport.is_http() && !self.path().starts_with('/') {
-            return Err(TrojanError::config("путь обязан начинаться с `/`"));
         }
         Ok(())
     }
@@ -232,46 +186,36 @@ mod tests {
     }
 
     #[test]
-    fn the_default_alpn_looks_like_a_browser() {
-        // Сервер обязан выглядеть тем сайтом, за который себя выдаёт: пустой
-        // или свой ALPN выдал бы его первым же пакетом.
-        assert_eq!(Transport::Tcp.default_alpn(), &[ALPN_H2, ALPN_HTTP11]);
-        // А под WebSocket рукопожатие идёт по HTTP/1.1, и обещание HTTP/2
-        // сломает обратный прокси перед сервером.
-        assert_eq!(Transport::Ws.default_alpn(), &[ALPN_HTTP11]);
-    }
-
-    #[test]
     fn http_settings_belong_to_http_transports() {
         // Путь, который никуда не уйдёт, — это настройка, которая молчит.
         let config = TrojanConfig {
-            path: Some("/ws".to_owned()),
+            path: Some("svc".to_owned()),
             ..config()
         };
         assert!(config.validate().is_err());
 
-        let config = TrojanConfig {
-            transport: Transport::Ws,
-            ..config
-        };
-        config.validate().expect("под `ws` это законно");
+        for transport in [Transport::Grpc, Transport::Xhttp] {
+            let config = TrojanConfig {
+                transport,
+                ..config.clone()
+            };
+            config.validate().expect("под `grpc` и `xhttp` это законно");
+        }
     }
 
     #[test]
-    fn a_path_without_a_slash_is_refused() {
-        let config = TrojanConfig {
-            transport: Transport::Ws,
-            path: Some("ws".to_owned()),
-            ..config()
-        };
-        assert!(config.validate().is_err());
+    fn websocket_is_gone() {
+        // HTTP/1.1 не ходит никто: старый профиль с `ws` — ошибка, а не
+        // молчаливый откат на голый поток.
+        let params = json!({ "server": "a.io:443", "password": "x", "transport": "ws" });
+        assert!(serde_json::from_value::<TrojanConfig>(params).is_err());
     }
 
     #[test]
     fn the_host_falls_back_the_way_a_browser_would() {
         // Явный `host` сильнее имени из TLS, а оно — сильнее адреса.
         let mut config = TrojanConfig {
-            transport: Transport::Ws,
+            transport: Transport::Grpc,
             ..config()
         };
         assert_eq!(config.host().expect("имя"), "example.com");
@@ -284,13 +228,22 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_path_becomes_a_slash() {
+    fn the_path_goes_as_written() {
+        // Умолчание у каждого переноса своё: `//Tun` у gRPC, `/` у XHTTP.
         let config = TrojanConfig {
-            transport: Transport::Ws,
-            path: Some("   ".to_owned()),
+            transport: Transport::Grpc,
+            path: Some(" svc ".to_owned()),
             ..config()
         };
-        assert_eq!(config.path(), "/");
+        assert_eq!(config.path(), "svc");
+        assert_eq!(
+            TrojanConfig {
+                path: None,
+                ..config
+            }
+            .path(),
+            ""
+        );
     }
 
     #[test]

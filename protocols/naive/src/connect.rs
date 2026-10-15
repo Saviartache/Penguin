@@ -1,28 +1,40 @@
 //! Запрос `CONNECT` и разбор ответа сервера — общее для HTTP/2 и HTTP/3.
 //!
-//! И `h2`, и `h3` принимают один и тот же тип запроса — `http::Request<()>`,
-//! — и отвечают одним и тем же `http::Response`. Собирать его дважды, по
-//! разу на транспорт, означало бы держать в двух местах один и тот же список
-//! заголовков.
+//! Список заголовков один; собирается он в запрос `h2` или
+//! HTTP/3 — разница только в типе.
 //!
 //! # Чего в запросе нет
 //!
-//! Ни `:scheme`, ни `:path` — `CONNECT` их не несёт вовсе (RFC 9113, §8.5):
-//! `:authority` называет адрес назначения, и этого достаточно. Библиотеки
-//! `h2` и `h3` берут это из `http::Uri`, разобранного в форме `host:port` —
-//! без схемы и пути, то есть ровно как его строит [`request`].
+//! Ни `:scheme`, ни `:path` — `CONNECT` их не несёт вовсе (RFC 9113, §8.5;
+//! RFC 9114, §4.4): `:authority` называет адрес назначения, и этого
+//! достаточно. `h2` берёт его из `http::Uri` в форме `host:port`, HTTP/3 —
+//! из [`penguin_transport::h3::Request::connect`].
 
 use penguin_core::address::SocketAddress;
 use penguin_transport::deadline;
+use penguin_transport::h3;
 
 use crate::basic;
 use crate::error::{NaiveError, NaiveResult};
 use crate::padding;
 
-/// Собирает запрос `CONNECT`.
+/// Заголовки `CONNECT`: пароль, если он есть, и дополнение.
 ///
 /// Заголовки дополнения уходят всегда, независимо от того, поддержит их
 /// сервер или нет, — так делает и эталон (см. [`crate::padding`]).
+fn headers(credentials: Option<(&str, &str)>) -> Vec<(&'static str, String)> {
+    let mut headers = Vec::with_capacity(3);
+    if let Some((username, password)) = credentials {
+        headers.push((
+            http::header::PROXY_AUTHORIZATION.as_str(),
+            basic::header_value(username, password),
+        ));
+    }
+    headers.extend(padding::request_headers());
+    headers
+}
+
+/// Собирает запрос `CONNECT` для HTTP/2.
 pub fn request(
     target: &SocketAddress,
     credentials: Option<(&str, &str)>,
@@ -30,27 +42,26 @@ pub fn request(
     let mut builder = http::Request::builder()
         .method(http::Method::CONNECT)
         .uri(target.to_wire());
-
-    if let Some((username, password)) = credentials {
-        builder = builder.header(
-            http::header::PROXY_AUTHORIZATION,
-            basic::header_value(username, password),
-        );
-    }
-    for (name, value) in padding::request_headers() {
+    for (name, value) in headers(credentials) {
         builder = builder.header(name, value);
     }
-
     builder
         .body(())
         .map_err(|e| NaiveError::malformed(format!("запрос CONNECT не собирается: {e}")))
 }
 
+/// Собирает запрос `CONNECT` для HTTP/3.
+pub fn request_h3(target: &SocketAddress, credentials: Option<(&str, &str)>) -> h3::Request {
+    headers(credentials).into_iter().fold(
+        h3::Request::connect(target.to_wire()),
+        |request, (name, value)| request.header(name, value),
+    )
+}
+
 /// Ошибка, соответствующая коду ответа.
 ///
-/// `None` — сервер согласился. У HTTP/2 и HTTP/3 нет строки причины, как у
-/// HTTP/1.1, — только код, поэтому в тексте ошибки меньше подробностей, чем
-/// у `http-proxy`.
+/// `None` — сервер согласился. У HTTP/2 и HTTP/3 нет строки причины — только
+/// код.
 pub fn outcome(status: u16, target: &str) -> Option<NaiveError> {
     match status {
         200..=299 => None,
@@ -106,6 +117,22 @@ mod tests {
                 .as_deref(),
             Some("example.com:443")
         );
+    }
+
+    #[test]
+    fn the_http3_request_has_no_scheme_or_path_either() {
+        // RFC 9114, §4.4 — ровно то, чего не умел `h3` 0.0.8.
+        use penguin_transport::h3::qpack::field;
+
+        let block = request_h3(&target(), Some(("Aladdin", "open sesame"))).encode();
+        let fields = field::decode(&block, usize::MAX).expect("разбирается");
+        let names: Vec<&[u8]> = fields.iter().map(|f| f.name.as_slice()).collect();
+        assert_eq!(names[..2], [&b":method"[..], b":authority"]);
+        assert!(!names.contains(&&b":scheme"[..]));
+        assert!(!names.contains(&&b":path"[..]));
+        assert_eq!(fields[1].value, b"example.com:443");
+        assert!(names.contains(&&b"proxy-authorization"[..]));
+        assert!(names.contains(&padding::HEADER_PADDING.as_bytes()));
     }
 
     #[test]

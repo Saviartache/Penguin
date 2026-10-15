@@ -1,4 +1,4 @@
-//! NaiveProxy — описание формы.
+//! NaiveProxy — описание формы. Две записи: по HTTP/2 и по HTTP/3.
 
 use crate::forms::check;
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
@@ -32,6 +32,20 @@ pub static HTTP2: ProtocolSpec = ProtocolSpec {
     note: None,
 };
 
+/// `CONNECT` поверх HTTP/3.
+///
+/// Тот же протокол и тот же крейт, другой перенос: под HTTP/3 лежит QUIC, и
+/// сеть с потерями он переживает лучше. Отдельной записью, а не полем выбора,
+/// потому что сервер слушает их на разных портах и настраивает по-разному.
+pub static HTTP3: ProtocolSpec = ProtocolSpec {
+    id: "http3",
+    label: "NaiveProxy (HTTP/3)",
+    fields: FIELDS,
+    schemes: &[],
+    from_link: None,
+    note: None,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,8 +71,16 @@ mod tests {
     }
 
     #[test]
+    fn both_transports_ask_for_the_same_things() {
+        // Протокол один, различие только в переносе: разойдись формы полями —
+        // профиль, переписанный с одной на другую, потерял бы настройки.
+        assert_eq!(HTTP2.fields.len(), HTTP3.fields.len());
+        assert_ne!(HTTP2.id, HTTP3.id);
+    }
+
+    #[test]
     fn there_is_no_udp_switch_because_there_is_no_udp() {
-        // У `CONNECT` датаграмм нет.
+        // У `CONNECT` датаграмм нет ни поверх HTTP/2, ни поверх HTTP/3.
         assert!(FIELDS.iter().all(|field| field.key != "udp"));
     }
 }

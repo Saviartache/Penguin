@@ -199,15 +199,13 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "tuic" => &["tuic"],
         "anytls" => &["anytls"],
         "juicity" => &["juicity"],
-        "naive" => &["http2"],
+        // Одна фича, два имени: по HTTP/2 и по HTTP/3.
+        "naive" => &["http2", "http3"],
         "masque" => &["masque", "masque-ip"],
         "wireguard" => &["wireguard"],
-        "openconnect" => &["openconnect"],
         "trusttunnel" => &["trusttunnel"],
         // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
-        // Одна фича, два имени в настройках.
-        "http-proxy" => &["http", "https"],
         _ => return None,
     })
 }
@@ -259,9 +257,6 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
     #[cfg(feature = "wireguard")]
     registry.register_packet(Arc::new(penguin_wireguard::WireguardFactory::new()));
 
-    #[cfg(feature = "openconnect")]
-    registry.register_packet(Arc::new(penguin_openconnect::OpenConnectFactory::new()));
-
     #[cfg(feature = "trusttunnel")]
     registry.register(Arc::new(penguin_trusttunnel::TrustTunnelFactory::new()));
 
@@ -269,15 +264,16 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
     registry.register(Arc::new(penguin_masque::MasqueFactory::new()));
     // Второй режим одного семейства (RFC 9484, `CONNECT-IP`) — труба для
     // пакетов, а не для датаграмм с адресом, и потому второй реестр, как у
-    // WireGuard и OpenConnect.
+    // WireGuard.
     #[cfg(feature = "masque")]
     registry.register_packet(Arc::new(penguin_masque::MasqueIpFactory::new()));
 
-    // Одна запись, а не две: ноги HTTP/3 у крейта нет и пока быть не может
-    // (`h3` 0.0.8 шлёт в `CONNECT` запрещённые RFC 9114 §4.4 `:scheme` и
-    // `:path` — разбор в документе крейта `penguin_naive`).
+    // Две записи из одного крейта: по HTTP/2 и по HTTP/3.
     #[cfg(feature = "naive")]
-    registry.register(Arc::new(penguin_naive::NaiveFactory::http2()));
+    {
+        registry.register(Arc::new(penguin_naive::NaiveFactory::http2()));
+        registry.register(Arc::new(penguin_naive::NaiveFactory::http3()));
+    }
 
     // Две записи из одного крейта: `socks5` и `socks5-tls`. Под TLS не видны
     // ни имя сервера назначения, ни пароль — а без TLS видно и то и другое.
@@ -285,16 +281,6 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
     {
         registry.register(Arc::new(penguin_socks5::Socks5Factory::new()));
         registry.register(Arc::new(penguin_socks5::Socks5Factory::tls()));
-    }
-
-    // Две записи из одного крейта: `http` и `https` отличаются одной строкой
-    // настройки, но именами в конфигурации — двумя. Разница между ними —
-    // это разница между «пароль уходит открытым текстом» и «не уходит», и
-    // прятать её в поле внутри профиля значит прятать не то.
-    #[cfg(feature = "http-proxy")]
-    {
-        registry.register(Arc::new(penguin_http_proxy::HttpProxyFactory::http()));
-        registry.register(Arc::new(penguin_http_proxy::HttpProxyFactory::https()));
     }
 
     let _ = registry;

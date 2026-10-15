@@ -3,11 +3,11 @@
 use crate::forms::check;
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 
+/// Чем несётся `CONNECT`. Первое — умолчание нового профиля: HTTP/2
+/// проходит там, где UDP режут.
+const TRANSPORTS: &[&str] = &["h2", "h3"];
+
 /// Поля формы в том порядке, в каком они показываются.
-///
-/// Выбора переноса нет: сделана только нога по HTTP/2. Спецификация прямо
-/// говорит, что клиент **может** поддержать оба и что HTTP/2 достаточно, —
-/// так что поле выбора обещало бы то, чего пока нет.
 ///
 /// Имя и пароль обязательны: они уходят заголовком `proxy-authorization` в
 /// каждом запросе, и пустые означают отказ `407` на первом же соединении.
@@ -18,6 +18,7 @@ static FIELDS: &[FieldSpec] = &[
         .check(check::server_address),
     FieldSpec::text("username", &["username"], |s| s.username).required(|s| s.need_username),
     FieldSpec::secret("password", &["password"], |s| s.password).required(|s| s.need_password),
+    FieldSpec::choice("transport", &["transport"], |s| s.transport, TRANSPORTS),
     FieldSpec::text("sni", &["tls", "sni"], |s| s.sni).example(|s| s.sni_example),
     FieldSpec::flag("insecure", &["tls", "insecure"], |s| s.insecure),
 ];
@@ -62,8 +63,10 @@ mod tests {
     }
 
     #[test]
-    fn there_is_no_transport_choice_while_only_http2_is_done() {
-        // Поле выбора обещало бы HTTP/3, которого пока нет.
-        assert!(FIELDS.iter().all(|field| field.key != "transport"));
+    fn the_transports_match_the_ones_the_protocol_knows() {
+        // Значения уходят в настройки дословно: опечатка здесь — профиль,
+        // который не читается.
+        assert_eq!(TRANSPORTS, ["h2", "h3"]);
+        assert!(FIELDS.iter().any(|field| field.key == "transport"));
     }
 }

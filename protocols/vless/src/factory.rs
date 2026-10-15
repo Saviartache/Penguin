@@ -71,8 +71,8 @@ mod tests {
         let params = json!({
             "server": "example.com:443",
             "uuid": TEXT,
-            "transport": "ws",
-            "path": "/ws",
+            "transport": "grpc",
+            "path": "svc",
             "host": "cdn.example.com",
             "udp": false,
             "tls": { "sni": "cdn.example.com" }

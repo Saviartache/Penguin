@@ -4,14 +4,16 @@
 //! # Зачем отдельный крейт
 //!
 //! Больше половины протоколов дерева переносятся поверх одного и того
-//! же набора: TLS, WebSocket, HTTP/2, `Upgrade`. Написать разбор кадров
-//! WebSocket восемь раз — значит получить восемь разных ответов на вопрос,
-//! что делать с кадром продолжения.
+//! же набора: TLS, HTTP/2, HTTP/3, QUIC. Написать HTTP/3 или кадры gRPC
+//! трижды — значит получить три разных ответа на один и тот же вопрос.
 //!
 //! Положить это в `crates/` нельзя: протоколу запрещено зависеть от крейтов
 //! клиента (`AGENTS.md` §1.1). Положить в `penguin-proto` — значит утащить
-//! `rustls` и разбор WebSocket в зависимости `gui` и `daemon`, которым нужны
-//! оттуда два трейта.
+//! `rustls` и `h2` в зависимости `gui` и `daemon`, которым нужны оттуда два
+//! трейта.
+//!
+//! HTTP/1.1 здесь нет нарочно: перенос, похожий на веб, — это HTTP/3, а где
+//! HTTP/3 не бывает, HTTP/2.
 //!
 //! Поэтому крейт живёт **на уровне протоколов**: он зависит ровно от того же,
 //! от чего они, — от `core` и `proto`, — и о клиенте знает столько же, то
@@ -28,21 +30,38 @@
 //!  frag      сборка датаграмм, приехавших частями
 //!  error     общие ошибки транспорта и перевод их в язык `proto`
 //!  tls       SNI, ALPN и четыре способа решить, свой ли сервер на том конце
-//!  ws        WebSocket: поток байт, выглядящий обычной веб-страницей
-//!  httpupgrade  то же рукопожатие без кадров — дешевле там, где путь свой
-//!  obfs      простая обфускация под HTTP и под TLS: вид, а не шифр
+//!  varint    переменной длины целое QUIC
+//!  browser   как представляется Chrome в заголовках
+//!  carrier   перенос Trojan/VLESS/VMess: tcp, grpc, xhttp
+//!  h3        HTTP/3 для клиента; соединение — под фичей `quic`
+//!  quic      соединение QUIC через `Dialer` (фича `quic`)
+//!  xhttp     перенос XHTTP Xray по HTTP/3 (фича `quic`)
+//!  h2        поток запроса HTTP/2 как поток байт (фича `h2`)
+//!  grpc      перенос gRPC Xray по HTTP/2 (фича `h2`)
 //! ```
+//!
+//! `quinn` и `h2` тянутся только своими фичами: протоколу без них они не
+//! нужны.
 
 pub mod addr;
 pub mod aead;
+pub mod browser;
+pub mod carrier;
 pub mod deadline;
 pub mod desync;
 pub mod error;
 pub mod frag;
-pub mod httpupgrade;
+#[cfg(feature = "h2")]
+pub mod grpc;
+#[cfg(feature = "h2")]
+pub mod h2;
+pub mod h3;
 pub mod kdf;
-pub mod obfs;
+#[cfg(feature = "quic")]
+pub mod quic;
 pub mod tls;
-pub mod ws;
+pub mod varint;
+#[cfg(feature = "quic")]
+pub mod xhttp;
 
 pub use error::{TransportError, TransportResult};

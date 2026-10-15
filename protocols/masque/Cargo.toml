@@ -15,17 +15,10 @@ workspace = true
 # Протокол зависит только от контракта, общих типов и общего транспорта.
 penguin-core.workspace = true
 penguin-proto.workspace = true
-penguin-transport.workspace = true
+# `quic` — HTTP/3 с датаграммами и соединение QUIC через `Dialer`.
+penguin-transport = { workspace = true, features = ["quic"] }
 
-# QUIC: сокет берётся у `Dialer`, рукопожатие TLS — у `penguin-transport`.
-quinn = { workspace = true, features = ["rustls", "runtime-tokio"] }
-rustls = { workspace = true, features = ["ring", "std"] }
-# HTTP/3: рукопожатие `CONNECT-UDP` — это расширенный CONNECT (RFC 9220) и
-# ответ `capsule-protocol: ?1` (RFC 9297) поверх потока `h3`. Уже в дереве
-# ради naive; здесь у него первый живой потребитель среди тех, кому нужны
-# именно датаграммы, а не просто туннель байт.
-h3.workspace = true
-h3-quinn.workspace = true
+# Проверка адреса прокси как `:authority`.
 http.workspace = true
 
 tokio = { workspace = true, features = ["rt", "sync", "time"] }

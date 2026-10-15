@@ -1,6 +1,6 @@
-//! `Outbound` для TrustTunnel: `CONNECT` поверх HTTP/2.
+//! `Outbound` для TrustTunnel: `CONNECT` поверх HTTP/2 или HTTP/3.
 //!
-//! Собирает воедино три части: [`crate::transport`] (TCP+TLS+HTTP/2),
+//! Собирает воедино три части: [`crate::transport`] (HTTP/2 или HTTP/3),
 //! [`crate::connect`] (сам запрос `CONNECT` и разбор кода ответа) и
 //! [`crate::udp::session`] (единый поток `_udp2`). Здесь же живёт проверка
 //! живости (`PROTOCOL.md`, §8) и правило из §9.2: код `407` предписывает
@@ -25,8 +25,7 @@ use tokio::task::JoinHandle;
 use crate::config::TrustTunnelConfig;
 use crate::connect;
 use crate::error::{TrustTunnelError, TrustTunnelResult};
-use crate::stream::H2Stream;
-use crate::transport::{self, H2SendRequest, Http2Transport};
+use crate::transport::Link;
 use crate::udp::session::UdpManager;
 
 /// Срок ожидания ответа на `CONNECT _check` (`PROTOCOL.md`, §8.4, §13.3).
@@ -65,7 +64,8 @@ pub struct TrustTunnelOutbound {
     id: OutboundId,
     config: TrustTunnelConfig,
     dialer: Arc<dyn Dialer>,
-    transport: Http2Transport,
+    /// Общее с задачей проверки живости.
+    link: Arc<Link>,
     udp: AsyncMutex<Option<Arc<UdpManager>>>,
     /// `None` — направление ещё годится к использованию.
     poisoned: Arc<StdMutex<Option<Poison>>>,
@@ -85,19 +85,18 @@ impl TrustTunnelOutbound {
     /// Устанавливает соединение с сервером и держит его открытым.
     ///
     /// Соединение одно на весь профиль: каждый `connect_tcp` открывает свой
-    /// поток `CONNECT` внутри него, а не поднимает TLS заново.
+    /// поток `CONNECT` внутри него, а не поднимает TLS или QUIC заново.
     pub async fn connect(
         id: OutboundId,
         config: TrustTunnelConfig,
         dialer: Arc<dyn Dialer>,
     ) -> TrustTunnelResult<Self> {
         config.validate()?;
-        let (host, port) = config.endpoint()?;
-        let transport = transport::connect(&config, dialer.as_ref(), &host, port).await?;
+        let link = Arc::new(Link::connect(&config, dialer.as_ref()).await?);
 
         let poisoned = Arc::new(StdMutex::new(None));
         let health_task = spawn_health_check(
-            transport.send_request.clone(),
+            Arc::clone(&link),
             (config.username.clone(), config.password.clone()),
             Arc::clone(&poisoned),
         );
@@ -106,7 +105,7 @@ impl TrustTunnelOutbound {
             id,
             config,
             dialer,
-            transport,
+            link,
             udp: AsyncMutex::new(None),
             poisoned,
             health_task,
@@ -138,32 +137,14 @@ impl TrustTunnelOutbound {
     async fn open_tcp(&self, target: &SocketAddress) -> TrustTunnelResult<Box<dyn ProxyStream>> {
         self.check_alive()?;
 
-        let mut send_request = self
-            .transport
-            .send_request
-            .clone()
-            .ready()
-            .await
-            .map_err(|e| TrustTunnelError::disconnected(e.to_string()))?;
-
-        let request = connect::request(target, self.config.credentials())?;
-        let (response, send_stream) = send_request
-            .send_request(request, false)
-            .map_err(|e| TrustTunnelError::transport(format!("запрос CONNECT: {e}")))?;
-
         let wire_target = target.to_wire();
-        let result = connect::perform(&wire_target, async {
-            let response = response
-                .await
-                .map_err(|e| TrustTunnelError::disconnected(e.to_string()))?;
-            let status = response.status().as_u16();
-            let recv_stream = response.into_body();
-            Ok((status, H2Stream::new(send_stream, recv_stream)))
-        })
-        .await;
+        let open = self
+            .link
+            .open(&wire_target, self.config.credentials(), false);
+        let result = connect::perform(&wire_target, open).await;
 
         match result {
-            Ok(stream) => Ok(Box::new(stream)),
+            Ok(stream) => Ok(stream),
             // Один отклонённый адрес не значит, что вся сессия сгнила —
             // сервер мог просто не достучаться до цели (см. `outcome`
             // в `crate::connect`: не любой отказ — это `AuthRejected`.
@@ -183,9 +164,8 @@ impl TrustTunnelOutbound {
             return Ok(Arc::clone(manager));
         }
 
-        let send_request = self.transport.send_request.clone();
         let result = UdpManager::connect(
-            send_request,
+            &self.link,
             self.config.credentials(),
             Arc::clone(&self.dialer),
         )
@@ -217,10 +197,10 @@ impl Outbound for TrustTunnelOutbound {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Единственная нога — HTTP/2, но UDP по ней ходит: `_udp2` несёт
-            // все датаграммы направления (`PROTOCOL.md`, §6.1).
+            // UDP ходит внутри того же переноса: `_udp2` несёт все
+            // датаграммы направления (`PROTOCOL.md`, §6.1).
             udp: true,
-            // TLS-рукопожатие с сервером происходит один раз на весь профиль,
+            // Рукопожатие TLS или QUIC происходит один раз на весь профиль,
             // а каждый `connect_tcp` получает свой поток внутри него.
             multiplex: true,
             port_hopping: false,
@@ -251,7 +231,7 @@ impl Outbound for TrustTunnelOutbound {
         if let Some(manager) = self.udp.lock().await.take() {
             manager.shutdown();
         }
-        self.transport.shutdown();
+        self.link.shutdown().await;
         Ok(())
     }
 }
@@ -263,7 +243,7 @@ impl Outbound for TrustTunnelOutbound {
 /// нездоровым, — дальше проверять нечего: `close()` всё равно оборвёт эту
 /// задачу явно, а до того ей незачем крутиться просто так.
 fn spawn_health_check(
-    send_request: H2SendRequest,
+    link: Arc<Link>,
     credentials: (String, String),
     poisoned: Arc<StdMutex<Option<Poison>>>,
 ) -> JoinHandle<()> {
@@ -273,7 +253,7 @@ fn spawn_health_check(
 
             let outcome = tokio::time::timeout(
                 HEALTH_CHECK_TIMEOUT,
-                health_check_once(send_request.clone(), (&credentials.0, &credentials.1)),
+                health_check_once(&link, (&credentials.0, &credentials.1)),
             )
             .await;
 
@@ -297,28 +277,14 @@ fn spawn_health_check(
 }
 
 /// Один обмен `CONNECT _check`.
-async fn health_check_once(
-    send_request: H2SendRequest,
-    credentials: (&str, &str),
-) -> TrustTunnelResult<()> {
-    let mut send_request = send_request
-        .ready()
-        .await
-        .map_err(|e| TrustTunnelError::disconnected(e.to_string()))?;
-
-    let request = connect::request_pseudo(connect::HEALTH_CHECK_AUTHORITY, credentials)?;
+async fn health_check_once(link: &Link, credentials: (&str, &str)) -> TrustTunnelResult<()> {
     // `true` — поток закрывается с нашей стороны сразу: проверка живости не
     // несёт тела, а сервер-эталон отвечает и сам закрывает поток немедленно
     // (`lib/src/http_downstream.rs`: `send_ok_response(true)` только для
     // `_check`, у `_udp2`/`_icmp` — `false`).
-    let (response, _send_stream) = send_request
-        .send_request(request, true)
-        .map_err(|e| TrustTunnelError::transport(format!("запрос CONNECT _check: {e}")))?;
-
-    let response = response
-        .await
-        .map_err(|e| TrustTunnelError::disconnected(e.to_string()))?;
-    let status = response.status().as_u16();
+    let (status, _stream) = link
+        .open(connect::HEALTH_CHECK_AUTHORITY, credentials, true)
+        .await?;
 
     match connect::outcome(status, connect::HEALTH_CHECK_AUTHORITY) {
         Some(err) => Err(err),

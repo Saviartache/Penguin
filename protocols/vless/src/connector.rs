@@ -17,7 +17,8 @@ use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::stream::ProxyStream;
 use penguin_transport::tls::TlsClient;
-use penguin_transport::{deadline, httpupgrade, ws};
+use penguin_transport::xhttp::{XhttpClient, XhttpTarget};
+use penguin_transport::{carrier, deadline};
 use tokio::io::AsyncWriteExt;
 
 use crate::config::{Security, Transport, VlessConfig};
@@ -43,10 +44,12 @@ pub struct Connector {
     /// Vision», без своего разбора значения.
     vision: bool,
     transport: Transport,
-    /// Путь запроса для переносов поверх HTTP.
+    /// Путь `xhttp` или `serviceName` у `grpc`.
     path: String,
-    /// Заголовок `Host` для них же.
+    /// `:authority` для них же.
     http_host: String,
+    /// Клиент XHTTP — только у `transport = "xhttp"`.
+    xhttp: Option<XhttpClient>,
     dialer: Arc<dyn Dialer>,
 }
 
@@ -90,6 +93,17 @@ impl Connector {
         };
 
         let vision = config.flow() == Some(addons::FLOW_VISION);
+        let http_host = config.host()?;
+        let xhttp = config.transport.is_quic().then(|| {
+            let target = XhttpTarget {
+                host: host.clone(),
+                port,
+                tls: config.tls.clone(),
+                authority: http_host.clone(),
+                path: config.path().to_owned(),
+            };
+            XhttpClient::new(target, Arc::clone(&dialer))
+        });
 
         Ok(Self {
             host,
@@ -100,9 +114,17 @@ impl Connector {
             vision,
             transport: config.transport,
             path: config.path().to_owned(),
-            http_host: config.host()?,
+            http_host,
+            xhttp,
             dialer: Arc::clone(&dialer),
         })
+    }
+
+    /// Закрывает общее соединение QUIC, если оно есть (`xhttp`).
+    pub async fn close(&self) {
+        if let Some(xhttp) = &self.xhttp {
+            xhttp.close().await;
+        }
     }
 
     /// Открывает поток и отправляет заголовок запроса.
@@ -127,6 +149,9 @@ impl Connector {
 
     /// Соединение до сервера вместе с переносом, но без заголовка.
     async fn carry(&self) -> Result<Box<dyn ProxyStream>, ProtocolError> {
+        if let Some(xhttp) = &self.xhttp {
+            return Ok(Box::new(xhttp.open().await.map_err(VlessError::from)?));
+        }
         let plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
 
         let secure: Box<dyn ProxyStream> = if let Some(tls) = &self.tls {
@@ -153,31 +178,11 @@ impl Connector {
             Box::new(plain)
         };
 
-        Ok(match self.transport {
-            Transport::Tcp => secure,
-            Transport::Ws => {
-                let request = ws::Request::new(self.http_host.clone(), self.path.clone());
-                Box::new(
-                    ws::connect(secure, &request)
-                        .await
-                        .map_err(VlessError::from)?,
-                )
-            }
-            Transport::Httpupgrade => {
-                let request = ws::Request::new(self.http_host.clone(), self.path.clone());
-                let upgraded = httpupgrade::connect(secure, &request)
-                    .await
-                    .map_err(VlessError::from)?;
-                // Заголовок запроса мы ещё не отправили, и отвечать серверу
-                // нечем: данные до него означают, что на том конце не VLESS.
-                if !upgraded.tail.is_empty() {
-                    return Err(
-                        VlessError::malformed("сервер прислал данные до нашего заголовка").into(),
-                    );
-                }
-                Box::new(upgraded.io)
-            }
-        })
+        Ok(
+            carrier::wrap(secure, self.transport, &self.http_host, &self.path)
+                .await
+                .map_err(VlessError::from)?,
+        )
     }
 
     /// Проверяет, что сервер на месте и предъявляет ожидаемый сертификат
@@ -205,6 +210,10 @@ impl Connector {
             })
             .await?;
             return Ok(());
+        }
+        // Без запроса: только QUIC и сертификат.
+        if let Some(xhttp) = &self.xhttp {
+            return Ok(xhttp.verify().await.map_err(VlessError::from)?);
         }
 
         let _carrier = self.carry().await?;

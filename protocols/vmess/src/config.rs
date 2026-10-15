@@ -3,7 +3,8 @@
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
 use penguin_core::uuid::Uuid;
-use penguin_transport::tls::{ALPN_H2, ALPN_HTTP11, TlsConfig};
+pub use penguin_transport::carrier::Carrier as Transport;
+use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::Cipher;
@@ -28,34 +29,6 @@ pub enum Security {
     /// перед сервером. Само по себе не защищает даже то немногое, чего
     /// [`Cipher`] не защищает.
     None,
-}
-
-/// Чем поток переносится.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Transport {
-    /// Голый поток.
-    #[default]
-    Tcp,
-    /// WebSocket.
-    Ws,
-    /// `Upgrade` без кадров.
-    Httpupgrade,
-}
-
-impl Transport {
-    /// Нужны ли путь и заголовок `Host`.
-    pub fn is_http(self) -> bool {
-        matches!(self, Self::Ws | Self::Httpupgrade)
-    }
-
-    /// Что объявлять в ALPN, если человек не задал своё.
-    pub fn default_alpn(self) -> &'static [&'static [u8]] {
-        match self {
-            Self::Tcp => &[ALPN_H2, ALPN_HTTP11],
-            Self::Ws | Self::Httpupgrade => &[ALPN_HTTP11],
-        }
-    }
 }
 
 /// Настройки подключения к серверу VMess.
@@ -94,15 +67,15 @@ pub struct VmessConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// Чем переносится поток.
+    /// Чем переносится поток: `tcp`, `grpc` или `xhttp`.
     #[serde(default)]
     pub transport: Transport,
 
-    /// Путь запроса для `ws` и `httpupgrade`.
+    /// Путь `xhttp` или `serviceName` у `grpc` — как в настройках Xray.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 
-    /// Заголовок `Host` для них же.
+    /// `:authority` для них же.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
 
@@ -154,15 +127,12 @@ impl VmessConfig {
         resolve(&self.id)
     }
 
-    /// Путь запроса для `ws` и `httpupgrade`.
+    /// Путь или `serviceName` как задан; умолчание у каждого переноса своё.
     pub fn path(&self) -> &str {
-        match self.path.as_deref().map(str::trim) {
-            Some(path) if !path.is_empty() => path,
-            _ => "/",
-        }
+        self.path.as_deref().map_or("", str::trim)
     }
 
-    /// Имя узла в заголовке `Host`.
+    /// `:authority` запросов `grpc` и `xhttp`: `host`, имя из TLS или адрес.
     pub fn host(&self) -> VmessResult<String> {
         if let Some(host) = self
             .host
@@ -233,13 +203,16 @@ impl VmessConfig {
             }
         }
 
-        if !self.transport.is_http() && (self.path.is_some() || self.host.is_some()) {
+        if !self.transport.uses_path() && (self.path.is_some() || self.host.is_some()) {
             return Err(VmessError::config(
-                "путь и `Host` заданы у переноса без HTTP: выберите `ws` или `httpupgrade`",
+                "путь и `host` заданы у голого потока: выберите `grpc` или `xhttp`",
             ));
         }
-        if self.transport.is_http() && !self.path().starts_with('/') {
-            return Err(VmessError::config("путь обязан начинаться с `/`"));
+        // QUIC несёт свой TLS 1.3: без шифрования поверх него не лечь.
+        if self.transport.is_quic() && self.security != Security::Tls {
+            return Err(VmessError::config(
+                "`transport = \"xhttp\"` идёт по HTTP/3 и требует `security = \"tls\"`",
+            ));
         }
         Ok(())
     }
@@ -340,16 +313,31 @@ mod tests {
     #[test]
     fn http_settings_belong_to_http_transports() {
         let config = VmessConfig {
-            path: Some("/ws".to_owned()),
+            path: Some("svc".to_owned()),
             ..config()
         };
         assert!(config.validate().is_err());
 
+        for transport in [Transport::Grpc, Transport::Xhttp] {
+            let config = VmessConfig {
+                transport,
+                ..config.clone()
+            };
+            config.validate().expect("под `grpc` и `xhttp` это законно");
+        }
+    }
+
+    #[test]
+    fn xhttp_needs_tls_and_websocket_is_gone() {
         let config = VmessConfig {
-            transport: Transport::Ws,
-            ..config
+            security: Security::None,
+            transport: Transport::Xhttp,
+            ..config()
         };
-        config.validate().expect("под `ws` это законно");
+        assert!(config.validate().is_err());
+
+        let params = json!({ "server": "a.io:443", "id": TEXT, "transport": "ws" });
+        assert!(serde_json::from_value::<VmessConfig>(params).is_err());
     }
 
     #[test]

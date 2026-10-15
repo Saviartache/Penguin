@@ -4046,14 +4046,12 @@ dependencies = [
  "penguin-core",
  "penguin-dns",
  "penguin-dpi",
- "penguin-http-proxy",
  "penguin-hysteria2",
  "penguin-inbound",
  "penguin-juicity",
  "penguin-masque",
  "penguin-naive",
  "penguin-netstack",
- "penguin-openconnect",
  "penguin-pingwin",
  "penguin-platform",
  "penguin-process",
@@ -4094,20 +4092,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "penguin-http-proxy"
-version = "0.5.0"
-dependencies = [
- "async-trait",
- "penguin-core",
- "penguin-proto",
- "penguin-transport",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
 name = "penguin-hysteria2"
 version = "0.5.0"
 dependencies = [
@@ -4115,9 +4099,6 @@ dependencies = [
  "blake2",
  "bytes",
  "dashmap",
- "h3",
- "h3-quinn",
- "http",
  "parking_lot",
  "penguin-core",
  "penguin-proto",
@@ -4190,14 +4171,10 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "bytes",
- "h3",
- "h3-quinn",
  "http",
  "penguin-core",
  "penguin-proto",
  "penguin-transport",
- "quinn",
- "rustls",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4249,23 +4226,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "penguin-openconnect"
-version = "0.5.0"
-dependencies = [
- "async-trait",
- "bytes",
- "penguin-core",
- "penguin-proto",
- "penguin-transport",
- "quick-xml 0.42.0",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
  "tracing",
 ]
 
@@ -4405,16 +4365,23 @@ dependencies = [
 name = "penguin-transport"
 version = "0.5.0"
 dependencies = [
+ "async-trait",
  "bytes",
+ "h2",
+ "h3",
+ "h3-quinn",
+ "http",
  "md-5",
  "penguin-core",
  "penguin-proto",
+ "quinn",
  "rand 0.8.8",
  "ring",
  "rustls",
  "rustls-pemfile",
  "rustls-platform-verifier",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
@@ -4837,15 +4804,6 @@ name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "quick-xml"
-version = "0.42.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
 ]
@@ -6682,7 +6640,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "338e30461b3a2b67d70eb30a6d89f8e0c93a833e07d2ae89085cd070c4a00ac0"
 dependencies = [
  "proc-macro2",
- "quick-xml 0.41.0",
+ "quick-xml",
  "quote",
 ]
 

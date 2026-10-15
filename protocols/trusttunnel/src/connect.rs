@@ -4,10 +4,11 @@
 //! # Чего в запросе нет
 //!
 //! Ни `:scheme`, ни `:path` — `CONNECT` их не несёт вовсе (RFC 9113, §8.5;
-//! `PROTOCOL.md`, §5.1 приводит только `:method` и `:authority`).
-//! `http::Uri`, разобранный из строки вида `host:port` или из голого имени
-//! без порта (`_udp2`, `_check`), даёт ровно такую форму: `h2` берёт из неё
-//! `:authority`, а `:scheme`/`:path` остаются пустыми.
+//! RFC 9114, §4.4; `PROTOCOL.md`, §5.1 приводит только `:method` и
+//! `:authority`). `http::Uri`, разобранный из строки вида `host:port` или из
+//! голого имени без порта (`_udp2`, `_check`), даёт ровно такую форму: `h2`
+//! берёт из неё `:authority`, а `:scheme`/`:path` остаются пустыми. Для
+//! HTTP/3 то же собирает [`h3::Request::connect`].
 //!
 //! # Заголовок `user-agent`
 //!
@@ -23,8 +24,7 @@
 
 use std::future::Future;
 
-use penguin_core::address::SocketAddress;
-use penguin_transport::deadline;
+use penguin_transport::{deadline, h3};
 
 use crate::basic;
 use crate::error::{TrustTunnelError, TrustTunnelResult};
@@ -38,35 +38,39 @@ pub const HEALTH_CHECK_AUTHORITY: &str = "_check";
 /// Значение заголовка `user-agent`. См. пояснение в шапке модуля.
 const USER_AGENT: &str = "penguin";
 
-/// Собирает запрос `CONNECT` до обычного адреса назначения.
-pub fn request(
-    target: &SocketAddress,
-    credentials: (&str, &str),
-) -> TrustTunnelResult<http::Request<()>> {
-    build(&target.to_wire(), credentials)
-}
-
-/// Собирает запрос `CONNECT` до псевдо-хоста: [`UDP_AUTHORITY`] или
-/// [`HEALTH_CHECK_AUTHORITY`].
-pub fn request_pseudo(
-    authority: &str,
-    credentials: (&str, &str),
-) -> TrustTunnelResult<http::Request<()>> {
-    build(authority, credentials)
-}
-
-fn build(authority: &str, credentials: (&str, &str)) -> TrustTunnelResult<http::Request<()>> {
+/// Заголовки `CONNECT` — одни и те же у HTTP/2 и HTTP/3.
+fn headers(credentials: (&str, &str)) -> [(&'static str, String); 2] {
     let (username, password) = credentials;
-    http::Request::builder()
-        .method(http::Method::CONNECT)
-        .uri(authority)
-        .header(http::header::USER_AGENT, USER_AGENT)
-        .header(
-            http::header::PROXY_AUTHORIZATION,
+    [
+        (http::header::USER_AGENT.as_str(), USER_AGENT.to_owned()),
+        (
+            http::header::PROXY_AUTHORIZATION.as_str(),
             basic::header_value(username, password),
-        )
+        ),
+    ]
+}
+
+/// Собирает запрос `CONNECT` для HTTP/2 до `authority`: адреса назначения
+/// или псевдо-хоста ([`UDP_AUTHORITY`], [`HEALTH_CHECK_AUTHORITY`]).
+pub fn request(authority: &str, credentials: (&str, &str)) -> TrustTunnelResult<http::Request<()>> {
+    let mut builder = http::Request::builder()
+        .method(http::Method::CONNECT)
+        .uri(authority);
+    for (name, value) in headers(credentials) {
+        builder = builder.header(name, value);
+    }
+    builder
         .body(())
         .map_err(|e| TrustTunnelError::malformed(format!("запрос CONNECT не собирается: {e}")))
+}
+
+/// Собирает запрос `CONNECT` для HTTP/3 до `authority`.
+pub fn request_h3(authority: &str, credentials: (&str, &str)) -> h3::Request {
+    headers(credentials)
+        .into_iter()
+        .fold(h3::Request::connect(authority), |request, (name, value)| {
+            request.header(name, value)
+        })
 }
 
 /// Ошибка, соответствующая коду ответа.
@@ -115,8 +119,7 @@ mod tests {
     #[test]
     fn the_request_has_no_scheme_or_path() {
         // RFC 9113, §8.5: `CONNECT` не несёт ни того, ни другого.
-        let target = SocketAddress::domain("example.com", 443);
-        let request = request(&target, creds()).expect("собирается");
+        let request = request("example.com:443", creds()).expect("собирается");
         assert_eq!(request.method(), http::Method::CONNECT);
         assert!(request.uri().scheme().is_none());
         assert_eq!(request.uri().path(), "");
@@ -137,7 +140,7 @@ mod tests {
         // появиться `_udp2:0` — сервер сверяет authority строкой целиком
         // (`lib/src/http_downstream.rs`, `authority.as_str()`).
         for host in [UDP_AUTHORITY, HEALTH_CHECK_AUTHORITY] {
-            let request = request_pseudo(host, creds()).expect("собирается");
+            let request = request(host, creds()).expect("собирается");
             assert_eq!(
                 request
                     .uri()
@@ -154,16 +157,39 @@ mod tests {
     fn credentials_go_into_the_header_on_every_request() {
         // `PROTOCOL.md`, §9.1: опознание уходит на каждом `CONNECT`, включая
         // псевдо-хосты, — не только на обычных адресах.
-        for request in [
-            request(&SocketAddress::domain("example.com", 443), creds()).expect("собирается"),
-            request_pseudo(UDP_AUTHORITY, creds()).expect("собирается"),
-            request_pseudo(HEALTH_CHECK_AUTHORITY, creds()).expect("собирается"),
-        ] {
+        for authority in ["example.com:443", UDP_AUTHORITY, HEALTH_CHECK_AUTHORITY] {
+            let request = request(authority, creds()).expect("собирается");
             assert_eq!(
                 request.headers()[http::header::PROXY_AUTHORIZATION],
                 "Basic cGVuZ3VpbjpzZWNyZXQ="
             );
         }
+    }
+
+    #[test]
+    fn the_http3_request_carries_the_same_fields() {
+        // RFC 9114, §4.4: только `:method` и `:authority`, псевдо-хост —
+        // дословно, без порта.
+        use penguin_transport::h3::qpack::field;
+
+        let block = request_h3(UDP_AUTHORITY, creds()).encode();
+        let fields: Vec<(Vec<u8>, Vec<u8>)> = field::decode(&block, usize::MAX)
+            .expect("разбирается")
+            .into_iter()
+            .map(|f| (f.name, f.value))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (b":method".to_vec(), b"CONNECT".to_vec()),
+                (b":authority".to_vec(), b"_udp2".to_vec()),
+                (b"user-agent".to_vec(), b"penguin".to_vec()),
+                (
+                    b"proxy-authorization".to_vec(),
+                    b"Basic cGVuZ3VpbjpzZWNyZXQ=".to_vec()
+                ),
+            ]
+        );
     }
 
     #[test]
