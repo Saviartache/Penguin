@@ -19,9 +19,13 @@
 //!
 //! Конфигурация и трафик показываются вместе, а не по очереди: переключение
 //! содержимого на одном месте заставляло бы искать глазами, что там сейчас.
+//!
+//! Пока профилей нет, строк нет вовсе: подписывать нечего, и консоль — один
+//! поток во всю площадь.
 
 use iced::Element;
 use iced::widget::text;
+use penguin_config::schema::profile::Profile;
 use penguin_core::state::TunnelState;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
 use uikit::tokens::type_scale;
@@ -68,8 +72,17 @@ pub fn view(state: &State) -> Element<'_, Message> {
 
 /// Консоль целиком.
 fn screen(state: &State) -> Element<'_, Message> {
-    let mut lines = config(state);
+    console::console(&state.palette, &lines(state), reveal(state))
+}
 
+/// Строки консоли.
+fn lines(state: &State) -> Vec<Line> {
+    let Some(profile) = state.config.active() else {
+        // Профилей нет — подписывать нечего: поток забирает всю площадь.
+        return vec![Line::Stream(load(state))];
+    };
+
+    let mut lines = config(state, profile);
     lines.push(status(state));
     // Заголовок раздела стоит над потоком и служит ему подписью: цифры под ним
     // и так читаются как его же. Поток забирает всю высоту, которую не занял
@@ -77,8 +90,7 @@ fn screen(state: &State) -> Element<'_, Message> {
     lines.push(Line::Section(crate::i18n::s().traffic.to_uppercase()));
     lines.push(Line::Stream(load(state)));
     lines.extend(traffic(state));
-
-    console::console(&state.palette, &lines, reveal(state))
+    lines
 }
 
 /// Загрузка потока: свежая скорость долей от наибольшей за окно истории.
@@ -120,15 +132,9 @@ fn reveal(state: &State) -> Reveal {
 }
 
 /// Куда тоннель поведёт.
-fn config(state: &State) -> Vec<Line> {
+fn config(state: &State, profile: &Profile) -> Vec<Line> {
     let strings = crate::i18n::s();
     let head = Line::Section(strings.configuration.to_uppercase());
-
-    let Some(profile) = state.config.active() else {
-        // Профилей нет — говорить о конфигурации нечего, и столбец прочерков
-        // читался бы как поломка.
-        return vec![head, pair(strings.profile, strings.no_profiles.to_owned())];
-    };
 
     let latency = state
         .servers
@@ -303,11 +309,23 @@ mod tests {
     #[test]
     fn the_console_opens_with_the_configuration() {
         // Шапки с именем программы нет намеренно: имя стоит в заголовке окна.
-        let state = State::default();
-        let Some(Line::Section(head)) = config(&state).into_iter().next() else {
+        let state = with_profile();
+        let Some(Line::Section(head)) = lines(&state).into_iter().next() else {
             panic!("первой строкой не заголовок раздела")
         };
         assert_eq!(head, crate::i18n::s().configuration.to_uppercase());
+    }
+
+    #[test]
+    fn without_profiles_the_stream_takes_the_whole_console() {
+        // Подписывать нечего: ни конфигурации, ни состояния, ни цифр — только
+        // поток во всю площадь.
+        let lines = lines(&State::default());
+        assert!(
+            matches!(lines.as_slice(), [Line::Stream(_)]),
+            "{}",
+            lines.len()
+        );
     }
 
     #[test]
@@ -392,12 +410,7 @@ mod tests {
     fn the_stream_stands_between_the_status_and_its_numbers() {
         // Поток — единственная строка, которой достаётся высота; стоять она
         // должна там, где раньше была пустота, а не под цифрами.
-        let state = State::default();
-        let mut lines = config(&state);
-        lines.push(status(&state));
-        lines.push(Line::Section(crate::i18n::s().traffic.to_uppercase()));
-        lines.push(Line::Stream(load(&state)));
-        lines.extend(traffic(&state));
+        let lines = lines(&with_profile());
 
         let at = lines
             .iter()
@@ -451,12 +464,7 @@ mod tests {
         // тире брался из системного шрифта и рисовался шире, чем был измерен.
         // Проверяется списком, а не глазами: увидеть это можно только на живом
         // окне и только в той строке, где значение короткое.
-        let state = with_profile();
-        let mut lines = config(&state);
-        lines.push(status(&state));
-        lines.extend(traffic(&state));
-
-        for line in &lines {
+        for line in &lines(&with_profile()) {
             let (label, value) = match line {
                 Line::Pair(label, value) | Line::Toned(label, value, _) => {
                     (label.as_str(), value.as_str())
@@ -482,8 +490,7 @@ mod tests {
     #[test]
     fn a_profile_without_a_latency_still_ends_at_the_right_edge() {
         // Задержки нет — на её месте прочерк, и он обязан быть знаком шрифта.
-        let state = with_profile();
-        let latency = config(&state)
+        let latency = lines(&with_profile())
             .into_iter()
             .find_map(|line| match line {
                 Line::Pair(label, value) if label == crate::i18n::s().latency.to_uppercase() => {
