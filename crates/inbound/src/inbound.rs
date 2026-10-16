@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use penguin_core::address::SocketAddress;
+use penguin_core::address::{Address, SocketAddress};
 use penguin_core::network::Network;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::error::ProtocolError;
@@ -16,6 +16,8 @@ pub struct InboundRequest {
     pub source: SocketAddr,
     /// Куда оно собирается.
     pub target: SocketAddress,
+    /// Имя, опознанное в потоке: только для правил, соединение идёт на `target`.
+    pub sniffed: Option<Address>,
     /// TCP или UDP.
     pub network: Network,
 }

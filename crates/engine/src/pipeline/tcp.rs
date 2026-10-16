@@ -1,5 +1,6 @@
 //! TCP из тоннеля: имя восстанавливается обратным отображением fake-IP или
-//! опознанием в потоке, затем маршрутизация и копирование.
+//! опознанием в потоке, затем маршрутизация и копирование. Опознанное имя
+//! выбирает правило, но соединение идёт на исходный адрес.
 
 use std::sync::Arc;
 
@@ -70,17 +71,18 @@ async fn serve(
         target = SocketAddress::new(Address::domain(&*domain), destination.port());
     }
 
+    // Имя из потока — только для правил: оно может разрешаться не в этот адрес.
     let mut prefix = Vec::new();
+    let mut sniffed = None;
     if sniff_enabled && !target.host.is_domain() {
         prefix = read_prefix(&mut connection).await;
-        if let Some(domain) = sniff(Network::Tcp, &prefix) {
-            target = SocketAddress::new(domain, destination.port());
-        }
+        sniffed = sniff(Network::Tcp, &prefix);
     }
 
     let request = InboundRequest {
         source,
         target: target.clone(),
+        sniffed,
         network: Network::Tcp,
     };
     let mut remote = pipeline

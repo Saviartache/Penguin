@@ -84,6 +84,7 @@ async fn serve_connection(
     let request = InboundRequest {
         source,
         target,
+        sniffed: None,
         network: Network::Tcp,
     };
 

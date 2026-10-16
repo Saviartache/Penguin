@@ -119,6 +119,10 @@ impl Pipeline {
         let mut flow =
             FlowContext::to_target(request.network, request.source, request.target.clone());
 
+        if let Some(domain) = &request.sniffed {
+            flow = flow.with_domain(domain.clone());
+        }
+
         if self.resolve_process
             && let Some(owner) = self.processes.owner_of(request.network, request.source)
         {
@@ -145,12 +149,12 @@ impl Pipeline {
     }
 
     /// Сообщает о решении одной строкой — в журнал и в окно.
-    fn announce(&self, request: &InboundRequest, flow: &FlowContext, verdict: &Verdict) {
+    fn announce(&self, flow: &FlowContext, verdict: &Verdict) {
         let process = flow.process.as_ref().map(|owner| owner.name.to_string());
         let process_path = flow.process.as_ref().map(|owner| owner.path.to_string());
 
         tracing::debug!(
-            target = %request.target,
+            target = %flow.destination,
             process = process.as_deref().unwrap_or("?"),
             decision = %verdict.decision,
             reason = %verdict.reason,
@@ -159,7 +163,7 @@ impl Pipeline {
 
         if let Some(events) = &self.events {
             events.emit(Event::decision(
-                request.target.to_string(),
+                flow.destination.to_string(),
                 process,
                 process_path,
                 verdict.decision.to_string(),
@@ -194,7 +198,7 @@ impl InboundHandler for Pipeline {
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
         let flow = self.context_of(request);
         let verdict = self.router.resolve(&flow);
-        self.announce(request, &flow, &verdict);
+        self.announce(&flow, &verdict);
 
         let Some(outbound) = self.outbound_for(&verdict.decision) else {
             return Err(ProtocolError::Unreachable(format!(
@@ -217,7 +221,7 @@ impl InboundHandler for Pipeline {
     ) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
         let flow = self.context_of(request);
         let verdict = self.router.resolve(&flow);
-        self.announce(request, &flow, &verdict);
+        self.announce(&flow, &verdict);
 
         let Some(outbound) = self.outbound_for(&verdict.decision) else {
             return Err(ProtocolError::Unreachable(format!(
@@ -264,8 +268,74 @@ mod tests {
         InboundRequest {
             source: "127.0.0.1:50000".parse().expect("адрес"),
             target: target.parse().expect("адрес"),
+            sniffed: None,
             network: Network::Tcp,
         }
+    }
+
+    /// Запоминает, куда направление пыталось соединиться, и отказывает.
+    #[derive(Default)]
+    struct RecordingDialer {
+        dialed: parking_lot::Mutex<Vec<std::net::SocketAddr>>,
+    }
+
+    #[async_trait]
+    impl penguin_proto::dialer::Dialer for RecordingDialer {
+        async fn dial_tcp(
+            &self,
+            addr: std::net::SocketAddr,
+        ) -> Result<tokio::net::TcpStream, ProtocolError> {
+            self.dialed.lock().push(addr);
+            Err(ProtocolError::Connect("проверка".into()))
+        }
+
+        async fn bind_udp(
+            &self,
+            _local: std::net::SocketAddr,
+        ) -> Result<tokio::net::UdpSocket, ProtocolError> {
+            Err(ProtocolError::Unsupported("проверка"))
+        }
+
+        async fn resolve(&self, _host: &str) -> Result<Vec<std::net::IpAddr>, ProtocolError> {
+            Err(ProtocolError::Unsupported("проверка"))
+        }
+    }
+
+    #[tokio::test]
+    async fn sniffed_name_picks_the_rule_but_not_the_address() {
+        let rules = serde_json::from_value(serde_json::json!([
+            { "id": "dot", "when": { "domain_suffix": ["cloudflare-dns.com"] }, "action": "direct" }
+        ]))
+        .expect("правила");
+        let config = penguin_config::schema::routing::RoutingConfig {
+            mode: TunnelMode::Tunnel,
+            rules,
+            ..Default::default()
+        };
+        let router = Router::new(
+            &config,
+            OutboundId::new("home"),
+            &penguin_router::CompileContext::default(),
+        )
+        .expect("собирается");
+
+        let dialer = Arc::new(RecordingDialer::default());
+        let outbounds = Arc::new(OutboundPool::new(Arc::clone(&dialer) as _));
+        let pipeline = Pipeline::new(
+            Arc::new(router),
+            outbounds,
+            Arc::new(NoResolver),
+            Metrics::new(),
+        );
+
+        let mut request = request("1.1.1.1:853");
+        request.sniffed = Some(penguin_core::address::Address::domain("cloudflare-dns.com"));
+
+        // Без правила по имени — режим тоннеля и отказ без направления.
+        let opened = pipeline.open_tcp(&request).await;
+        assert!(matches!(opened, Err(ProtocolError::Connect(_))));
+        let expected: std::net::SocketAddr = "1.1.1.1:853".parse().expect("адрес");
+        assert_eq!(*dialer.dialed.lock(), [expected]);
     }
 
     #[tokio::test]

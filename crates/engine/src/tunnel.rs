@@ -266,6 +266,7 @@ pub fn request_from(
     InboundRequest {
         source,
         target,
+        sniffed: None,
         network,
     }
 }

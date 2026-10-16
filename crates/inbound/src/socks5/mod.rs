@@ -139,6 +139,7 @@ async fn connect(
     let request = InboundRequest {
         source,
         target,
+        sniffed: None,
         network: Network::Tcp,
     };
 
@@ -173,6 +174,7 @@ async fn associate(
     let request = InboundRequest {
         source,
         target: SocketAddress::ip(bind_ip, 0),
+        sniffed: None,
         network: Network::Udp,
     };
 

@@ -146,6 +146,7 @@ fn session_for(
     let request = InboundRequest {
         source: datagram.source,
         target: SocketAddress::from(datagram.destination),
+        sniffed: None,
         network: Network::Udp,
     };
     tokio::spawn(run_session(
