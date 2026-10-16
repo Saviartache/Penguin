@@ -108,8 +108,10 @@ mod tests {
 
     #[tokio::test]
     async fn silent_server_times_out_instead_of_hanging() {
-        // Подсеть документации (RFC 5737): ответа не будет.
-        let upstream = UdpUpstream::parse("192.0.2.1").expect("разбирается");
+        // Свой сокет, который не отвечает: чужой адрес на 53-м порту перехватит
+        // подменённый резолвер системы.
+        let silent = UdpSocket::bind("127.0.0.1:0").await.expect("сокет");
+        let upstream = UdpUpstream::new(silent.local_addr().expect("адрес"));
         let started = std::time::Instant::now();
 
         let result = upstream.query(&[0u8; 12]).await;
