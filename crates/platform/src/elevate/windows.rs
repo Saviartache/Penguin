@@ -9,9 +9,9 @@ const WAIT_TIMEOUT_MS: u32 = 30_000;
 pub(super) fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
     use std::os::windows::ffi::OsStrExt;
 
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HANDLE, WAIT_OBJECT_0};
     use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SW_HIDE};
     use windows::core::PCWSTR;
 
     fn wide(value: &str) -> Vec<u16> {
@@ -28,10 +28,19 @@ pub(super) fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
     let file = wide(&executable.to_string_lossy());
     let parameters = wide(&command_line(args));
 
+    // Без COM оболочка может не показать окно UAC вовсе (так требует `ShellExecuteExW`).
+    let _apartment = crate::com::Apartment::enter();
+
+    #[allow(unsafe_code, reason = "окно-владелец для запроса UAC")]
+    // SAFETY: вызов без указателей.
+    let owner = unsafe { GetForegroundWindow() };
+
     let mut info = SHELLEXECUTEINFOW {
         cbSize: u32::try_from(std::mem::size_of::<SHELLEXECUTEINFOW>()).unwrap_or(0),
         // Без признака описатель процесса не вернётся и ждать нечего.
         fMask: SEE_MASK_NOCLOSEPROCESS,
+        // Без владельца окно UAC уходит за окно программы и только мигает на панели задач.
+        hwnd: owner,
         lpVerb: PCWSTR(verb.as_ptr()),
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: PCWSTR(parameters.as_ptr()),
@@ -41,11 +50,17 @@ pub(super) fn run_elevated(args: &[&str]) -> PlatformResult<bool> {
 
     #[allow(unsafe_code, reason = "запуск процесса с повышением прав")]
     // SAFETY: строки в `info` живут до конца вызова.
-    let started = unsafe { ShellExecuteExW(&mut info) }.is_ok();
+    let started = unsafe { ShellExecuteExW(&mut info) };
 
-    // Чаще всего это «Нет» в окне UAC; от ошибки не отличить, и не нужно.
-    if !started {
-        return Ok(false);
+    match started {
+        Ok(()) => {}
+        // «Нет» в окне UAC — решение человека, а не сбой.
+        Err(err) if err.code() == ERROR_CANCELLED.to_hresult() => return Ok(false),
+        Err(err) => {
+            return Err(PlatformError::Service(format!(
+                "не удалось запросить права администратора: {err}"
+            )));
+        }
     }
 
     let process = HANDLE(info.hProcess.0);

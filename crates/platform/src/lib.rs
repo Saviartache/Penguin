@@ -8,6 +8,8 @@ pub mod appearance;
 pub mod autostart;
 pub mod bind;
 pub mod build;
+#[cfg(windows)]
+mod com;
 // Внутренний модуль: системные программы там, где нативного интерфейса нет.
 #[cfg(unix)]
 mod command;

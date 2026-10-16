@@ -5,10 +5,7 @@
 use std::path::PathBuf;
 
 use windows::Win32::Foundation::{ERROR_CANCELLED, HWND};
-use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoTaskMemFree, CoUninitialize,
-};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     FILEOPENDIALOGOPTIONS, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR,
@@ -17,6 +14,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::{HRESULT, HSTRING, PCWSTR};
 
+use crate::com::Apartment;
 use crate::error::{PlatformError, PlatformResult};
 
 use super::Kind;
@@ -133,32 +131,6 @@ fn display_name(filter: &str, mask: &str) -> String {
     format!("{filter} ({mask})")
 }
 
-/// COM, поднятый на этом потоке и гасимый здесь же: поток из пула достаётся другой работе.
-struct Apartment {
-    /// Поднял его мы; чужой гасить нельзя.
-    entered: bool,
-}
-
-impl Apartment {
-    /// Поднимает COM (однопоточная модель — её ждёт оболочка).
-    fn enter() -> Self {
-        // SAFETY: вызов без указателей.
-        let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        Self {
-            entered: result.is_ok(),
-        }
-    }
-}
-
-impl Drop for Apartment {
-    fn drop(&mut self) {
-        if self.entered {
-            // SAFETY: парный к успешному `CoInitializeEx`.
-            unsafe { CoUninitialize() };
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,11 +141,5 @@ mod tests {
             display_name("Программы", mask(Kind::Program)),
             "Программы (*.exe)"
         );
-    }
-
-    #[test]
-    fn com_lives_no_longer_than_the_window() {
-        let apartment = Apartment::enter();
-        drop(apartment);
     }
 }

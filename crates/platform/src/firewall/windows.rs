@@ -42,7 +42,7 @@ pub fn engage(rules: &FirewallRules) -> PlatformResult<Saved> {
     // Служба сама шлёт «напрямую» и загрузочный DNS мимо тоннеля.
     let exe = std::env::current_exe()
         .map_err(|e| PlatformError::Firewall(format!("путь к службе не узнать: {e}")))?;
-    allow(&format!("program={}", exe.display()))?;
+    allow(&format!("program={}", plain_path(&exe.to_string_lossy())))?;
 
     if rules.allow_lan {
         for subnet in [
@@ -148,6 +148,15 @@ fn rule_suffix(condition: &str) -> &'static str {
     }
 }
 
+/// Путь без приставки `\\?\`: служба ставится по `canonicalize`, а `netsh` такой путь отвергает.
+fn plain_path(path: &str) -> String {
+    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{share}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
+    }
+}
+
 /// Выполняет команду брандмауэра.
 fn netsh(args: &[&str]) -> PlatformResult<()> {
     let output = Command::new("netsh")
@@ -196,6 +205,19 @@ mod tests {
         let suffix = rule_suffix(r"program=C:\Program Files\Penguin\penguin.exe");
         assert_eq!(suffix, "-AllowService");
         assert!(RULE_NAMES.contains(&suffix), "правило не снимется");
+    }
+
+    #[test]
+    fn netsh_gets_the_path_without_the_verbatim_prefix() {
+        assert_eq!(
+            plain_path(r"\\?\C:\Program Files\Penguin\penguin.exe"),
+            r"C:\Program Files\Penguin\penguin.exe"
+        );
+        assert_eq!(
+            plain_path(r"\\?\UNC\server\share\penguin.exe"),
+            r"\\server\share\penguin.exe"
+        );
+        assert_eq!(plain_path(r"C:\penguin.exe"), r"C:\penguin.exe");
     }
 
     #[test]
