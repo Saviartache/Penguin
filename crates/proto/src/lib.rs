@@ -9,5 +9,6 @@ pub mod factory;
 pub mod outbound;
 pub mod packet;
 pub mod probe;
+pub mod random;
 pub mod registry;
 pub mod stream;
