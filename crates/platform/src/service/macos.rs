@@ -89,6 +89,11 @@ pub(super) fn runs_current_build() -> bool {
         && stage::runs_current_build(Some(Path::new(HELPER_PATH)), HELPER_PATH)
 }
 
+/// Загружено ли задание в launchd; спрашивать можно без прав.
+pub(super) fn loaded() -> PlatformResult<bool> {
+    Ok(report()?.is_some())
+}
+
 /// Загружает задание, пережидая отказы launchd.
 fn bootstrap() -> PlatformResult<()> {
     let mut attempt = 1;

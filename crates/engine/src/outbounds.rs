@@ -23,6 +23,8 @@ pub struct OutboundPool {
     registry: ProtocolRegistry,
     dialer: Arc<dyn Dialer>,
     active: RwLock<HashMap<OutboundId, Arc<dyn Outbound>>>,
+    /// Профили поднятых направлений: по ним пересоздаётся умершее.
+    profiles: RwLock<HashMap<OutboundId, Profile>>,
     /// Не даёт двум соединениям к одному профилю поднять два QUIC.
     building: Mutex<()>,
 }
@@ -48,6 +50,7 @@ impl OutboundPool {
             registry,
             dialer,
             active: RwLock::new(HashMap::from([(OutboundId::direct(), direct)])),
+            profiles: RwLock::default(),
             building: Mutex::new(()),
         }
     }
@@ -81,6 +84,47 @@ impl OutboundPool {
             return Ok(existing);
         }
 
+        self.build(profile).await
+    }
+
+    /// Живое направление: умершее соединение пересоздаётся по тому же профилю.
+    ///
+    /// Без этого после обрыва (сон, смена сети, перезапуск сервера) тоннель
+    /// оставался «подключённым», но не пропускал ни одного соединения.
+    pub async fn revive(
+        &self,
+        outbound: Arc<dyn Outbound>,
+    ) -> Result<Arc<dyn Outbound>, ProtocolError> {
+        if outbound.is_alive() {
+            return Ok(outbound);
+        }
+
+        let id = outbound.id();
+        let _guard = self.building.lock().await;
+        // Пока ждали замок, направление мог пересоздать другой.
+        if let Some(current) = self.get(&id)
+            && current.is_alive()
+        {
+            return Ok(current);
+        }
+
+        let Some(profile) = self.profiles.read().get(&id).cloned() else {
+            return Err(ProtocolError::Disconnected(format!(
+                "направление `{id}` закрыто"
+            )));
+        };
+
+        tracing::info!(%id, "соединение с сервером потеряно — поднимаю заново");
+        let fresh = self.build(&profile).await?;
+        if let Err(err) = outbound.close().await {
+            tracing::debug!(%id, %err, "умершее направление закрылось с ошибкой");
+        }
+        Ok(fresh)
+    }
+
+    /// Строит направление и кладёт в пул; вызывается под замком `building`.
+    async fn build(&self, profile: &Profile) -> Result<Arc<dyn Outbound>, ProtocolError> {
+        let id = OutboundId::from(profile.id.clone());
         let ctx = BuildContext {
             id: id.clone(),
             dialer: Arc::clone(&self.dialer),
@@ -101,6 +145,7 @@ impl OutboundPool {
             protocol = profile.outbound.protocol,
             "направление поднято"
         );
+        self.profiles.write().insert(id.clone(), profile.clone());
         self.active.write().insert(id, Arc::clone(&outbound));
         Ok(outbound)
     }
@@ -121,6 +166,9 @@ impl OutboundPool {
         if id.is_direct() {
             return;
         }
+        // Ждёт идущую сборку: иначе пересозданное направление пережило бы отключение.
+        let _guard = self.building.lock().await;
+        self.profiles.write().remove(id);
         let removed = self.active.write().remove(id);
         if let Some(outbound) = removed
             && let Err(err) = outbound.close().await
@@ -234,8 +282,16 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use penguin_config::schema::outbound::RawOutbound;
+    use penguin_core::address::SocketAddress;
+    use penguin_core::id::ProfileId;
     use penguin_dns::resolver::SystemResolver;
+    use penguin_proto::capabilities::Capabilities;
+    use penguin_proto::datagram::ProxyDatagram;
+    use penguin_proto::factory::ProtocolFactory;
+    use penguin_proto::stream::ProxyStream;
     use serde_json::json;
 
     use super::*;
@@ -337,6 +393,113 @@ mod tests {
             json!({ "server": "example.com:443", "auth": "secret" }),
         ))
         .expect("настройки верны");
+    }
+
+    /// Протокол, чьё соединение умирает по команде теста.
+    struct Mortal {
+        builds: AtomicUsize,
+        alive: Arc<AtomicBool>,
+    }
+
+    struct MortalOutbound {
+        alive: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProtocolFactory for Mortal {
+        fn protocol(&self) -> &'static str {
+            "mortal"
+        }
+
+        fn validate(&self, _params: &serde_json::Value) -> Result<(), ProtocolError> {
+            Ok(())
+        }
+
+        async fn build(
+            &self,
+            _ctx: BuildContext,
+            _params: &serde_json::Value,
+        ) -> Result<Arc<dyn Outbound>, ProtocolError> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            self.alive.store(true, Ordering::SeqCst);
+            Ok(Arc::new(MortalOutbound {
+                alive: Arc::clone(&self.alive),
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Outbound for MortalOutbound {
+        fn id(&self) -> OutboundId {
+            OutboundId::from(ProfileId::new("home"))
+        }
+
+        fn protocol(&self) -> &'static str {
+            "mortal"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        async fn connect_tcp(
+            &self,
+            _target: &SocketAddress,
+        ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
+            Err(ProtocolError::Unsupported("TCP"))
+        }
+
+        async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
+            Err(ProtocolError::Unsupported("UDP"))
+        }
+
+        fn is_alive(&self) -> bool {
+            self.alive.load(Ordering::SeqCst)
+        }
+    }
+
+    fn mortal_pool() -> (OutboundPool, Arc<Mortal>) {
+        let mut pool = pool();
+        let mortal = Arc::new(Mortal {
+            builds: AtomicUsize::new(0),
+            alive: Arc::new(AtomicBool::new(true)),
+        });
+        pool.registry.register(Arc::clone(&mortal) as _);
+        (pool, mortal)
+    }
+
+    #[tokio::test]
+    async fn a_dead_connection_is_rebuilt_from_its_profile() {
+        let (pool, mortal) = mortal_pool();
+        let first = pool
+            .get_or_connect(&profile("mortal", json!({})))
+            .await
+            .expect("поднимается");
+
+        let same = pool.revive(Arc::clone(&first)).await.expect("живо");
+        assert_eq!(mortal.builds.load(Ordering::SeqCst), 1, "живое не трогаем");
+        assert!(same.is_alive());
+
+        mortal.alive.store(false, Ordering::SeqCst);
+        let fresh = pool.revive(first).await.expect("пересоздаётся");
+        assert_eq!(mortal.builds.load(Ordering::SeqCst), 2);
+        assert!(fresh.is_alive());
+        assert!(pool.get(&fresh.id()).expect("в пуле").is_alive());
+    }
+
+    #[tokio::test]
+    async fn a_closed_profile_is_not_rebuilt() {
+        let (pool, mortal) = mortal_pool();
+        let outbound = pool
+            .get_or_connect(&profile("mortal", json!({})))
+            .await
+            .expect("поднимается");
+        pool.close_all().await;
+
+        mortal.alive.store(false, Ordering::SeqCst);
+        let err = pool.revive(outbound).await.err().expect("профиль закрыт");
+        assert!(matches!(err, ProtocolError::Disconnected(_)));
+        assert_eq!(mortal.builds.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

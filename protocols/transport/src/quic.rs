@@ -26,6 +26,11 @@ pub struct QuicLink {
 }
 
 impl QuicLink {
+    /// Соединение ещё не закрыто ни одной из сторон.
+    pub fn is_alive(&self) -> bool {
+        self.connection.close_reason().is_none()
+    }
+
     /// Закрывает соединение и ждёт отправки прощального пакета.
     pub async fn close(&self, code: u64, reason: &[u8]) {
         let code = quinn::VarInt::from_u64(code).unwrap_or(quinn::VarInt::MAX);

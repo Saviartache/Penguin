@@ -79,6 +79,10 @@ impl Outbound for MasqueOutbound {
         Ok(Box::new(MasqueDatagram::new(Arc::clone(&self.session))))
     }
 
+    fn is_alive(&self) -> bool {
+        self.session.is_alive()
+    }
+
     async fn close(&self) -> Result<(), ProtocolError> {
         self.session.close().await;
         Ok(())

@@ -1,5 +1,5 @@
 //! Направление через сервер TUIC: соединение постоянное, при обрыве
-//! `connect_tcp` отвечает `Disconnected`, а переподнимает профиль `supervisor`.
+//! `connect_tcp` отвечает `Disconnected`, а переподнимает его пул направлений.
 
 use std::sync::Arc;
 
@@ -107,6 +107,10 @@ impl Outbound for TuicOutbound {
             return Err(TuicError::Disconnected("соединение QUIC закрыто".to_owned()).into());
         }
         Ok(Box::new(TuicDatagram::new(Arc::clone(&self.session))))
+    }
+
+    fn is_alive(&self) -> bool {
+        self.session.is_alive()
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {

@@ -203,6 +203,7 @@ impl InboundHandler for Pipeline {
             )));
         };
 
+        let outbound = self.outbounds.revive(outbound).await?;
         let stream = outbound.connect_tcp(&request.target).await?;
         let id = Self::outbound_id(&verdict.decision);
         let metered = Metered::new(stream, Arc::clone(&self.metrics), id);
@@ -225,6 +226,7 @@ impl InboundHandler for Pipeline {
             )));
         };
 
+        let outbound = self.outbounds.revive(outbound).await?;
         // Иначе датаграммы (и DNS) терялись бы молча.
         let channel = if outbound.capabilities().udp {
             outbound.bind_udp().await?

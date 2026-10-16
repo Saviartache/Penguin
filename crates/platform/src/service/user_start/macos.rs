@@ -25,6 +25,12 @@ pub(super) fn allow(controller_uid: Option<u32>) -> PlatformResult<()> {
 }
 
 pub(super) fn request() -> PlatformResult<()> {
+    // Запрос видит только загруженное задание; загрузить его может лишь администратор.
+    if !crate::service::macos::loaded()? {
+        return Err(PlatformError::PermissionDenied(
+            "задание службы не загружено в launchd".to_owned(),
+        ));
+    }
     match std::fs::File::options()
         .write(true)
         .create(true)

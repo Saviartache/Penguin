@@ -112,6 +112,10 @@ impl Outbound for NaiveHttp2Outbound {
         Err(ProtocolError::Unsupported("UDP"))
     }
 
+    fn is_alive(&self) -> bool {
+        self.transport.is_alive()
+    }
+
     async fn close(&self) -> Result<(), ProtocolError> {
         self.transport.shutdown();
         Ok(())

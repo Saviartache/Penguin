@@ -125,6 +125,11 @@ impl PacketOutbound for MasqueIpOutbound {
         }
     }
 
+    // Чтение кончается вместе с потоком капсул.
+    fn is_alive(&self) -> bool {
+        !self.reader.is_finished()
+    }
+
     async fn close(&self) -> Result<(), ProtocolError> {
         self.reader.abort();
         Ok(())

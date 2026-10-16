@@ -195,6 +195,14 @@ impl Outbound for TrustTunnelOutbound {
         Ok(Box::new(manager.open()))
     }
 
+    // `407` живости не отнимает: пересоздание с тем же паролем ничего не даст.
+    fn is_alive(&self) -> bool {
+        !matches!(
+            *self.poisoned.lock().unwrap_or_else(|e| e.into_inner()),
+            Some(Poison::Disconnected(_))
+        )
+    }
+
     async fn close(&self) -> Result<(), ProtocolError> {
         self.health_task.abort();
         if let Some(manager) = self.udp.lock().await.take() {

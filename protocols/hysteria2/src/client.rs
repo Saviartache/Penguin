@@ -215,6 +215,10 @@ impl Outbound for Hysteria2Client {
         Ok(Box::new(self.udp.open()))
     }
 
+    fn is_alive(&self) -> bool {
+        self.transport.connection.close_reason().is_none()
+    }
+
     async fn close(&self) -> Result<(), ProtocolError> {
         self.udp.shutdown().await;
         self.transport

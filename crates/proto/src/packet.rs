@@ -40,6 +40,11 @@ pub trait PacketOutbound: Send + Sync + 'static {
     /// Ждёт следующий пакет из тоннеля.
     async fn recv(&self) -> Result<Bytes, ProtocolError>;
 
+    /// Живо ли направление; см. [`Outbound::is_alive`](crate::outbound::Outbound::is_alive).
+    fn is_alive(&self) -> bool {
+        true
+    }
+
     /// Закрывает направление и его фоновые задачи.
     async fn close(&self) -> Result<(), ProtocolError> {
         Ok(())

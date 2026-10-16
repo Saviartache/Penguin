@@ -100,6 +100,10 @@ impl Outbound for NaiveHttp3Outbound {
         Err(ProtocolError::Unsupported("UDP"))
     }
 
+    fn is_alive(&self) -> bool {
+        self.transport.link.is_alive()
+    }
+
     async fn close(&self) -> Result<(), ProtocolError> {
         self.transport.link.close(H3_NO_ERROR, b"").await;
         Ok(())

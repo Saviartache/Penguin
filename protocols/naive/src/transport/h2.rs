@@ -27,6 +27,11 @@ impl Http2Transport {
     pub fn shutdown(&self) {
         self.driver.abort();
     }
+
+    /// Задача, качающая кадры, ещё работает: с ней кончается и соединение.
+    pub fn is_alive(&self) -> bool {
+        !self.driver.is_finished()
+    }
 }
 
 /// Поднимает TLS и рукопожатие HTTP/2 с сервером.

@@ -193,6 +193,10 @@ impl Outbound for PacketTunnel {
         Ok(Box::new(self.inner.open_channel()?))
     }
 
+    fn is_alive(&self) -> bool {
+        self.inner.outbound.is_alive()
+    }
+
     async fn close(&self) -> Result<(), ProtocolError> {
         self.inner.cancel.cancel();
         self.inner.outbound.close().await

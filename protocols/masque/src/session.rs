@@ -60,6 +60,11 @@ impl Session {
         Ok(Flow::new(target.clone(), stream, h3.clone(), incoming))
     }
 
+    /// Соединение с прокси ещё живо.
+    pub fn is_alive(&self) -> bool {
+        self.transport.link.is_alive()
+    }
+
     /// Закрывает соединение с прокси (каналы обрываются вместе с ним).
     pub async fn close(&self) {
         self.transport.link.close(H3_NO_ERROR, b"").await;

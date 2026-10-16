@@ -212,7 +212,14 @@ pub async fn bring_up_service() -> ServiceOutcome {
     }
 
     match tokio::task::spawn_blocking(penguin_platform::service::user_start::request).await {
-        Ok(Ok(())) => wait_for_service().await,
+        Ok(Ok(())) => match wait_for_service().await {
+            ServiceOutcome::Ready => ServiceOutcome::Ready,
+            // Запрос принят, а служба молчит: без прав не починить, повторять — по кругу.
+            _ => {
+                tracing::warn!("служба не поднялась без прав — чиню установку с правами");
+                elevated_service(&["service", "ensure"]).await
+            }
+        },
         Ok(Err(err)) if err.needs_privileges() => {
             tracing::info!("разрешения запускать службу нет — права спрашиваются один раз");
             elevated_service(&["service", "ensure"]).await

@@ -164,6 +164,11 @@ impl PacketOutbound for WireguardOutbound {
         rx.recv().await.ok_or_else(|| WireguardError::Closed.into())
     }
 
+    // Водитель, умерев, роняет приёмник очереди.
+    fn is_alive(&self) -> bool {
+        !self.outbound_tx.is_closed()
+    }
+
     async fn close(&self) -> Result<(), ProtocolError> {
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
             let _ = tx.send(());
