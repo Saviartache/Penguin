@@ -109,8 +109,6 @@ impl AsyncRead for TcpStream {
                 },
 
                 Reading::Failed(err) => {
-                    // Ошибка отдаётся один раз: повторное чтение сломанного
-                    // потока — это конец данных, а не бесконечная ошибка.
                     return Poll::Ready(match err.take() {
                         Some(err) => Err(err),
                         None => Ok(()),
@@ -127,8 +125,6 @@ impl AsyncWrite for TcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // Явный вызов через трейт: у `SendStream` есть собственный `poll_write`
-        // с другим типом ошибки, и без уточнения выбирается именно он.
         AsyncWrite::poll_write(Pin::new(&mut self.send), cx, buf)
     }
 
@@ -137,10 +133,6 @@ impl AsyncWrite for TcpStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // `poll_shutdown` у quinn закрывает поток на запись и ждёт, пока
-        // отправленное будет подтверждено, — это и есть корректный аналог
-        // `FIN` в TCP. Обрывать поток здесь (`reset`) было бы ошибкой:
-        // приложение потеряло бы последние отправленные байты.
         AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx)
     }
 }

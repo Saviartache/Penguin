@@ -1,13 +1,5 @@
-//! Соединение QUIC до сервера.
-//!
-//! Устроено так же, как у Hysteria 2, и по той же причине: сокет берётся у
-//! [`Dialer`], а не открывается здесь. TUN перехватывает весь трафик машины, и
-//! сокет, открытый обычным способом, отправил бы пакеты в собственный, ещё не
-//! поднятый тоннель.
-//!
-//! Отличий от Hysteria 2 два, и оба — в сторону простоты: ни обфускации, ни
-//! смены порта у TUIC нет, поэтому берётся обычный сокет `quinn` со всей
-//! аппаратной поддержкой, какую даёт ядро.
+//! Соединение QUIC до сервера: сокет выдаёт [`Dialer`] (иначе TUN перехватит
+//! собственный трафик), обычный эндпойнт `quinn` с GSO/GRO.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -20,11 +12,7 @@ use quinn::{ClientConfig, Endpoint, EndpointConfig, TransportConfig, VarInt};
 use crate::config::{Congestion, TuicConfig};
 use crate::error::{TuicError, TuicResult};
 
-/// Установленное соединение вместе с его эндпойнтом.
-///
-/// Эндпойнт хранится рядом не для красоты: он владеет задачей ввода-вывода, и
-/// как только последняя ссылка на него исчезает, соединение умирает вместе с
-/// ней.
+/// Соединение вместе с эндпойнтом: без него соединение умирает.
 pub struct QuicTransport {
     /// Эндпойнт.
     pub endpoint: Endpoint,
@@ -39,8 +27,6 @@ pub async fn connect(
     server: SocketAddr,
     server_name: &str,
 ) -> TuicResult<QuicTransport> {
-    // Локальный адрес того же семейства, что и удалённый: сокет IPv4 до
-    // сервера IPv6 не достучится.
     let local = match server.ip() {
         IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
@@ -94,8 +80,7 @@ fn client_config(config: &TuicConfig) -> TuicResult<ClientConfig> {
 fn transport_config(config: &TuicConfig) -> TuicResult<TransportConfig> {
     let mut transport = TransportConfig::default();
 
-    // Датаграммы нужны и для полезного трафика, и для напоминаний о себе.
-    // Без явного размера окна quinn их принимать не станет.
+    // Без размера буфера quinn не принимает датаграммы.
     transport.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER));
     transport.datagram_send_buffer_size(DATAGRAM_BUFFER);
 
@@ -103,8 +88,7 @@ fn transport_config(config: &TuicConfig) -> TuicResult<TransportConfig> {
         .map_err(|_| TuicError::config("слишком большое время жизни соединения"))?;
     transport.max_idle_timeout(Some(idle.into()));
 
-    // Своё напоминание протокол шлёт сам, командой `Heartbeat`: пусть его
-    // видит и сервер, а не только QUIC. Поэтому встроенное выключено.
+    // Свой `Heartbeat` шлёт сессия.
     transport.keep_alive_interval(None);
 
     match config.congestion {
@@ -159,8 +143,6 @@ mod tests {
 
     #[test]
     fn the_client_announces_h3() {
-        // Сервер TUIC обязан выглядеть обычным сервером HTTP/3: любое другое
-        // объявление выдало бы его первым же пакетом рукопожатия.
         let config = config();
         let crypto = tls_client_config(&config.tls, config.default_alpn()).expect("собирается");
         assert_eq!(crypto.alpn_protocols, vec![b"h3".to_vec()]);

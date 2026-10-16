@@ -1,30 +1,10 @@
-//! Слой прикладных записей TLS 1.3 (RFC 8446 §5) поверх канала, доведённого
-//! [`crate::reality::handshake::connect`] до прикладных ключей, — то, чем
-//! наконец несутся байты VLESS.
+//! Прикладные записи TLS 1.3 (RFC 8446 §5) поверх канала с прикладными ключами.
 //!
-//! Шифрование здесь двойное, и намеренно: сам VLESS ничего не шифрует, а
-//! Reality обязана довести TLS 1.3 до конца, чтобы сервер не отличил её от
-//! настоящего сайта, — значит, байты VLESS по умолчанию идут внутри уже
-//! зашифрованного канала. Второй слой снимает [`crate::vision`], когда
-//! профиль просит `flow = "xtls-rprx-vision"`: он оборачивает этот тип
-//! снаружи и, увидев признак переключения, дальше пишет и читает байты
-//! напрямую через `RealityStream::io_mut`, минуя [`RecordKey::seal`]/
-//! [`RecordKey::open`] этого файла. Без `flow` этот тип работает как и
-//! раньше — Vision просто не встаёт между ним и вызывающим.
+//! Шифрование двойное: VLESS сам не шифрует, а Reality доводит TLS до конца. Второй слой
+//! снимает [`crate::vision`] через `RealityStream::io_mut`.
 //!
-//! # Чего этот слой не делает
-//!
-//! - **`KeyUpdate`** (RFC 8446 §4.6.3) не поддержан: если сервер его
-//!   пришлёт, чтение обрывается ошибкой
-//!   ([`RealityError::KeyUpdateNotSupported`]), а не продолжает молча
-//!   работать на ключах, которые сервер уже считает устаревшими.
-//! - **`NewSessionTicket`** (RFC 8446 §4.6.1, возобновление сессии) —
-//!   единственный кадр, который этот слой отбрасывает без ошибки. Билеты
-//!   этой реализацией нигде не хранятся и не предъявляются, а сервер шлёт
-//!   их сразу после своего `Finished`, не дожидаясь запроса; отбросить кадр
-//!   безопаснее, чем по ошибке принять его за данные VLESS. Не «молча» в
-//!   смысле AGENTS.md: вот этот абзац — запись о том, что кадр отброшен, а
-//!   не забытый случай.
+//! `KeyUpdate` не поддержан ([`RealityError::KeyUpdateNotSupported`]); `NewSessionTicket`
+//! отбрасывается: билеты не хранятся, а сервер шлёт их сам.
 
 use std::io;
 use std::pin::Pin;
@@ -39,33 +19,31 @@ use crate::reality::record::{
     RecordKey,
 };
 
-/// Максимальная длина открытого текста одной записи — RFC 8446 §5.1.
+/// Максимальный открытый текст записи (RFC 8446 §5.1).
 const MAX_PLAINTEXT_RECORD: usize = 16_384;
 
-/// `alert` — RFC 8446 §5 (Приложение B.2 у типов содержимого).
+/// `alert` (RFC 8446 §B.2).
 const CONTENT_TYPE_ALERT: u8 = 0x15;
-/// `NewSessionTicket` — RFC 8446 §B.3.
+/// `NewSessionTicket` (RFC 8446 §B.3).
 const HANDSHAKE_TYPE_NEW_SESSION_TICKET: u8 = 4;
-/// `KeyUpdate` — RFC 8446 §B.3.
+/// `KeyUpdate` (RFC 8446 §B.3).
 const HANDSHAKE_TYPE_KEY_UPDATE: u8 = 24;
 
-/// Сколько байт брать из сети за раз, пока не набралась целая запись.
-const CHUNK: usize = 4 * 1024;
+/// Сколько байт брать из сети за раз: запись целиком.
+const CHUNK: usize = 16 * 1024;
 
 /// Поток VLESS поверх прикладных записей TLS 1.3.
 pub struct RealityStream<S> {
     io: S,
     read_key: RecordKey,
     write_key: RecordKey,
-    /// Байты с провода, ещё не собранные в целую запись.
+    /// Байты с провода, не собранные в целую запись.
     read_raw: BytesMut,
-    /// Расшифрованные байты, ещё не отданные читателю.
+    /// Расшифрованные байты, не отданные читателю.
     read_plain: BytesMut,
-    /// Зашифрованная запись, ещё не дописанная целиком в `io`.
+    /// Запись, не дописанная в `io`.
     write_pending: BytesMut,
-    /// Сколько байт входа `poll_write` уже принял (запечатал в
-    /// `write_pending`) — возвращается вызывающему только после того, как
-    /// вся запись целиком ушла в `io`.
+    /// Сколько входа `poll_write` уже принято; возвращается, когда запись ушла целиком.
     write_accepted: usize,
 }
 
@@ -76,10 +54,7 @@ impl<S> std::fmt::Debug for RealityStream<S> {
 }
 
 impl<S> RealityStream<S> {
-    /// Оборачивает соединение, доведённое
-    /// [`crate::reality::handshake::connect`] до прикладных ключей: `read_key`
-    /// расшифровывает то, что шлёт сервер, `write_key` шифрует то, что
-    /// уходит ему.
+    /// Оборачивает соединение с прикладными ключами: `read_key` для сервера, `write_key` для нас.
     pub(crate) fn new(io: S, read_key: RecordKey, write_key: RecordKey) -> Self {
         Self {
             io,
@@ -92,39 +67,26 @@ impl<S> RealityStream<S> {
         }
     }
 
-    /// Прямой доступ к потоку под записями TLS 1.3 — то, ради чего
-    /// [`crate::vision`] вообще существует: как только он видит `Direct`, он
-    /// перестаёт звать [`Self::seal`]/[`Self::open`]-обёртку этого типа
-    /// (`poll_read`/`poll_write` ниже) и пишет/читает эти байты сюда прямо,
-    /// без второго слоя шифрования. До переключения этот метод не зовёт
-    /// никто, и канал работает ровно как без Vision.
+    /// Поток под записями: Vision после `Direct` пишет и читает сюда без второго слоя.
     pub(crate) fn io_mut(&mut self) -> &mut S {
         &mut self.io
     }
 
-    /// Забирает байты, уже снятые с провода, но ещё не собранные в целую
-    /// запись — то, что [`crate::vision`] обязан подобрать в момент
-    /// переключения в прямой режим: если сервер прислал первые байты
-    /// внутреннего TLS в одном пакете с последней зашифрованной записью, они
-    /// уже лежат здесь, а не в TLS-шифротексте, и пытаться расшифровать их
-    /// как запись — значит принять чужие данные за повреждённый шифротекст.
-    pub(crate) fn take_undecrypted_read_bytes(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.read_raw).to_vec()
+    /// Байты, снятые с провода, но не собранные в запись: при переключении они уже не шифротекст.
+    pub(crate) fn take_undecrypted_read_bytes(&mut self) -> BytesMut {
+        std::mem::take(&mut self.read_raw)
     }
 }
 
-/// Что случилось с одной цельной записью, снятой с провода.
+/// Итог одной записи, снятой с провода.
 enum RecordOutcome {
-    /// Настоящие данные VLESS — отдать читателю.
-    ApplicationData(Vec<u8>),
-    /// `change_cipher_spec` или `NewSessionTicket` — не данные, но и не
-    /// ошибка (см. документ модуля).
+    /// Данные VLESS.
+    ApplicationData(BytesMut),
+    /// `change_cipher_spec` или `NewSessionTicket`.
     Ignored,
 }
 
-/// Снимает с `raw` одну целую TLS-запись, если она уже накопилась, и
-/// расшифровывает её. `Ok(None)` — записи ещё не хватает, это обычное дело
-/// в потоке, а не ошибка.
+/// Снимает с `raw` одну целую запись и расшифровывает её на месте; `Ok(None)` — запись не набралась.
 fn take_record(
     raw: &mut BytesMut,
     key: &mut RecordKey,
@@ -132,16 +94,13 @@ fn take_record(
     if raw.len() < 5 {
         return Ok(None);
     }
-    let len = u16::from_be_bytes([raw[3], raw[4]]) as usize;
-    let total = 5 + len;
+    let total = 5 + usize::from(u16::from_be_bytes([raw[3], raw[4]]));
     if raw.len() < total {
         return Ok(None);
     }
 
-    let header = [raw[0], raw[1], raw[2], raw[3], raw[4]];
-    let mut body = raw[5..total].to_vec();
-    raw.advance(total);
-
+    let mut record = raw.split_to(total);
+    let header = [record[0], record[1], record[2], record[3], record[4]];
     match header[0] {
         CONTENT_TYPE_CHANGE_CIPHER_SPEC => return Ok(Some(RecordOutcome::Ignored)),
         CONTENT_TYPE_APPLICATION_DATA => {}
@@ -152,9 +111,14 @@ fn take_record(
         }
     }
 
-    let (inner_type, plaintext) = key.open(&header, &mut body)?;
+    let (inner_type, plaintext) = key.open_in_place(&header, &mut record[5..])?;
+    let plain_len = plaintext.len();
     match inner_type {
-        CONTENT_TYPE_APPLICATION_DATA => Ok(Some(RecordOutcome::ApplicationData(plaintext))),
+        CONTENT_TYPE_APPLICATION_DATA => {
+            record.advance(5);
+            record.truncate(plain_len);
+            Ok(Some(RecordOutcome::ApplicationData(record)))
+        }
         CONTENT_TYPE_HANDSHAKE => match plaintext.first() {
             Some(&HANDSHAKE_TYPE_NEW_SESSION_TICKET) => Ok(Some(RecordOutcome::Ignored)),
             Some(&HANDSHAKE_TYPE_KEY_UPDATE) => Err(RealityError::KeyUpdateNotSupported),
@@ -192,7 +156,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for RealityStream<S> {
 
             match take_record(&mut this.read_raw, &mut this.read_key) {
                 Ok(Some(RecordOutcome::ApplicationData(data))) => {
-                    this.read_plain = BytesMut::from(&data[..]);
+                    this.read_plain = data;
                     continue;
                 }
                 Ok(Some(RecordOutcome::Ignored)) => continue,
@@ -208,7 +172,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for RealityStream<S> {
             this.read_raw.truncate(before + filled);
 
             match result {
-                Poll::Ready(Ok(())) if filled == 0 => return Poll::Ready(Ok(())), // конец потока
+                Poll::Ready(Ok(())) if filled == 0 => return Poll::Ready(Ok(())),
                 Poll::Ready(Ok(())) => continue,
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                 Poll::Pending => return Poll::Pending,
@@ -230,11 +194,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RealityStream<S> {
             if take == 0 {
                 return Poll::Ready(Ok(0));
             }
-            let sealed = this
-                .write_key
-                .seal(CONTENT_TYPE_APPLICATION_DATA, &buf[..take])
+            this.write_key
+                .seal_into(
+                    CONTENT_TYPE_APPLICATION_DATA,
+                    &buf[..take],
+                    &mut this.write_pending,
+                )
                 .map_err(as_io)?;
-            this.write_pending = BytesMut::from(&sealed[..]);
             this.write_accepted = take;
         }
 
@@ -264,7 +230,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RealityStream<S> {
     }
 }
 
-/// Ошибка Reality в языке, на котором говорят [`AsyncRead`] и [`AsyncWrite`].
 fn as_io(err: RealityError) -> io::Error {
     match err {
         RealityError::Io(err) => err,
@@ -279,11 +244,7 @@ mod tests {
     use super::*;
     use crate::reality::cipher_suite::CipherSuite;
 
-    /// Пара ключей записи для «клиента» и «сервера» одного и того же
-    /// поддельного рукопожатия — какие получились бы у обеих сторон, если
-    /// бы они вывели их из общего секрета правильно. Тест не проверяет вывод
-    /// ключей (это RFC 8448 в `key_schedule.rs`/`record.rs`), только то, что
-    /// этот слой правильно нарезает и склеивает записи вокруг них.
+    /// Пара ключей клиента и сервера из общего секрета; вывод ключей проверен в `key_schedule.rs`.
     fn key_pair(cipher: CipherSuite, seed: u8) -> (RecordKey, RecordKey) {
         let key = vec![seed; cipher.key_len()];
         let iv = [seed; 12];
@@ -315,14 +276,11 @@ mod tests {
     async fn a_new_session_ticket_is_skipped_not_delivered_as_data() {
         let cipher = CipherSuite::Aes128GcmSha256;
         let (mut server_write, client_read) = key_pair(cipher, 3);
-        let client_write = ticket_key_placeholder(cipher); // клиент здесь не пишет
+        let client_write = ticket_key_placeholder(cipher);
 
         let (client_io, mut server_io) = duplex(8192);
         let mut client = RealityStream::new(client_io, client_read, client_write);
 
-        // NewSessionTicket поддельного сервера — тип рукопожатия 0x04. Оба
-        // кадра шлёт один и тот же ключ записи, по порядку (seq 0, потом 1)
-        // — как и было бы у настоящего сервера в одном потоке.
         let ticket = server_write
             .seal(CONTENT_TYPE_HANDSHAKE, &[0x04, 0, 0, 1, 0])
             .expect("шифруется");
@@ -338,9 +296,7 @@ mod tests {
         assert_eq!(&got, b"payload");
     }
 
-    /// `RecordKey` не умеет клонироваться (и не должен): для теста выше
-    /// нужен ключ записи для стороны, которая ничего не пишет, — этот же
-    /// шифр и ключ, что и у "сервера", читающего `ticket`.
+    /// Ключ для стороны, которая ничего не пишет.
     fn ticket_key_placeholder(cipher: CipherSuite) -> RecordKey {
         RecordKey::new(cipher, &vec![9; cipher.key_len()], [9; 12]).expect("ключ строится")
     }
@@ -354,7 +310,6 @@ mod tests {
         let (client_io, mut server_io) = duplex(8192);
         let mut client = RealityStream::new(client_io, read_key, write_key);
 
-        // KeyUpdate — тип рукопожатия 0x18, тело не разбирается до отказа.
         let update = sender_key
             .seal(CONTENT_TYPE_HANDSHAKE, &[0x18, 0, 0, 1, 0])
             .expect("шифруется");

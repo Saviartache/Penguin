@@ -1,40 +1,8 @@
-//! Поток, зашифрованный кусками.
+//! Поток, зашифрованный кусками: `[соль] ([длина+метка] [кусок+метка])*`.
 //!
-//! ```text
-//!  ──► [соль] [длина+метка] [кусок+метка] [длина+метка] [кусок+метка] ...
-//!       ^^^^^^
-//!       открытым текстом, один раз в начале
-//! ```
-//!
-//! # Почему длина шифруется отдельным куском
-//!
-//! Внутри — поток байт без границ, а AEAD работает сообщениями: расшифровать
-//! половину сообщения нельзя. Значит, до того как читать кусок, надо знать
-//! его длину, — и она приезжает своим маленьким сообщением на две байта.
-//! Каждое из двух тратит свой шаг счётчика.
-//!
-//! Отсюда правило, которое легко нарушить: длину, уже расшифрованную,
-//! **нельзя расшифровать заново**. Счётчик сдвинут, и вторая попытка даст не
-//! ту же длину, а разъехавшийся поток. Поэтому прочитанная длина живёт в
-//! поле `expect` до тех пор, пока не придёт весь кусок.
-//!
-//! # Два взгляда на одно и то же
-//!
-//! Наружу поток смотрит двумя способами. Обычный — [`AsyncRead`] и
-//! [`AsyncWrite`]: байты без границ, как их и ждёт всё остальное. Второй —
-//! [`ChunkStream::read_chunk`] и [`ChunkStream::write_chunk`]: кусок целиком.
-//!
-//! Второй нужен там, где граница куска что-то значит. У Snell датаграмма UDP
-//! — это ровно один кусок, и склеить две в одну означало бы отдать
-//! приложению не ту датаграмму. Байтовому потоку граница не нужна, и он её не
-//! видит; но потерять её нельзя, поэтому расшифрованное лежит очередью
-//! кусков, а не одним буфером.
-//!
-//! # Предел куска
-//!
-//! Длина пишется двумя байтами, но старшие два бита протокол оставляет себе:
-//! кусок не бывает длиннее [`MAX_CHUNK`]. Собеседник, объявивший больше, —
-//! это не тот протокол, и продолжать после такого нечего.
+//! Длина идёт отдельным сообщением и расшифровывается один раз: она хранится в
+//! `expect`, пока не придёт кусок. Граница куска нужна Snell (датаграмма UDP),
+//! поэтому расшифрованное лежит очередью кусков ([`ChunkStream::read_chunk`]).
 
 use std::collections::VecDeque;
 use std::io;
@@ -49,33 +17,32 @@ use crate::aead::cipher::{Cipher, sealed_len};
 use crate::aead::keying::Keying;
 use crate::error::{TransportError, TransportResult};
 
-/// Наибольший кусок, какой позволяет обрамление.
+/// Наибольший кусок (старшие два бита длины заняты протоколом).
 pub const MAX_CHUNK: usize = 0x3FFF;
 
-/// Сколько байт занимает зашифрованная длина: два байта и метка.
+/// Зашифрованная длина: два байта и метка.
 const LENGTH_FRAME: usize = 2 + TAG_LEN;
 
-/// Сколько байт брать из сокета за раз.
+/// Сколько читать из сокета за раз.
 const READ_CHUNK: usize = 16 * 1024;
 
-/// Сколько зашифрованного можно накопить, прежде чем перестать принимать новое.
+/// Порог накопленного к отправке, после которого сначала сбрасываем в сокет.
 const OUT_LIMIT: usize = 256 * 1024;
 
-/// Поток, зашифрованный кусками, поверх обычного соединения.
+/// Поток, зашифрованный кусками, поверх соединения.
 pub struct ChunkStream<S> {
     io: S,
     keying: Keying,
-    /// Шифр на отправку. Готов сразу: соль мы бросили сами.
     send: Cipher,
-    /// Шифр на приём. `None`, пока собеседник не прислал свою соль.
+    /// `None`, пока не пришла соль собеседника.
     recv: Option<Cipher>,
-    /// Длина куска, уже расшифрованная и ещё не использованная.
+    /// Уже расшифрованная длина текущего куска.
     expect: Option<usize>,
     /// Зашифрованное, ещё не ушедшее в сокет.
     out: BytesMut,
-    /// Сырое из сокета, ещё не разобранное.
+    /// Сырое, ещё не разобранное.
     incoming: BytesMut,
-    /// Расшифрованные куски, ещё не отданные читателю.
+    /// Расшифрованные куски, ещё не отданные.
     ready: VecDeque<BytesMut>,
 }
 
@@ -126,9 +93,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ChunkStream<S> {
         Poll::Ready(Ok(()))
     }
 
-    /// Забирает из накопленного столько, сколько получится: соль, длину, кусок.
-    ///
-    /// `Ok(false)` — байт пока не хватает.
+    /// Один шаг разбора (соль, длина или кусок); `Ok(false)` — байт не хватает.
     fn take_step(&mut self) -> TransportResult<bool> {
         if self.recv.is_none() {
             let salt_len = self.keying.salt_len();
@@ -156,8 +121,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ChunkStream<S> {
                 };
 
                 let length = usize::from(u16::from_be_bytes(*raw));
-                // Ноль означал бы кусок без данных, то есть шаг счётчика
-                // впустую; больше предела — что на том конце не тот протокол.
                 if length == 0 || length > MAX_CHUNK {
                     return Err(TransportError::malformed(format!(
                         "кусок в {length} байт: обрамление такого не допускает"
@@ -180,14 +143,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ChunkStream<S> {
         }
     }
 
-    /// Ждём ли мы сейчас продолжения того, что уже начали читать.
     fn mid_message(&self) -> bool {
         self.expect.is_some() || !self.incoming.is_empty()
     }
 
-    /// Двигает разбор, пока не появится кусок или не кончится поток.
-    ///
-    /// `Ok(false)` — поток кончился, и кончился чисто.
+    /// Двигает разбор до готового куска; `Ok(false)` — чистый конец потока.
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<bool>> {
         loop {
             if !self.ready.is_empty() {
@@ -210,9 +170,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ChunkStream<S> {
 
             match result {
                 Poll::Ready(Ok(())) if filled == 0 => {
-                    // Оборванный на середине кусок — это потерянные данные, и
-                    // отдать их наверх как обычный конец потока значит
-                    // показать приложению неполный ответ как полный.
                     return Poll::Ready(if self.mid_message() {
                         Err(io::Error::from(io::ErrorKind::UnexpectedEof))
                     } else {
@@ -226,10 +183,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ChunkStream<S> {
         }
     }
 
-    /// Читает **один кусок целиком**.
-    ///
-    /// `Ok(None)` — поток кончился. Нужен там, где граница куска что-то
-    /// значит: у Snell один кусок — это одна датаграмма UDP.
+    /// Читает один кусок целиком; `Ok(None)` — конец потока.
     pub async fn read_chunk(&mut self) -> io::Result<Option<BytesMut>> {
         std::future::poll_fn(|cx| match self.poll_ready(cx) {
             Poll::Ready(Ok(true)) => Poll::Ready(Ok(self.ready.pop_front())),
@@ -240,10 +194,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ChunkStream<S> {
         .await
     }
 
-    /// Отправляет **один кусок целиком** и доводит его до сокета.
+    /// Отправляет один кусок целиком и доводит его до сокета.
     pub async fn write_chunk(&mut self, payload: &[u8]) -> io::Result<()> {
-        let sealed = seal_chunk(&mut self.send, payload).map_err(as_io)?;
-        self.out.extend_from_slice(&sealed);
+        seal_chunk_into(&mut self.send, payload, &mut self.out).map_err(as_io)?;
 
         std::future::poll_fn(|cx| self.poll_drain(cx)).await?;
         std::future::poll_fn(|cx| Pin::new(&mut self.io).poll_flush(cx)).await
@@ -260,7 +213,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for ChunkStream<S> {
 
         match this.poll_ready(cx) {
             Poll::Ready(Ok(true)) => {}
-            // Конец потока: ноль прочитанных байт и есть его признак.
             Poll::Ready(Ok(false)) => return Poll::Ready(Ok(())),
             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
             Poll::Pending => return Poll::Pending,
@@ -287,8 +239,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ChunkStream<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
 
-        // Накопилось слишком много — сначала отдать это в сокет. Иначе
-        // медленный сервер набивал бы память со скоростью записи приложения.
         if this.out.len() >= OUT_LIMIT {
             match this.poll_drain(cx) {
                 Poll::Ready(Ok(())) => {}
@@ -301,11 +251,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ChunkStream<S> {
         }
 
         let take = buf.len().min(MAX_CHUNK);
-        let sealed = seal_chunk(&mut this.send, &buf[..take]).map_err(as_io)?;
-        this.out.extend_from_slice(&sealed);
+        seal_chunk_into(&mut this.send, &buf[..take], &mut this.out).map_err(as_io)?;
 
-        // Кусок собран и принадлежит нам: байты можно считать записанными, а
-        // сокет догонит на `poll_flush`.
+        // Ошибка и Pending проявятся на следующей записи или `poll_flush`.
         let _ = this.poll_drain(cx);
         Poll::Ready(Ok(take))
     }
@@ -327,12 +275,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ChunkStream<S> {
     }
 }
 
-/// Шифрует один кусок: длину отдельным сообщением, данные — следующим.
-///
-/// Свободная функция, потому что тем же кадром уходит и первый кусок с
-/// заголовком протокола, а собирает его сам протокол — до того, как поток
-/// вообще появился.
-pub fn seal_chunk(cipher: &mut Cipher, plain: &[u8]) -> TransportResult<Vec<u8>> {
+/// Шифрует кусок: длину и данные отдельными сообщениями, дописывает в `out`.
+pub fn seal_chunk_into(
+    cipher: &mut Cipher,
+    plain: &[u8],
+    out: &mut BytesMut,
+) -> TransportResult<()> {
     let length = u16::try_from(plain.len())
         .ok()
         .filter(|_| plain.len() <= MAX_CHUNK)
@@ -340,9 +288,16 @@ pub fn seal_chunk(cipher: &mut Cipher, plain: &[u8]) -> TransportResult<Vec<u8>>
             TransportError::malformed(format!("кусок в {} байт длиннее предела", plain.len()))
         })?;
 
-    let mut out = cipher.seal(&length.to_be_bytes())?;
-    out.extend_from_slice(&cipher.seal(plain)?);
-    Ok(out)
+    out.reserve(LENGTH_FRAME + sealed_len(plain.len()));
+    cipher.seal_into(&length.to_be_bytes(), out)?;
+    cipher.seal_into(plain, out)
+}
+
+/// Как [`seal_chunk_into`], но возвращает новый буфер (первый кусок с заголовком).
+pub fn seal_chunk(cipher: &mut Cipher, plain: &[u8]) -> TransportResult<Vec<u8>> {
+    let mut out = BytesMut::new();
+    seal_chunk_into(cipher, plain, &mut out)?;
+    Ok(out.to_vec())
 }
 
 /// Ошибка в языке, на котором говорят [`AsyncRead`] и [`AsyncWrite`].
@@ -362,8 +317,7 @@ mod tests {
     use super::*;
     use crate::aead::algorithm::Algorithm;
 
-    /// Ключ здесь — это соль, растянутая до нужной длины: проверяется кадр, а
-    /// не вывод ключа, и настоящий вывод только мешал бы читать тест.
+    /// Ключ — соль, обрезанная до нужной длины: проверяется кадр, не вывод.
     fn keying() -> Keying {
         Keying::new(
             Algorithm::Aes128Gcm,
@@ -404,8 +358,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_boundary_between_chunks_survives_when_it_is_asked_for() {
-        // Ради этого очередь и заведена: у Snell один кусок — это одна
-        // датаграмма, и склеить две значит отдать приложению не ту.
         let (mut stream, mut peer) = pair();
         peer.write_all(&from_peer(&[b"first", b"second"]))
             .await
@@ -423,8 +375,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_byte_view_does_not_lose_a_chunk_it_did_not_finish() {
-        // Короткое чтение забирает часть куска; остаток обязан достаться
-        // следующему чтению, а не пропасть вместе с границей.
         let (mut stream, mut peer) = pair();
         peer.write_all(&from_peer(&[b"abcdef"]))
             .await
@@ -459,8 +409,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_wrong_key_looks_like_a_refusal() {
-        // Метка не сошлась — значит либо пароль не тот, либо правка по
-        // дороге. Различить нельзя, и повторять бессмысленно.
         let (mut stream, mut peer) = pair();
         let mut wire = from_peer(&[b"payload"]);
         let last = wire.len() - 1;
@@ -474,7 +422,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stream_cut_mid_chunk_is_an_error() {
-        // Неполный ответ, отданный как полный, — это тихо испорченные данные.
         let (mut stream, mut peer) = pair();
         let wire = from_peer(&[b"payload"]);
         peer.write_all(&wire[..wire.len() - 3])
@@ -499,7 +446,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_absurd_length_is_refused() {
-        // Длина больше предела означает, что на том конце не тот протокол.
         let (mut stream, mut peer) = pair();
         let salt = [2u8; 16];
         let mut cipher = keying().cipher(&salt).expect("ключ выводится");
@@ -521,7 +467,6 @@ mod tests {
             .expect("пишется");
         stream.flush().await.expect("уходит");
 
-        // Два куска: полный и остаток. Каждый со своей длиной и меткой.
         let mut wire = vec![0u8; 2 * LENGTH_FRAME + sealed_len(MAX_CHUNK) + sealed_len(100)];
         peer.read_exact(&mut wire).await.expect("читается");
     }
@@ -534,8 +479,6 @@ mod tests {
         let mut wire = vec![0u8; LENGTH_FRAME + sealed_len(b"datagram".len())];
         peer.read_exact(&mut wire).await.expect("читается");
 
-        // И ничего сверх того: следующий байт придёт только со следующим
-        // куском.
         let mut extra = [0u8; 1];
         assert!(
             tokio::time::timeout(

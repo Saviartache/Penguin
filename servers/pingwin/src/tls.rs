@@ -1,13 +1,12 @@
 //! QUIC сервера: сертификат из PEM, ALPN `h3`, датаграммы.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use quinn::crypto::rustls::QuicServerConfig;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::config::ServerConfig;
@@ -41,11 +40,9 @@ pub fn server_config(config: &ServerConfig) -> Result<quinn::ServerConfig> {
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
-    let file =
-        File::open(path).with_context(|| format!("не читается сертификат `{}`", path.display()))?;
-    let certs = rustls_pemfile::certs(&mut BufReader::new(file))
-        .collect::<Result<Vec<_>, _>>()
-        .with_context(|| format!("сертификат `{}` не разбирается", path.display()))?;
+    let certs = CertificateDer::pem_file_iter(path)
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .with_context(|| format!("сертификат `{}` не читается", path.display()))?;
     if certs.is_empty() {
         anyhow::bail!("в `{}` нет сертификатов", path.display());
     }
@@ -53,9 +50,6 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let file = File::open(path)
-        .with_context(|| format!("не читается ключ сертификата `{}`", path.display()))?;
-    rustls_pemfile::private_key(&mut BufReader::new(file))
-        .with_context(|| format!("ключ `{}` не разбирается", path.display()))?
-        .with_context(|| format!("в `{}` нет закрытого ключа", path.display()))
+    PrivateKeyDer::from_pem_file(path)
+        .with_context(|| format!("ключ `{}` не читается", path.display()))
 }

@@ -1,5 +1,4 @@
-//! Направление режима DPI: то же прямое соединение, но с планом на первой
-//! посылке.
+//! Направление режима DPI: прямое соединение с планом обхода на первой посылке.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -48,23 +47,22 @@ impl DpiOutbound {
             dialer,
         })
     }
+}
 
-    /// Превращает адрес назначения в числовой, разрешая имя при необходимости.
-    ///
-    /// Разрешает его **этот** клиент, а не «та сторона»: той стороны здесь
-    /// нет, есть сам сайт.
-    async fn resolve(&self, target: &SocketAddress) -> Result<SocketAddr, ProtocolError> {
-        match &target.host {
-            Address::Ip(ip) => Ok(SocketAddr::new(*ip, target.port)),
-            Address::Domain(domain) => self
-                .dialer
-                .resolve(domain)
-                .await?
-                .into_iter()
-                .next()
-                .map(|ip| SocketAddr::new(ip, target.port))
-                .ok_or_else(|| ProtocolError::Unreachable(domain.clone())),
-        }
+/// Числовой адрес назначения; имя разрешает сам клиент: «той стороны» нет, есть сайт.
+pub(crate) async fn resolve(
+    dialer: &dyn Dialer,
+    target: &SocketAddress,
+) -> Result<SocketAddr, ProtocolError> {
+    match &target.host {
+        Address::Ip(ip) => Ok(SocketAddr::new(*ip, target.port)),
+        Address::Domain(domain) => dialer
+            .resolve(domain)
+            .await?
+            .into_iter()
+            .next()
+            .map(|ip| SocketAddr::new(ip, target.port))
+            .ok_or_else(|| ProtocolError::Unreachable(domain.clone())),
     }
 }
 
@@ -83,7 +81,6 @@ impl Outbound for DpiOutbound {
             udp: true,
             multiplex: false,
             port_hopping: false,
-            // Имя разрешается здесь: «та сторона» — это и есть сам сайт.
             remote_dns: false,
         }
     }
@@ -92,26 +89,18 @@ impl Outbound for DpiOutbound {
         &self,
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
-        // Имя нужно обходу: от него считаются точки разреза. Его приносит
-        // либо обратное отображение fake-IP, либо опознание в потоке
-        // (`engine::sniff`); нет имени — режущих ориентиров тоже нет, и
-        // посылка уйдёт целиком.
+        // Имя даёт точки разреза (fake-IP или `engine::sniff`); без него посылка уходит целиком
         let host = target.host.as_domain().map(str::to_owned);
         if host.is_none() {
-            // Не ошибка, но и не обход: соединение уйдёт как обычное. Сказать
-            // об этом надо здесь — иначе «режим включён, а сайт не открылся»
-            // ищут в сети.
             tracing::debug!(%target, "имени узла нет — резать посылку не по чему");
         }
-        let addr = self.resolve(target).await?;
+        let addr = resolve(&*self.dialer, target).await?;
         let stream = self.dialer.dial_tcp(addr).await?;
         Ok(Box::new(FirstFlight::new(stream, self.plan.clone(), host)))
     }
 
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
-        // IPv6-сокет с двойным стеком принял бы и IPv4, но включать его
-        // приходится вручную и не везде одинаково. Проще и надёжнее взять
-        // IPv4: подавляющее большинство UDP-трафика приложений — он.
+        // IPv4: двойной стек включается не везде одинаково
         let local = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
         let socket = self.dialer.bind_udp(local).await?;
         Ok(Box::new(DirectDatagram::new(

@@ -1,32 +1,17 @@
 //! Кэш ответов с учётом TTL.
 //!
-//! Приложения спрашивают одно и то же постоянно: браузер открывает страницу и
-//! разрешает десяток имён, часть из которых он спрашивал минуту назад. Без
-//! кэша каждый такой запрос уходил бы наружу и добавлял к загрузке страницы
-//! оборот до сервера.
-//!
-//! TTL берётся из самого ответа — так велит DNS. Нижняя граница нужна, чтобы
-//! сервер с нулевым TTL не превращал кэш в украшение; верхней нет: запись
-//! всё равно вытеснится по объёму.
+//! TTL берётся из ответа; нижняя граница не даёт серверу с нулевым TTL свести
+//! кэш на нет. Верхней нет: запись вытеснится по объёму.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use hickory_proto::rr::RecordType;
 use parking_lot::Mutex;
+
+use crate::message::RecordType;
 
 /// Сколько ответов помнить.
 pub const MAX_ENTRIES: usize = 4096;
-
-/// Ключ: имя и тип записи.
-///
-/// Тип обязателен: `A` и `AAAA` для одного имени — разные ответы, и путать
-/// их значило бы отдавать приложению адрес не того семейства.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Key {
-    name: String,
-    record_type: RecordType,
-}
 
 #[derive(Debug, Clone)]
 struct Entry {
@@ -34,10 +19,51 @@ struct Entry {
     expires: Instant,
 }
 
-/// Кэш ответов DNS.
+/// Имена по типам записи: поиск по `&str` обходится без аллокации ключа.
+#[derive(Debug, Default)]
+struct Store {
+    by_type: HashMap<RecordType, HashMap<String, Entry>>,
+    len: usize,
+}
+
+impl Store {
+    fn remove(&mut self, name: &str, record_type: RecordType) {
+        if let Some(names) = self.by_type.get_mut(&record_type)
+            && names.remove(name).is_some()
+        {
+            self.len -= 1;
+        }
+    }
+
+    /// Выбрасывает просроченное, а если все свежие — ближайшие к истечению.
+    fn evict(&mut self) {
+        let now = Instant::now();
+        for names in self.by_type.values_mut() {
+            names.retain(|_, entry| entry.expires > now);
+        }
+        self.recount();
+
+        while self.len >= MAX_ENTRIES {
+            let soonest = self
+                .by_type
+                .iter()
+                .flat_map(|(ty, names)| names.iter().map(move |(name, e)| (e.expires, *ty, name)))
+                .min_by_key(|(expires, ..)| *expires)
+                .map(|(_, ty, name)| (ty, name.clone()));
+            let Some((ty, name)) = soonest else { break };
+            self.remove(&name, ty);
+        }
+    }
+
+    fn recount(&mut self) {
+        self.len = self.by_type.values().map(HashMap::len).sum();
+    }
+}
+
+/// Кэш ответов DNS; ключ — имя и тип записи.
 #[derive(Debug, Default)]
 pub struct DnsCache {
-    entries: Mutex<HashMap<Key, Entry>>,
+    store: Mutex<Store>,
     min_ttl: u32,
 }
 
@@ -45,58 +71,46 @@ impl DnsCache {
     /// Заводит кэш с нижней границей времени жизни.
     pub fn new(min_ttl: u32) -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            store: Mutex::new(Store::default()),
             min_ttl,
         }
     }
 
-    /// Ответ из кэша.
+    /// Ответ из кэша; просроченный убирается сразу.
     pub fn get(&self, name: &str, record_type: RecordType) -> Option<Vec<u8>> {
-        let key = Key {
-            name: name.to_owned(),
-            record_type,
-        };
-        let mut entries = self.entries.lock();
-
-        let entry = entries.get(&key)?;
-        if entry.expires <= Instant::now() {
-            // Просроченное убирается сразу: иначе оно копится до вытеснения
-            // по объёму и занимает место живых записей.
-            entries.remove(&key);
-            return None;
+        let mut store = self.store.lock();
+        let entry = store.by_type.get(&record_type)?.get(name)?;
+        if entry.expires > Instant::now() {
+            return Some(entry.response.clone());
         }
-        Some(entry.response.clone())
+        store.remove(name, record_type);
+        None
     }
 
-    /// Запоминает ответ.
-    ///
-    /// `ttl` — из самого ответа; ниже настроенной границы не опускается.
+    /// Запоминает ответ; `ttl` из ответа не опускается ниже границы кэша.
     pub fn insert(&self, name: &str, record_type: RecordType, response: Vec<u8>, ttl: u32) {
         let ttl = ttl.max(self.min_ttl);
         if ttl == 0 {
             return;
         }
+        let entry = Entry {
+            response,
+            expires: Instant::now() + Duration::from_secs(u64::from(ttl)),
+        };
 
-        let mut entries = self.entries.lock();
-        if entries.len() >= MAX_ENTRIES {
-            Self::evict(&mut entries);
+        let mut store = self.store.lock();
+        if store.len >= MAX_ENTRIES {
+            store.evict();
         }
-
-        entries.insert(
-            Key {
-                name: name.to_owned(),
-                record_type,
-            },
-            Entry {
-                response,
-                expires: Instant::now() + Duration::from_secs(u64::from(ttl)),
-            },
-        );
+        let names = store.by_type.entry(record_type).or_default();
+        if names.insert(name.to_owned(), entry).is_none() {
+            store.len += 1;
+        }
     }
 
     /// Сколько ответов помнится.
     pub fn len(&self) -> usize {
-        self.entries.lock().len()
+        self.store.lock().len
     }
 
     /// Кэш пуст.
@@ -104,29 +118,9 @@ impl DnsCache {
         self.len() == 0
     }
 
-    /// Забывает всё.
-    ///
-    /// Вызывается при переподключении: ответы прежнего сервера могли
-    /// отличаться от ответов нового.
+    /// Забывает всё: при переподключении ответы прежнего сервера могут не подойти.
     pub fn clear(&self) {
-        self.entries.lock().clear();
-    }
-
-    fn evict(entries: &mut HashMap<Key, Entry>) {
-        let now = Instant::now();
-        entries.retain(|_, entry| entry.expires > now);
-
-        // Просроченного не нашлось — записи свежие, их просто много.
-        while entries.len() >= MAX_ENTRIES {
-            let Some(soonest) = entries
-                .iter()
-                .min_by_key(|(_, e)| e.expires)
-                .map(|(key, _)| key.clone())
-            else {
-                break;
-            };
-            entries.remove(&soonest);
-        }
+        *self.store.lock() = Store::default();
     }
 }
 
@@ -147,8 +141,6 @@ mod tests {
 
     #[test]
     fn record_type_is_part_of_the_key() {
-        // `A` и `AAAA` для одного имени — разные ответы; путать их значит
-        // отдать приложению адрес не того семейства.
         let cache = cache();
         cache.insert("example.com", RecordType::A, vec![1], 60);
         assert!(cache.get("example.com", RecordType::AAAA).is_none());
@@ -156,7 +148,6 @@ mod tests {
 
     #[test]
     fn zero_ttl_is_not_cached() {
-        // Ответ с нулевым TTL сервер просит не запоминать.
         let cache = cache();
         cache.insert("example.com", RecordType::A, vec![1], 0);
         assert!(cache.get("example.com", RecordType::A).is_none());
@@ -164,7 +155,6 @@ mod tests {
 
     #[test]
     fn minimum_ttl_lifts_short_answers() {
-        // Сервер с нулевым TTL не должен превращать кэш в украшение.
         let cache = DnsCache::new(60);
         cache.insert("example.com", RecordType::A, vec![1], 0);
         assert!(cache.get("example.com", RecordType::A).is_some());
@@ -176,9 +166,11 @@ mod tests {
         cache.insert("example.com", RecordType::A, vec![1], 1);
 
         // Подделываем истечение, не дожидаясь секунды.
-        cache.entries.lock().values_mut().for_each(|entry| {
-            entry.expires = Instant::now() - Duration::from_secs(1);
-        });
+        for names in cache.store.lock().by_type.values_mut() {
+            for entry in names.values_mut() {
+                entry.expires = Instant::now() - Duration::from_secs(1);
+            }
+        }
 
         assert!(cache.get("example.com", RecordType::A).is_none());
         // Просроченное убирается сразу, а не копится до вытеснения.
@@ -192,6 +184,15 @@ mod tests {
             cache.insert(&format!("host{step}.example"), RecordType::A, vec![1], 3600);
         }
         assert!(cache.len() <= MAX_ENTRIES, "кэш вырос до {}", cache.len());
+    }
+
+    #[test]
+    fn overwrite_does_not_grow_the_count() {
+        let cache = cache();
+        cache.insert("example.com", RecordType::A, vec![1], 60);
+        cache.insert("example.com", RecordType::A, vec![2], 60);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get("example.com", RecordType::A), Some(vec![2]));
     }
 
     #[test]

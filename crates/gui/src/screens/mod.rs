@@ -1,8 +1,4 @@
-//! Экраны окна.
-//!
-//! Каждый экран — чистая функция от состояния: `view(&State) -> Element`.
-//! Никакого своего состояния у экранов нет; всё, что они показывают, лежит в
-//! [`crate::app::State`], а всё, что они меняют, уходит сообщением.
+//! Экраны окна: чистые функции `view(&State) -> Element`, своего состояния нет.
 
 pub mod compact;
 pub mod logs;
@@ -34,7 +30,6 @@ mod tests {
 
     #[test]
     fn every_screen_renders() {
-        // Экран, который не собирается, — это вкладка, открывающая пустоту.
         let mut state = State::default();
         for screen in Screen::ALL {
             state.screen = screen;

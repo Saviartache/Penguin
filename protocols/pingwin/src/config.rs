@@ -1,10 +1,4 @@
 //! Параметры: адрес сервера, имя в его сертификате, открытый ключ, пароль.
-//!
-//! # Почему и сертификат, и ключ
-//!
-//! Сертификат доказывает имя, ключ — что на том конце именно наш сервер.
-//! Чтобы подменить сервер, нужны оба: сертификата, выписанного по ошибке или
-//! по принуждению, мало, а ключ без сертификата не пройдёт TLS.
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
@@ -15,8 +9,6 @@ use crate::error::{PingwinError, PingwinResult};
 use crate::wire::keys::PUBLIC_LEN;
 
 /// Настройки подключения к серверу Pingwin.
-///
-/// `Debug` реализован вручную ниже — производный вывел бы пароль в журнал.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PingwinConfig {
@@ -45,7 +37,6 @@ impl PingwinConfig {
         let endpoint: ServerEndpoint = raw
             .parse()
             .map_err(|e| PingwinError::config(format!("адрес сервера `{raw}`: {e}")))?;
-        // Соединение одно на профиль и живёт долго: смене порта нечего менять.
         if endpoint.ports.is_hopping() {
             return Err(PingwinError::config(
                 "pingwin не умеет смену порта: укажите один порт",
@@ -72,8 +63,6 @@ impl PingwinConfig {
         }
         match self.endpoint()?.0 {
             Address::Domain(domain) => Ok(domain),
-            // Сертификат на адрес почти не выписывают: без имени профиль не
-            // подключится, и сказать это надо в форме.
             Address::Ip(ip) => Err(PingwinError::config(format!(
                 "сервер задан адресом {ip}: укажите имя из его сертификата"
             ))),
@@ -105,8 +94,7 @@ impl PingwinConfig {
     }
 }
 
-// Пароль не попадает в журнал ни целиком, ни частями (`AGENTS.md` §5.2).
-// Ключ сервера открытый: он и так стоит в ссылке.
+// Пароль скрыт (`AGENTS.md` §5.2).
 impl std::fmt::Debug for PingwinConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PingwinConfig")

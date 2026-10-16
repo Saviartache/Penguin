@@ -7,14 +7,8 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
-/// Поля формы в том порядке, в каком они показываются.
-///
-/// Флага TLS здесь нет, в отличие от `http`/`https`: смысл протокола в том,
-/// что снаружи соединение неотличимо от обычного HTTPS до веб-сайта, и
-/// разговор в открытую снял бы маскировку целиком. TLS тут всегда.
-///
-/// Имя и пароль необязательны: сервер без учётных данных бывает — редко, но
-/// бывает, — и требовать их значило бы не пускать к нему.
+/// Флага TLS нет: протокол неотличим от HTTPS, открытый разговор снял бы маску.
+/// Имя и пароль необязательны: сервер без учётных данных бывает.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -36,11 +30,7 @@ pub static HTTP2: ProtocolSpec = ProtocolSpec {
     note: None,
 };
 
-/// `CONNECT` поверх HTTP/3.
-///
-/// Тот же протокол и тот же крейт, другой перенос: под HTTP/3 лежит QUIC, и
-/// сеть с потерями он переживает лучше. Отдельной записью, а не полем выбора,
-/// потому что сервер слушает их на разных портах и настраивает по-разному.
+/// `CONNECT` поверх HTTP/3 (QUIC). Отдельной записью: сервер слушает на другом порту.
 pub static HTTP3: ProtocolSpec = ProtocolSpec {
     id: "http3",
     label: "NaiveProxy (HTTP/3)",
@@ -50,16 +40,9 @@ pub static HTTP3: ProtocolSpec = ProtocolSpec {
     note: None,
 };
 
-/// Как ссылка ложится в поля.
-///
-/// ```text
-///  naive+https://имя:пароль@хост:порт?sni=…#имя     — HTTP/2
-///  naive+quic://имя:пароль@хост:порт?sni=…#имя      — HTTP/3
-/// ```
-///
-/// Схемы те же, что у NekoBox и v2rayN. Двоеточие в userinfo — разделитель,
-/// как у `socks5://`: это Basic-авторизация, где имя и пароль раздельны.
-/// `padding` и `extra-headers` не переносятся: полей под них нет.
+/// Как ссылка ложится в поля: `naive+https://имя:пароль@хост:порт?sni=…#имя`
+/// (HTTP/2) и `naive+quic://…` (HTTP/3), схемы NekoBox и v2rayN. Двоеточие в
+/// userinfo — разделитель (Basic). `padding` и `extra-headers` не переносятся.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let mut values = vec![("server", link.server(DEFAULT_PORT))];
 
@@ -85,15 +68,11 @@ mod tests {
 
     #[test]
     fn there_is_no_tls_switch_because_tls_is_the_whole_point() {
-        // Разговор в открытую снял бы маскировку целиком, ради которой
-        // протокол и придуман.
         assert!(FIELDS.iter().all(|field| field.key != "tls"));
     }
 
     #[test]
     fn neither_the_name_nor_the_password_is_required() {
-        // Сервер без учётных данных бывает, и требовать их значило бы не
-        // пускать к нему.
         for key in ["username", "password"] {
             let field = FIELDS
                 .iter()
@@ -105,8 +84,6 @@ mod tests {
 
     #[test]
     fn both_transports_ask_for_the_same_things() {
-        // Протокол один, различие только в переносе: разойдись формы полями —
-        // профиль, переписанный с одной на другую, потерял бы настройки.
         assert_eq!(HTTP2.fields.len(), HTTP3.fields.len());
         assert_ne!(HTTP2.id, HTTP3.id);
     }
@@ -142,7 +119,6 @@ mod tests {
 
     #[test]
     fn there_is_no_udp_switch_because_there_is_no_udp() {
-        // У `CONNECT` датаграмм нет ни поверх HTTP/2, ни поверх HTTP/3.
         assert!(FIELDS.iter().all(|field| field.key != "udp"));
     }
 }

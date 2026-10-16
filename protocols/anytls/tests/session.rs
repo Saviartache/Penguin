@@ -1,16 +1,9 @@
 //! Сессия против поддельного сервера.
 //!
-//! Проверяется то, чего не видно по отдельным файлам: что настройки, открытие
-//! потока и данные уезжают в правильном порядке, что дополнение при этом
-//! никому не мешает, и что ответы сервера доходят до потока.
-//!
-//! Сервер здесь — половина [`tokio::io::duplex`], которая читает кадры и
-//! отвечает кадрами. Настоящего TLS нет и не нужно: своего шифрования у
-//! AnyTLS не бывает, и всё, что ниже кадров, — чужая забота.
+//! Порядок настроек, открытия и данных, дополнение и ответы сервера. Сервер —
+//! половина [`tokio::io::duplex`], без TLS.
 
-// Проверка падает там, где сервер повёл себя не по протоколу: это не
-// «ошибка, которую надо обработать», а провалившийся тест. Запрет `expect`
-// заведён ради пути соединения, где паника рвёт тоннель.
+// `expect` в тестах допустим: паника — провал теста.
 #![allow(clippy::expect_used)]
 
 use std::sync::{Arc, Weak};
@@ -85,7 +78,6 @@ async fn the_session_introduces_itself_before_anything_else() {
     let settings = Map::parse(&data);
     assert_eq!(settings.get("v"), Some("2"));
     assert_eq!(settings.get("client"), Some("penguin/тест"));
-    // Отпечаток схемы по умолчанию: по нему сервер решает, присылать ли свою.
     assert_eq!(
         settings.get("padding-md5"),
         Some("75cff2ad89aadf5e257059ee571ebe11")
@@ -100,9 +92,7 @@ async fn the_session_introduces_itself_before_anything_else() {
 
 #[tokio::test]
 async fn the_first_record_carries_the_beginning_of_the_conversation_at_once() {
-    // Настройки, открытие потока и первые данные обязаны уехать одной
-    // записью: схема дополнения считает их одним пакетом, и по отдельности
-    // они выглядят иначе.
+    // Настройки, открытие и данные — одной записью.
     let (session, mut server) = pair();
     let mut stream = session.open_stream().await.expect("поток открывается");
     stream.write_all(b"hi").await.expect("пишется");
@@ -114,8 +104,6 @@ async fn the_first_record_carries_the_beginning_of_the_conversation_at_once() {
         .expect("читается");
     first.truncate(read);
 
-    // Схема по умолчанию отводит первому пакету от 100 до 400 байт — на «hi»
-    // это почти целиком дополнение.
     assert!((100..400).contains(&read), "запись в {read} байт");
     assert_eq!(first[0], frame::CMD_SETTINGS);
     assert!(
@@ -143,8 +131,6 @@ async fn an_answer_from_the_server_reaches_the_stream() {
 
 #[tokio::test]
 async fn a_close_from_the_server_is_the_end_of_the_stream_and_not_a_failure() {
-    // Именно не ошибка: движок копирует до конца, и ошибка на месте конца
-    // выглядела бы обрывом соединения в журнале.
     let (session, mut server) = pair();
     let mut stream = session.open_stream().await.expect("поток открывается");
     stream.write_all(b"hi").await.expect("пишется");
@@ -175,8 +161,6 @@ async fn a_stream_nobody_holds_any_more_is_closed_for_the_server_too() {
 
 #[tokio::test]
 async fn shutting_the_stream_down_does_not_close_it() {
-    // Полузакрытия у AnyTLS нет: `cmdFIN` закрывает поток в обе стороны, и
-    // послать его на `shutdown` значило бы потерять ответ сервера.
     let (session, mut server) = pair();
     let mut stream = session.open_stream().await.expect("поток открывается");
     stream.write_all(b"hi").await.expect("пишется");
@@ -222,7 +206,6 @@ async fn a_scheme_from_the_server_replaces_the_default_one() {
     )
     .await;
 
-    // Схему принимает задача чтения: ждём, пока она это заметит.
     for _ in 0..200 {
         if session.padding().get().md5() != before {
             assert_eq!(session.padding().get().stop(), 4);
@@ -267,8 +250,6 @@ async fn a_refusal_from_the_server_closes_the_session() {
 
 #[tokio::test]
 async fn a_refusal_to_open_a_stream_comes_out_as_its_error() {
-    // Подтверждение с данными — это отказ: сервер объяснил, почему не смог
-    // соединиться. Показать это пустым ответом значило бы соврать.
     let (session, mut server) = pair();
     let mut stream = session.open_stream().await.expect("поток открывается");
     stream.write_all(b"hi").await.expect("пишется");

@@ -1,7 +1,4 @@
-//! Одно соединение: HTTP/3, опознание, раздача запросов и датаграмм.
-//!
-//! Опознаётся соединение, а не запрос: после `204` все его `CONNECT`
-//! принадлежат опознанному пользователю, до него — все запросы видят сайт.
+//! Одно соединение: HTTP/3, опознание, запросы и датаграммы. Опознаётся соединение, а не запрос.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -160,7 +157,6 @@ async fn accept(mut stream: Stream, proof: &str) {
 /// Раздаёт датаграммы соединения по каналам.
 async fn route_datagrams(state: Arc<State>) {
     while let Ok(datagram) = state.quic.read_datagram().await {
-        // Чужая или битая датаграмма теряется молча (RFC 9297, §2.1).
         let Ok((stream_id, payload)) = udp::datagram::decode(datagram) else {
             continue;
         };
@@ -183,7 +179,6 @@ impl State {
     }
 
     fn lock_routes(&self) -> std::sync::MutexGuard<'_, HashMap<u64, mpsc::Sender<Bytes>>> {
-        // Отравление не страшно: таблица не бывает в полуизменённом виде.
         self.routes.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

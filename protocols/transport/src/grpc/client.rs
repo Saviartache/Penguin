@@ -1,9 +1,4 @@
-//! Открытие потока gRPC `Tun` поверх готового соединения (TLS, REALITY или
-//! голого TCP): рукопожатие HTTP/2 и запрос.
-//!
-//! Соединение HTTP/2 — своё на каждый поток: так протоколы и устроены, у
-//! каждого потока своё TLS. Сервер это принимает: мультиплексирование у
-//! gRPC — оптимизация клиента Xray, а не требование протокола.
+//! Открытие потока gRPC `Tun` поверх готового соединения: свой HTTP/2 на каждый поток.
 
 use http::{Method, Request};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -20,8 +15,7 @@ pub type Grpc = GrpcStream<H2Stream>;
 
 /// Открывает поток `Tun` службы `service_name` поверх `io`.
 ///
-/// Ответа не ждёт: сервер Xray присылает заголовки вместе с первыми данными,
-/// а их не будет, пока клиент не скажет своё. Его ждёт первое чтение.
+/// Ответа не ждёт: Xray шлёт заголовки вместе с первыми данными; ответ ждёт первое чтение.
 pub async fn connect<S>(io: S, authority: &str, service_name: &str) -> TransportResult<Grpc>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -30,7 +24,6 @@ where
         let (send_request, connection) = h2::client::handshake(io)
             .await
             .map_err(|e| TransportError::disconnected(format!("рукопожатие HTTP/2: {e}")))?;
-        // Задача кончается сама, когда закрыт последний поток.
         tokio::spawn(async move {
             if let Err(err) = connection.await {
                 tracing::debug!(%err, "соединение gRPC завершено");
@@ -52,15 +45,13 @@ where
 
 /// Запрос `POST` к потоку `Tun`.
 ///
-/// `:scheme` — `http`, как у Xray: grpc-go с TLS поверх своего диалера
-/// считает соединение незашифрованным и пишет именно так.
+/// `:scheme` — `http`, как у Xray (grpc-go поверх своего диалера).
 fn request(authority: &str, service_name: &str) -> TransportResult<Request<()>> {
     Request::builder()
         .method(Method::POST)
         .uri(format!("http://{authority}{}", tun_path(service_name)))
         .header("content-type", "application/grpc")
         .header("te", "trailers")
-        // Как у Xray: `userAgent` по умолчанию — Chrome (`dial.go`).
         .header("user-agent", CHROME_USER_AGENT)
         .body(())
         .map_err(|e| TransportError::config(format!("запрос gRPC: {e}")))

@@ -1,27 +1,9 @@
-//! Данные опознания Reality: то, что живёт в 32 байтах `SessionID` вместо
-//! случайного значения обычного клиента, и подтверждение сервера.
+//! Данные опознания Reality в 32 байтах `SessionID` и проверка сертификата сервера.
 //!
-//! **Формат данных опознания и вывод `AuthKey` нельзя свести к
-//! RFC** — Reality не стандарт, а конкретная реализация; всё ниже выписано
-//! из `Xray-core` (`transport/internet/reality/reality.go`, функция
-//! `UClient`, ревизия `cd4ce97`) и независимо сверено с `sing-box`
-//! (`common/tls/reality_client.go`, `ClientHandshake`, тег `v1.12`-ветки
-//! `testing`) — обе реализации совпадают байт в байт по формуле, но **ни
-//! одного результата не с чем сверить без живого сервера**: опубликованных
-//! тестовых векторов Reality не существует (в отличие от TLS 1.3 самого по
-//! себе, для которого есть RFC 8448 — см. `key_schedule.rs`).
-//!
-//! ```text
-//!            общий секрет X25519 с публичным ключом Reality
-//!                              │
-//!         HKDF-SHA256(salt=client_random[..20], info="REALITY")
-//!                              │
-//!                              ▼
-//!                           AuthKey (32 байта)
-//!                    │                        │
-//!      AES-256-GCM(SessionID)          HMAC-SHA512(сертификат)
-//!      seal_session_id (клиент)        verify_certificate (сервер → клиент)
-//! ```
+//! Формат взят из `Xray-core` (`transport/internet/reality/reality.go`, `UClient`) и сверен с
+//! `sing-box` (`common/tls/reality_client.go`); опубликованных векторов нет, о живой сервер
+//! не проверено. `AuthKey = HKDF-SHA256(salt = client_random[..20], ikm = X25519 с ключом
+//! Reality, info = "REALITY")` шифрует `SessionID` (AES-256-GCM) и заверяет сертификат (HMAC-SHA512).
 
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
 use ring::hkdf::{self, KeyType};
@@ -29,44 +11,18 @@ use ring::hmac;
 
 use crate::reality::error::RealityError;
 
-/// Версия клиента, которую Reality кладёт в первые три байта данных
-/// опознания.
-///
-/// Настоящего значения у этой реализации нет — она не `Xray-core` и не
-/// `sing-box`, и сверить номер не с чем. `sing-box`, тоже не будучи
-/// `Xray-core`, в этом месте выдаёт себя за его версию `1.8.1`
-/// (`reality_client.go`: `hello.SessionId[0] = 1; [1] = 8; [2] = 1`) — сервер
-/// проверяет эти байты, только если в его настройках заданы
-/// `minClientVer`/`maxClientVer` (`XTLS/reality`, `tls.go`, строки 257-258:
-/// `config.MinClientVer == nil || ... ; config.MaxClientVer == nil || ...`),
-/// а по умолчанию их нет. Тот же выбор здесь — не подтверждённый факт, а
-/// совместимость по прецеденту одной чужой реализации. **Если сервер всё же
-/// ограничивает версию строже, чем `1.8.1`, отличить это от «нас не узнали»
-/// нельзя** — сервер в обоих случаях просто не отзовётся (`error.rs`,
-/// [`crate::reality::error::RealityError::NotRecognized`]).
+/// Версия клиента в данных опознания: как у `sing-box` (`reality_client.go`), `1.8.1`.
+/// Сервер сверяет её только при `minClientVer`/`maxClientVer`; строже — неотличимо от `NotRecognized`.
 const CLIENT_VERSION: [u8; 3] = [1, 8, 1];
 
-/// Длина данных опознания до шифрования: версия(3) + резерв(1) + время(4) +
-/// `short_id`(8).
+/// Данные опознания: версия(3) + резерв(1) + время(4) + `short_id`(8).
 const PAYLOAD_LEN: usize = 16;
 
-/// Данные опознания до шифрования.
-///
-/// `Xray-core`, тот же файл, строки 160-168:
-/// ```text
-/// hello.SessionId[0] = core.Version_x
-/// hello.SessionId[1] = core.Version_y
-/// hello.SessionId[2] = core.Version_z
-/// hello.SessionId[3] = 0 // reserved
-/// binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
-/// copy(hello.SessionId[8:], config.ShortId)
-/// ```
-/// `sing-box` кладёт те же поля в том же порядке (`reality_client.go`,
-/// строки после `hello.SessionId = make([]byte, 32)`).
+/// Данные опознания до шифрования (`reality.go`: `SessionId[0..3]` версия, `[3]` резерв,
+/// `[4..8]` время BE, `[8..]` `ShortId`).
 fn payload(short_id: [u8; 8], unix_time: u32) -> [u8; PAYLOAD_LEN] {
     let mut out = [0u8; PAYLOAD_LEN];
     out[0..3].copy_from_slice(&CLIENT_VERSION);
-    out[3] = 0; // резерв
     out[4..8].copy_from_slice(&unix_time.to_be_bytes());
     out[8..16].copy_from_slice(&short_id);
     out
@@ -80,32 +36,14 @@ impl KeyType for AuthKeyLen {
     }
 }
 
-/// Выводит `AuthKey` — общий ключ Reality — из общего секрета X25519 с
-/// публичным ключом сервера.
-///
-/// `HKDF-SHA256(salt = client_random[..20], ikm = shared_secret, info =
-/// "REALITY", L = 32)`. `Xray-core`, тот же файл, строка 176:
-/// `hkdf.New(sha256.New, uConn.AuthKey, hello.Random[:20],
-/// []byte("REALITY")).Read(uConn.AuthKey)` — сигнатура `hkdf.New` в
-/// `golang.org/x/crypto/hkdf` это `(hash, secret, salt, info)`, то есть
-/// `uConn.AuthKey` (общий секрет на входе) — это `secret`/`IKM`, а
-/// `hello.Random[:20]` — именно `salt`, не `info`. Сервер вычисляет то же
-/// самое над своей стороной общего секрета (`XTLS/reality`, `tls.go`, строка
-/// 233: `hkdf.New(sha256.New, hs.c.AuthKey, hs.clientHello.random[:20],
-/// []byte("REALITY"))`) — независимое подтверждение того же порядка
-/// аргументов с другой стороны протокола.
-///
-/// Результат используется дважды: шифрует `SessionID`
-/// ([`seal_session_id`]) и заверяет сертификат сервера
-/// ([`verify_certificate`]) — Reality не разделяет эти ключи.
+/// Выводит `AuthKey`: `hkdf.New(sha256.New, secret, hello.Random[:20], "REALITY")`
+/// в `reality.go` и `XTLS/reality` `tls.go`; общий секрет — `IKM`, `random[..20]` — соль.
 pub fn derive_auth_key(
     shared_secret: &[u8; 32],
     client_random: &[u8; 32],
 ) -> Result<[u8; 32], RealityError> {
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &client_random[..20]);
     let prk = salt.extract(shared_secret);
-    // `Okm` заимствует у `info` — временный массив с одним элементом не
-    // пережил бы выражение, поэтому у него есть имя.
     let info: [&[u8]; 1] = [b"REALITY"];
     let okm = prk
         .expand(&info, AuthKeyLen)
@@ -115,19 +53,9 @@ pub fn derive_auth_key(
     Ok(out)
 }
 
-/// Шифрует данные опознания в 32 байта `SessionID`.
-///
-/// `AES-256-GCM(key=auth_key, nonce=client_random[20..32],
-/// plaintext=payload, aad=ClientHello с ещё нулевым SessionID)`. `Xray-core`,
-/// тот же файл, строка 178: `aead.Seal(hello.SessionId[:0],
-/// hello.Random[20:], hello.SessionId[:16], hello.Raw)`. `dst =
-/// hello.SessionId[:0]` в Go — «писать с начала этого среза», а не «нулевой
-/// длины навсегда»: `Seal` дописывает к `dst` результат, 16 байт шифротекста
-/// вместе с 16 байтами метки GCM, ровно длину `SessionID`. `hello.Raw` в
-/// момент вызова — это `ClientHello` целиком с ещё нулевым `SessionID`: он
-/// зашит в AAD раньше, чем подменяется зашифрованным значением (см.
-/// [`penguin_utls::ClientHello::patch_session_id`], откуда и взят этот
-/// порядок операций).
+/// Шифрует данные опознания в `SessionID`: `AES-256-GCM(auth_key, nonce = random[20..32],
+/// aad = ClientHello с нулевым SessionID)` (`reality.go`: `aead.Seal(hello.SessionId[:0],
+/// hello.Random[20:], hello.SessionId[:16], hello.Raw)`); 16 байт шифротекста и 16 метки.
 pub fn seal_session_id(
     auth_key: &[u8; 32],
     client_random: &[u8; 32],
@@ -156,20 +84,8 @@ pub fn seal_session_id(
     Ok(out)
 }
 
-/// Подтверждение сервера: сертификат настоящий, только если
-/// `HMAC-SHA512(AuthKey, subjectPublicKey) == signatureValue`.
-///
-/// `Xray-core`, `reality.go`, `UConn.VerifyPeerCertificate`:
-/// `h := hmac.New(sha512.New, c.AuthKey); h.Write(pub);
-/// bytes.Equal(h.Sum(nil), certs[0].Signature)`. Независимо повторено
-/// `sing-box` (`reality_client.go`, `realityVerifier.VerifyPeerCertificate`)
-/// — тот же ключ (`AuthKey` после `HKDF`, не общий секрет напрямую), тот же
-/// хеш, тот же порядок аргументов HMAC.
-///
-/// Сравнение здесь — [`ring::hmac::verify`], постоянного времени; в обоих
-/// эталонах оно обычное (`bytes.Equal` в Go не защищён от атак по времени),
-/// но заменить его без изменения формата ничего не стоит, и опускать эту
-/// разницу незачем.
+/// Сертификат настоящий, если `HMAC-SHA512(AuthKey, subjectPublicKey) == signatureValue`
+/// (`reality.go`, `VerifyPeerCertificate`; то же в `sing-box`); сравнение за постоянное время.
 pub fn verify_certificate(
     auth_key: &[u8; 32],
     ed25519_public_key: &[u8; 32],
@@ -204,21 +120,13 @@ mod tests {
 
     #[test]
     fn a_different_client_random_changes_the_auth_key() {
-        // client_random входит в HKDF как соль — это не круговой тест
-        // формата (мы не знаем, тот ли это `salt`, что ждёт сервер), а
-        // проверка, что параметр вообще на что-то влияет, а не
-        // проигнорирован по опечатке.
         let secret = [7u8; 32];
         let a = derive_auth_key(&secret, &[1; 32]).expect("считается");
         let b = derive_auth_key(&secret, &[2; 32]).expect("считается");
         assert_ne!(a, b);
     }
 
-    /// Круговой тест: зашифровали — расшифровали тем же AEAD напрямую через
-    /// `ring`, в обход `seal_session_id`. Ловит опечатку в порядке
-    /// ключ/нонс/AAD, но НЕ доказывает, что формат совпадает с тем, что
-    /// ждёт настоящий сервер Reality, — этого без живого сервера не
-    /// проверить (см. документ модуля).
+    /// Круговой тест, без внешнего вектора: формат с живым сервером не сверен.
     #[test]
     fn sealing_the_session_id_round_trips_under_the_same_aead() {
         let auth_key = [9u8; 32];
@@ -249,9 +157,6 @@ mod tests {
 
     #[test]
     fn tampering_with_the_aad_breaks_decryption() {
-        // AAD — это ClientHello целиком: если хотя бы один байт после
-        // подписания изменится (например, кто-то на пути подменил
-        // расширение), GCM обязан отказать, а не расшифровать молча.
         let auth_key = [9u8; 32];
         let client_random = [5u8; 32];
         let sealed =
@@ -267,10 +172,7 @@ mod tests {
         );
     }
 
-    /// RFC 4231 §4.2 ("Test Case 1" для HMAC-SHA-512) — независимый от
-    /// Reality вектор: проверяет только то, что `ring::hmac::verify` в этой
-    /// обвязке действительно считает HMAC-SHA-512 так, как определяет RFC, а
-    /// не что-то похожее на него. Ключ и данные — из RFC, не наши.
+    /// RFC 4231 §4.2, Test Case 1 для HMAC-SHA-512.
     #[test]
     fn hmac_sha512_matches_the_rfc_4231_test_vector() {
         let key = [0x0b; 20];

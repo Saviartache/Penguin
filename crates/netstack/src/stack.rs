@@ -1,8 +1,6 @@
 //! Главный цикл: пакеты из TUN в smoltcp и обратно.
 //!
-//! Весь стек — одна задача. Это не упрощение, а требование: `smoltcp` не
-//! рассчитан на обращение из нескольких потоков, а состояние TCP по своей
-//! природе однопоточное. Всё общение с внешним миром идёт через очереди.
+//! Весь стек — одна задача (smoltcp однопоточный). TCP идёт через smoltcp, UDP — мимо.
 //!
 //! ```text
 //!                    ┌──────────────── одна задача ────────────────┐
@@ -14,10 +12,6 @@
 //!                           │                       │
 //!                        движок                  движок
 //! ```
-//!
-//! TCP идёт через smoltcp: за состояние, окна и перепосылку отвечает он.
-//! UDP — мимо: состояния у него нет, и разобрать восьмибайтовый заголовок
-//! дешевле, чем держать сокет на каждую пару адресов.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -61,19 +55,13 @@ pub struct StackHandles {
     pub udp_outgoing: mpsc::Sender<Datagram>,
 }
 
-/// Сколько датаграмм держать в очереди.
+/// Глубина очередей датаграмм.
 const UDP_QUEUE: usize = 512;
 
-/// Сколько пакетов накапливать перед передачей в smoltcp за один заход.
-///
-/// Читать по одному значило бы опрашивать стек на каждый пакет; читать без
-/// предела — задержать ответы, пока идёт всплеск входящего трафика.
+/// Пакетов за один заход в smoltcp: не опрашивать стек на каждый, но и не задерживать ответы.
 const RX_BATCH: usize = 64;
 
-/// Запускает стек поверх устройства.
-///
-/// Возвращает каналы для движка. Задача живёт, пока её не отменят или пока
-/// адаптер не закроется.
+/// Запускает стек поверх устройства; задача живёт до отмены или закрытия адаптера.
 pub fn spawn(
     device: Box<dyn TunDevice>,
     config: StackConfig,
@@ -110,10 +98,10 @@ async fn run(
         connections: ConnectionTable::new(),
         udp_sessions: SessionTable::new(),
     };
+    let wake = inner.connections.wake();
     let mut iface = build_interface(&config, &mut inner.device, clock.now());
 
     loop {
-        // --- пакеты из адаптера ---
         tokio::select! {
             biased;
 
@@ -121,16 +109,10 @@ async fn run(
 
             packet = device.recv() => match packet {
                 Ok(packet) => {
-                    handle_incoming(&packet, &mut inner, &udp_incoming, &config);
-                    // Пачкой: за время разбора одного пакета обычно приходит
-                    // ещё несколько, и опрашивать стек на каждый — расточительно.
+                    handle_incoming(packet, &mut inner, &udp_incoming, &config);
                     for _ in 0..RX_BATCH {
-                        match device.try_recv() {
-                            Some(packet) => {
-                                handle_incoming(&packet, &mut inner, &udp_incoming, &config);
-                            }
-                            None => break,
-                        }
+                        let Some(packet) = device.try_recv() else { break };
+                        handle_incoming(packet, &mut inner, &udp_incoming, &config);
                     }
                 }
                 Err(err) => {
@@ -140,7 +122,6 @@ async fn run(
             },
 
             datagram = udp_outgoing.recv() => match datagram {
-                // Ответ приложению собирается вручную: через smoltcp он не шёл.
                 Some(datagram) => {
                     if let Some(packet) = build_datagram(
                         datagram.destination,
@@ -153,16 +134,18 @@ async fn run(
                 None => break,
             },
 
+            () = wake.notified() => {}
+
             () = tokio::time::sleep(clamp_delay(
                 iface.poll_delay(clock.now(), &inner.sockets)
             )) => {}
         }
 
-        iface.poll(clock.now(), &mut inner.device, &mut inner.sockets);
+        let now = clock.now();
+        iface.poll(now, &mut inner.device, &mut inner.sockets);
         pump_sockets(&mut inner.sockets, &mut inner.connections, &accepted);
-        iface.poll(clock.now(), &mut inner.device, &mut inner.sockets);
+        iface.poll(now, &mut inner.device, &mut inner.sockets);
 
-        // --- пакеты в адаптер ---
         while let Some(packet) = inner.device.take_tx() {
             if let Err(err) = device.send(&packet).await {
                 tracing::debug!(%err, "пакет не ушёл в адаптер");
@@ -180,8 +163,6 @@ fn build_interface(
     device: &mut VirtualDevice,
     now: smoltcp::time::Instant,
 ) -> Interface {
-    // Канального уровня у TUN нет: пакеты идут сразу с IP-заголовка, и
-    // аппаратного адреса у интерфейса не бывает.
     let mut iface_config = Config::new(HardwareAddress::Ip);
     iface_config.random_seed = rand_seed();
 
@@ -194,25 +175,11 @@ fn build_interface(
         }
     });
 
-    // Без этого стек отвечал бы только на пакеты, адресованные ему самому, —
-    // то есть ни на один из перехваченных.
+    // Принимать пакеты с чужим адресом назначения.
     iface.set_any_ip(true);
 
-    // Одного `any_ip` мало, и это не очевидно. Прежде чем принять пакет с
-    // чужим адресом назначения, smoltcp ищет маршрут до этого адреса и
-    // требует, чтобы шлюзом оказался он сам:
-    //
-    // ```text
-    // if self.routes.lookup(dst).map_or(true, |gw| !self.has_ip_addr(gw)) {
-    //     return None;   // "Rejecting IPv4 packet; no matching routes"
-    // }
-    // ```
-    //
-    // Пустая таблица означает `None`, то есть отказ. Стек молча выбрасывал
-    // **каждый** перехваченный пакет: адаптер поднят, маршруты стоят, а
-    // счётчики намертво на нуле и ни одной ошибки нигде.
-    //
-    // Шлюзом ставится собственный адрес — ровно то, чего требует проверка.
+    // Для `any_ip` smoltcp ищет маршрут и требует, чтобы шлюзом был он сам; пустая таблица
+    // молча отбрасывает каждый пакет.
     if let Err(err) = iface.routes_mut().add_default_ipv4_route(config.ipv4.0) {
         tracing::error!(?err, "стек не примет ни одного пакета: маршрут не добавлен");
     }
@@ -226,10 +193,7 @@ fn build_interface(
     iface
 }
 
-/// Случайное зерно для стека.
-///
-/// Нужно, чтобы номера последовательностей TCP не совпадали между запусками:
-/// совпадение означает, что старое соединение может быть принято за новое.
+/// Зерно для номеров последовательностей TCP, различное между запусками.
 pub(crate) fn rand_seed() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -237,12 +201,7 @@ pub(crate) fn rand_seed() -> u64 {
         .map_or(0, |d| d.as_nanos() as u64)
 }
 
-/// Изменяемая начинка стека: всё, что разбор пакета правит.
-///
-/// Структурой, а не россыпью аргументов. Дело не в длине списка: три из
-/// четырёх полей — таблицы, и в позиционном вызове их ничто не отличает друг
-/// от друга. Перепутанные местами `connections` и `udp_sessions`
-/// компилируются молча и ломаются далеко от места ошибки.
+/// Изменяемая начинка стека; структурой, чтобы однотипные таблицы не перепутать в позиционном вызове.
 struct Inner {
     /// Очереди пакетов между адаптером и smoltcp.
     device: VirtualDevice,
@@ -254,48 +213,44 @@ struct Inner {
     udp_sessions: SessionTable,
 }
 
-/// Разбирает пришедший пакет.
+/// Разбирает пришедший пакет; владение нужно, чтобы отдать TCP и срезать UDP без копии.
 fn handle_incoming(
-    packet: &[u8],
+    packet: BytesMut,
     inner: &mut Inner,
     udp_incoming: &mpsc::Sender<Datagram>,
     config: &StackConfig,
 ) {
-    let Some(parsed) = parse::parse(packet) else {
-        // ICMP, широковещательные объявления, обрезанное — обычный фон.
+    let Some(parsed) = parse::parse(&packet) else {
         return;
     };
+    let (source, destination) = (parsed.source, parsed.destination);
 
     match parsed.network {
         penguin_core::network::Network::Tcp => {
             if parsed.is_syn {
                 open_socket(
-                    parsed.source,
-                    parsed.destination,
+                    source,
+                    destination,
                     &mut inner.sockets,
                     &mut inner.connections,
                     config,
                 );
             }
-            // Сам пакет в любом случае отдаётся стеку: рукопожатие и данные
-            // разбирает он.
-            inner.device.queue_rx(BytesMut::from(packet));
+            inner.device.queue_rx(packet);
         }
         penguin_core::network::Network::Udp => {
             let key = SessionKey {
-                source: parsed.source,
-                destination: parsed.destination,
+                source,
+                destination,
             };
             inner.udp_sessions.touch(key, std::time::Instant::now());
 
             let datagram = Datagram {
-                source: parsed.source,
-                destination: parsed.destination,
+                source,
+                destination,
                 payload: Bytes::copy_from_slice(parsed.payload),
             };
-            // Переполнение очереди — потеря датаграммы, то есть ровно то, что
-            // с UDP и так случается. Блокировать здесь нельзя: остановился бы
-            // весь стек, включая TCP.
+            // Блокировать нельзя: встал бы весь стек, включая TCP.
             if udp_incoming.try_send(datagram).is_err() {
                 tracing::trace!("очередь UDP переполнена, датаграмма отброшена");
             }
@@ -315,9 +270,8 @@ fn open_socket(
         source,
         destination,
     };
+    // Повторный `SYN`: второй сокет под ту же пятёрку сломал бы соединение.
     if connections.contains_key(&key) {
-        // Приложение перепосылает `SYN`, не дождавшись ответа. Второй сокет
-        // под ту же пятёрку сломал бы соединение.
         return;
     }
 
@@ -335,16 +289,13 @@ fn open_socket(
         tracing::debug!(?err, %destination, "сокет не открылся");
         return;
     }
-    // Приложение, не читающее из сокета, не должно держать его вечно.
     socket.set_timeout(Some(smoltcp::time::Duration::from_secs(120)));
     socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(30)));
 
     let handle = sockets.add(socket);
     let (connection, ends) = TcpConnection::new(source, destination);
 
-    // Соединение уходит наверх не сейчас, а когда рукопожатие завершится:
-    // до этого момента соединения ещё нет, и отдавать движку нечего.
-    // `pump_sockets` заметит переход в установленное состояние и отдаст его.
+    // Движку соединение отдаёт `pump_sockets` после рукопожатия.
     connections.insert(handle, key, ends, connection);
 }
 
@@ -354,40 +305,40 @@ fn pump_sockets(
     connections: &mut ConnectionTable,
     accepted: &mpsc::Sender<Accepted>,
 ) {
-    for handle in connections.handles() {
-        let socket = sockets.get_mut::<tcp::Socket>(handle);
-        let Some(entry) = connections.get_mut(handle) else {
-            continue;
-        };
+    let mut dead = Vec::new();
 
-        // --- рукопожатие завершилось: соединение можно отдавать ---
-        if entry.pending.is_some() && socket.may_send() {
+    for (handle, entry) in connections.iter_mut() {
+        let socket = sockets.get_mut::<tcp::Socket>(handle);
+
+        if entry.pending.is_some()
+            && socket.may_send()
+            && let Some(connection) = entry.pending.take()
+        {
             let key = entry.key;
-            if let Some(connection) = entry.pending.take() {
-                let handover = Accepted {
-                    connection,
-                    source: key.source,
-                    destination: key.destination,
-                };
-                if accepted.try_send(handover).is_err() {
-                    // Движок не успевает разбирать соединения. Обрываем это
-                    // сразу: приложение увидит отказ и повторит, а копить
-                    // непринятые соединения в памяти нельзя.
-                    tracing::debug!(%key.destination, "очередь соединений переполнена");
-                    socket.abort();
-                    connections.remove(handle);
-                    sockets.remove(handle);
-                    continue;
-                }
+            let handover = Accepted {
+                connection,
+                source: key.source,
+                destination: key.destination,
+            };
+            // Очередь полна: обрываем сразу, приложение повторит.
+            if accepted.try_send(handover).is_err() {
+                tracing::debug!(%key.destination, "очередь соединений переполнена");
+                socket.abort();
+                dead.push(handle);
+                continue;
             }
         }
 
         pump_data(socket, entry);
 
         if !socket.is_open() {
-            connections.remove(handle);
-            sockets.remove(handle);
+            dead.push(handle);
         }
+    }
+
+    for handle in dead {
+        connections.remove(handle);
+        sockets.remove(handle);
     }
 }
 
@@ -400,9 +351,6 @@ fn to_smoltcp(address: IpAddr) -> IpAddress {
 }
 
 /// Конечная точка smoltcp из адреса.
-///
-/// Свободная функция ради теста: перепутать здесь порядок полей легко, а
-/// последствие — соединения, уходящие не туда.
 pub fn endpoint_of(address: SocketAddr) -> IpEndpoint {
     IpEndpoint {
         addr: to_smoltcp(address.ip()),
@@ -478,11 +426,7 @@ mod tests {
         segment(source, destination, TcpControl::Syn, TcpSeqNumber(0), None)
     }
 
-    /// Стек с очередями — то, что нужно каждому тесту пути данных.
-    ///
-    /// Структурой, а не россыпью аргументов: их шесть, и половина —
-    /// изменяемые ссылки, которые в позиционном вызове ничем не отличаются
-    /// друг от друга.
+    /// Стек с очередями для тестов пути данных.
     struct Harness {
         config: StackConfig,
         inner: Inner,
@@ -491,7 +435,7 @@ mod tests {
         accepted: mpsc::Sender<Accepted>,
         waiting: mpsc::Receiver<Accepted>,
         udp: mpsc::Sender<Datagram>,
-        _udp_out: mpsc::Receiver<Datagram>,
+        udp_rx: mpsc::Receiver<Datagram>,
     }
 
     impl Harness {
@@ -505,7 +449,7 @@ mod tests {
             let clock = Clock::start();
             let iface = build_interface(&config, &mut inner.device, clock.now());
             let (accepted, waiting) = mpsc::channel(4);
-            let (udp, _udp_out) = mpsc::channel(4);
+            let (udp, udp_rx) = mpsc::channel(4);
 
             Self {
                 config,
@@ -515,12 +459,17 @@ mod tests {
                 accepted,
                 waiting,
                 udp,
-                _udp_out,
+                udp_rx,
             }
         }
 
         fn feed(&mut self, packet: &[u8]) {
-            handle_incoming(packet, &mut self.inner, &self.udp, &self.config);
+            handle_incoming(
+                BytesMut::from(packet),
+                &mut self.inner,
+                &self.udp,
+                &self.config,
+            );
             self.poll();
         }
 
@@ -540,10 +489,7 @@ mod tests {
             );
         }
 
-        /// Доводит соединение до установленного и отдаёт его.
-        ///
-        /// Без настоящего рукопожатия сокет `smoltcp` не отдаёт ни байта, а
-        /// половина ошибок этого стека живёт именно после него.
+        /// Доводит соединение до установленного и отдаёт его: без настоящего рукопожатия сокет не отдаёт ни байта.
         fn establish(&mut self, source: SocketAddr, destination: SocketAddr) -> TcpConnection {
             use smoltcp::wire::{Ipv4Packet, TcpControl, TcpPacket};
 
@@ -563,7 +509,6 @@ mod tests {
                 Some(their_seq + 1),
             ));
 
-            // Рукопожатие завершено — `pump_sockets` отдаёт соединение движку.
             self.pump();
             self.waiting
                 .try_recv()
@@ -574,14 +519,7 @@ mod tests {
 
     #[test]
     fn a_packet_for_someone_else_gets_an_answer() {
-        // Ради этого стек и существует: пакет адресован не ему, а он обязан
-        // ответить за получателя.
-        //
-        // Одного `set_any_ip` для этого мало, и это стоило целого вечера:
-        // smoltcp сперва ищет маршрут до чужого адреса и требует, чтобы шлюзом
-        // оказался он сам. Пустая таблица маршрутов означала отказ, и стек
-        // молча выбрасывал **каждый** перехваченный пакет — при поднятом
-        // адаптере, целых маршрутах и нулях во всех счётчиках.
+        // Нужен маршрут по умолчанию: без него smoltcp отбрасывает каждый перехваченный пакет.
         let mut harness = Harness::new(StackConfig::default());
         harness.feed(&syn(
             "198.18.0.7:51000".parse().expect("адрес"),
@@ -596,11 +534,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_tail_of_a_big_chunk_is_not_lost() {
-        // `send_slice` записывает столько, сколько поместилось, и возвращает
-        // это число. Считать его успехом целиком — потерять хвост в середине
-        // потока TCP. Приложение получает поток без дыр, но с пропущенным
-        // куском: TLS такого не переживает, соединение начинается заново, и
-        // снаружи это выглядит как очень медленный тоннель.
+        // `send_slice` пишет сколько поместилось; потерянный хвост рвёт TLS.
         use tokio::io::AsyncWriteExt;
 
         let mut harness = Harness::new(StackConfig {
@@ -612,19 +546,11 @@ mod tests {
             "93.184.216.34:443".parse().expect("адрес"),
         );
 
-        // Вчетверо больше, чем помещается в сокет.
         let payload = vec![7_u8; harness.config.tcp_tx_buffer * 4];
         connection.write_all(&payload).await.expect("запись");
         harness.pump();
 
-        let handle = harness
-            .inner
-            .connections
-            .handles()
-            .first()
-            .copied()
-            .expect("сокет");
-        let entry = harness.inner.connections.get_mut(handle).expect("запись");
+        let (_, entry) = harness.inner.connections.iter_mut().next().expect("сокет");
         assert!(
             entry.to_socket.is_some(),
             "хвост блока выброшен — в потоке появилась дыра"
@@ -632,9 +558,23 @@ mod tests {
     }
 
     #[test]
+    fn a_udp_datagram_reaches_the_engine_with_its_payload() {
+        let mut harness = Harness::new(StackConfig::default());
+        let packet = build_datagram(
+            "198.18.0.7:5000".parse().expect("адрес"),
+            "8.8.8.8:53".parse().expect("адрес"),
+            b"query",
+        )
+        .expect("собирается");
+        handle_incoming(packet, &mut harness.inner, &harness.udp, &harness.config);
+
+        let datagram = harness.udp_rx.try_recv().expect("датаграмма не дошла");
+        assert_eq!(datagram.destination.port(), 53);
+        assert_eq!(&datagram.payload[..], b"query");
+    }
+
+    #[test]
     fn seed_differs_between_calls() {
-        // Совпавшее зерно означает совпавшие номера последовательностей, а
-        // это — старое соединение, принятое за новое.
         assert_ne!(rand_seed(), 0);
     }
 }

@@ -1,56 +1,83 @@
-//! Unix-сокет: где он лежит, кто до него дотянется и как убрать чужой след.
+//! Unix-сокет в файловой системе: путь, права и уборка чужого следа.
 //!
-//! Общая часть — открытие и подключение — живёт в [`super`]; здесь то, чего
-//! на Windows нет.
-//!
-//! # Почему не безымянный сокет
-//!
-//! У `interprocess` есть «пространство имён»: на Linux это абстрактный сокет,
-//! у которого нет прав вовсе, на macOS — файл во временном каталоге. Ни то ни
-//! другое не годится. Временный каталог в macOS **свой у каждого
-//! пользователя**: демон под системной учётной записью и окно под человеком
-//! просто не нашли бы друг друга. Абстрактный сокет в Linux, наоборот, открыт
-//! всем без исключения — а через канал управления выключается kill switch.
-//!
-//! Поэтому сокет лежит в файловой системе, а доступ к нему ограничен правами
-//! каталога.
-//!
-//! # Кому можно
-//!
-//! Root, the selected administrator group, and the exact desktop UID approved
-//! by the elevated helper. Socket ownership grants that UID access even when
-//! it is not a member of the selected group. Peer credentials remain mandatory.
+//! Абстрактный сокет Linux открыт всем, а временный каталог macOS свой у
+//! каждого пользователя, поэтому сокет лежит в каталоге с ограниченными правами.
+//! Допускаются root, группа администраторов и один UID рабочего стола,
+//! одобренный повышенным помощником; проверка peer-uid обязательна.
 
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use nix::unistd::{Gid, Group, Uid, User};
+pub use tokio::net::UnixStream as Stream;
 
+use super::classify;
 use crate::error::{IpcError, IpcResult};
 
-/// Каталог, в котором живёт сокет.
-///
-/// Каталог, а не файл рядом с другими: права на него и есть первый рубеж, и
-/// выставляются они **до** создания сокета. Права самого файла сокета
-/// пришлось бы менять уже после привязки, а между привязкой и правкой сокет
-/// открыт всем.
+/// Каталог сокета: права на него ставятся до создания сокета.
 const SYSTEM_DIR: &str = "/var/run/penguin";
 
-/// Имя файла сокета.
 const SOCKET_FILE: &str = "control.sock";
 
-/// The approved UID may traverse, but cannot list or replace socket entries.
+/// Одобренный UID может войти в каталог, но не перечислить и не заменить сокет.
 const DIR_MODE: u32 = 0o751;
 
-/// Права сокета внутри каталога.
 const SOCKET_MODE: u32 = 0o660;
 
-/// Где демон открывает канал.
+/// Принимающая сторона; убирает файл сокета при закрытии.
+pub struct Listener {
+    inner: tokio::net::UnixListener,
+    path: PathBuf,
+}
+
+impl Listener {
+    /// Ждёт следующего клиента.
+    pub async fn accept(&mut self) -> std::io::Result<Stream> {
+        self.inner.accept().await.map(|(stream, _)| stream)
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Открывает канал по указанному пути; отдельно от `listen` ради тестов.
+pub fn listen_at(path: &Path) -> IpcResult<Listener> {
+    prepare(path)?;
+    clear_stale(path)?;
+    restrict(path)?;
+
+    let inner = tokio::net::UnixListener::bind(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::AddrInUse => IpcError::AlreadyRunning,
+        std::io::ErrorKind::PermissionDenied => IpcError::AccessDenied,
+        _ => IpcError::Transport(format!("не удалось открыть канал управления: {e}")),
+    })?;
+    let listener = Listener {
+        inner,
+        path: path.to_owned(),
+    };
+    secure(path)?;
+    Ok(listener)
+}
+
+/// Подключается к сокету и проверяет euid сервера: root для системного пути, иначе свой.
 ///
-/// Под суперпользователем — общий каталог, до которого дотянется окно
-/// пользователя. Иначе — свой каталог: так `penguin --foreground`, запущенный
-/// человеком для отладки, работает без всяких прав, и CLI того же человека
-/// его находит. GUI must use only the system service endpoint.
+/// Владелец файла сокета сервера не удостоверяет.
+pub async fn connect_at(path: &Path) -> IpcResult<Stream> {
+    let stream = Stream::connect(path).await.map_err(classify)?;
+    let expected = if is_system_path(path) {
+        0
+    } else {
+        Uid::effective().as_raw()
+    };
+    crate::auth::check_server(&stream, expected)?;
+    Ok(stream)
+}
+
+/// Где демон открывает канал: под root — общий каталог, иначе — свой
+/// (для `penguin --foreground`). GUI ходит только в системный.
 pub fn listen_path() -> PathBuf {
     if Uid::effective().is_root() {
         service_path()
@@ -59,19 +86,14 @@ pub fn listen_path() -> PathBuf {
     }
 }
 
-/// Где искать канал, по порядку.
-///
-/// Сначала общий: почти всегда демон — это служба. Потом свой — на случай
-/// отладочного запуска.
+/// Где искать канал, по порядку: служба, затем отладочный запуск.
 pub fn connect_paths() -> Vec<PathBuf> {
     vec![service_path(), user_path()]
 }
 
-/// Connects only to the system socket and verifies the server's effective UID.
-///
-/// There is no per-user fallback, including for root readiness probes.
-pub async fn connect_service() -> IpcResult<interprocess::local_socket::tokio::Stream> {
-    super::connect_at(&service_path()).await
+/// Подключается только к системному сокету, без запасного пути, даже под root.
+pub async fn connect_service() -> IpcResult<Stream> {
+    connect_at(&service_path()).await
 }
 
 pub(crate) fn service_path() -> PathBuf {
@@ -82,10 +104,7 @@ pub(crate) fn is_system_path(path: &Path) -> bool {
     path == service_path()
 }
 
-/// Путь в каталоге текущего пользователя.
-///
-/// Тоже в своём подкаталоге: права ставятся на каталог, и ставить их на общий
-/// временный — значит закрыть его всем остальным программам.
+/// Путь пользователя в своём подкаталоге: права ставятся на каталог.
 fn user_path() -> PathBuf {
     let uid = Uid::effective().as_raw();
     if let Some(root) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
@@ -104,10 +123,7 @@ fn fallback_path(root: &Path, uid: u32) -> PathBuf {
     root.join(format!("penguin-{uid}")).join(SOCKET_FILE)
 }
 
-/// Заводит каталог сокета и закрывает его от посторонних.
-///
-/// Каталог у сокета **свой**: права ставятся на него целиком, и путь без
-/// собственного каталога закрыл бы чужой — общий временный, например.
+/// Заводит собственный каталог сокета и закрывает его от посторонних.
 pub fn prepare(path: &Path) -> IpcResult<()> {
     let directory = path.parent().ok_or(IpcError::AccessDenied)?;
     match std::fs::DirBuilder::new().mode(0o700).create(directory) {
@@ -115,7 +131,7 @@ pub fn prepare(path: &Path) -> IpcResult<()> {
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(err) => return Err(err.into()),
     }
-    let _ = directory_handle(directory)?;
+    directory_handle(directory)?;
     Ok(())
 }
 
@@ -136,17 +152,18 @@ fn directory_handle(directory: &Path) -> IpcResult<std::fs::File> {
     Ok(handle)
 }
 
+/// Держит каталог закрытым на время bind/chown/chmod; вызывается после отказа живому слушателю.
 pub(crate) fn restrict(path: &Path) -> IpcResult<()> {
-    // Only after rejecting a live listener: a second daemon must not change
-    // its permissions. Keep the directory private across bind/chown/chmod.
+    set_directory_mode(path, 0o700)
+}
+
+fn set_directory_mode(path: &Path, mode: u32) -> IpcResult<()> {
     directory_handle(path.parent().ok_or(IpcError::AccessDenied)?)?
-        .set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        .set_permissions(std::fs::Permissions::from_mode(mode))?;
     Ok(())
 }
 
-/// Убирает сокет, оставшийся от упавшего демона.
-///
-/// `Err(AlreadyRunning)` — сокет живой, и демон за ним отвечает.
+/// Убирает сокет упавшего демона; `Err(AlreadyRunning)` — сокет живой.
 pub fn clear_stale(path: &Path) -> IpcResult<()> {
     use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};
     use std::os::fd::AsRawFd;
@@ -159,7 +176,7 @@ pub fn clear_stale(path: &Path) -> IpcResult<()> {
     if !meta.file_type().is_socket() {
         return Err(IpcError::AccessDenied);
     }
-    // A full backlog is live, not stale. A blocking probe can hang startup.
+    // Полная очередь означает живого слушателя; блокирующая проба могла бы зависнуть.
     let probe = socket(
         AddressFamily::Unix,
         SockType::Stream,
@@ -167,7 +184,7 @@ pub fn clear_stale(path: &Path) -> IpcResult<()> {
         None,
     )
     .map_err(std::io::Error::from)?;
-    // Darwin does not support SOCK_NONBLOCK at socket creation.
+    // Darwin не знает SOCK_NONBLOCK при создании.
     nix::fcntl::fcntl(
         &probe,
         nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
@@ -187,12 +204,10 @@ pub fn clear_stale(path: &Path) -> IpcResult<()> {
     }
 }
 
-/// Ограничивает права уже открытого сокета.
-///
-/// Каталог закрыт и без этого; права файла — второй рубеж на случай, если
-/// каталог кто-то откроет.
+/// Ставит права открытому сокету и его каталогу.
 pub fn secure(path: &Path) -> IpcResult<()> {
-    if is_system_path(path) {
+    let system = is_system_path(path);
+    if system {
         if !Uid::effective().is_root() {
             return Err(IpcError::AccessDenied);
         }
@@ -201,54 +216,30 @@ pub fn secure(path: &Path) -> IpcResult<()> {
         nix::unistd::chown(path, Some(Uid::from_raw(owner)), Some(group))
             .map_err(std::io::Error::from)?;
     }
-    set_mode(path, SOCKET_MODE)?;
-    let mode = if is_system_path(path) {
-        DIR_MODE
-    } else {
-        0o700
-    };
-    directory_handle(path.parent().ok_or(IpcError::AccessDenied)?)?
-        .set_permissions(std::fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
-/// Ставит права файлу или каталогу.
-fn set_mode(path: &Path, mode: u32) -> IpcResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .map_err(|e| IpcError::Transport(format!("{}: {e}", path.display())))
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE))
+        .map_err(|e| IpcError::Transport(format!("{}: {e}", path.display())))?;
+    set_directory_mode(path, if system { DIR_MODE } else { 0o700 })
 }
 
 /// Группа администраторов системы.
-///
-/// Имя у неё своё в каждой системе, и угадывать его списком «на все случаи»
-/// нельзя: в macOS есть и `wheel`, но состоит он из одного суперпользователя,
-/// а администраторы машины сидят в `admin`.
 pub fn administrators() -> Option<Gid> {
-    for name in ADMIN_GROUPS {
-        if let Ok(Some(group)) = Group::from_name(name) {
-            return Some(group.gid);
-        }
-    }
-    None
+    ADMIN_GROUPS
+        .iter()
+        .find_map(|name| Group::from_name(name).ok().flatten())
+        .map(|group| group.gid)
 }
 
-/// Как называется группа администраторов.
+/// В macOS администраторы сидят в `admin`, а не в `wheel`.
 #[cfg(target_os = "macos")]
 const ADMIN_GROUPS: &[&str] = &["admin"];
 
-/// Как называется группа администраторов.
-///
-/// Две: в Debian и её потомках это `sudo`, в Fedora, Arch и SUSE — `wheel`.
+/// Debian и потомки — `sudo`, Fedora, Arch и SUSE — `wheel`.
 #[cfg(not(target_os = "macos"))]
 const ADMIN_GROUPS: &[&str] = &["sudo", "wheel"];
 
 /// Вправе ли пользователь администрировать машину.
 ///
-/// Спрашивается несколькими способами, потому что ни один не отвечает верно
-/// сам по себе: основная группа в списке членов не значится, а список членов
-/// не всегда полон.
+/// Основная группа в списке членов не значится, а список членов не всегда полон.
 pub fn is_administrator(uid: u32) -> bool {
     if uid == 0 {
         return true;
@@ -272,10 +263,6 @@ pub fn is_administrator(uid: u32) -> bool {
 }
 
 /// Есть ли группа среди дополнительных групп пользователя.
-///
-/// Отдельно, потому что спросить об этом можно не везде: в macOS
-/// `getgrouplist` из `nix` нет, а список членов группы `admin` система
-/// заполняет сама — и его хватает.
 #[cfg(not(target_os = "macos"))]
 fn in_supplementary_groups(user: &User, group: Gid) -> bool {
     let Ok(name) = std::ffi::CString::new(user.name.as_str()) else {
@@ -286,11 +273,9 @@ fn in_supplementary_groups(user: &User, group: Gid) -> bool {
         .unwrap_or(false)
 }
 
-/// Есть ли группа среди дополнительных групп пользователя.
+/// В macOS `getgrouplist` в `nix` нет; членов `admin` система держит в самой группе.
 #[cfg(target_os = "macos")]
 fn in_supplementary_groups(_user: &User, _group: Gid) -> bool {
-    // Спросить нечем, но и незачем: членство в `admin` система держит в
-    // списке членов самой группы, а его мы уже прочитали.
     false
 }
 
@@ -300,15 +285,12 @@ mod tests {
 
     #[test]
     fn the_socket_lives_inside_its_own_directory() {
-        // Каталог и есть первый рубеж: права на него ставятся до того, как
-        // сокет появится.
         let path = PathBuf::from(SYSTEM_DIR).join(SOCKET_FILE);
         assert_eq!(path.parent(), Some(Path::new(SYSTEM_DIR)));
     }
 
     #[test]
     fn others_can_only_traverse_the_directory() {
-        // Traversal lets the approved socket owner connect, not replace it.
         assert_eq!(DIR_MODE & 0o007, 1);
         assert_eq!(DIR_MODE & 0o022, 0);
         assert_eq!(SOCKET_MODE & 0o007, 0);
@@ -316,8 +298,6 @@ mod tests {
 
     #[test]
     fn the_system_path_is_tried_first() {
-        // Демон почти всегда служба; свой каталог — только для отладочного
-        // запуска, и искать в нём раньше значило бы подключаться не к тому.
         let paths = connect_paths();
         assert!(paths[0].starts_with(SYSTEM_DIR), "{paths:?}");
         assert_eq!(paths.len(), 2);
@@ -337,8 +317,6 @@ mod tests {
 
     #[test]
     fn an_ordinary_user_gets_a_path_of_their_own() {
-        // Иначе `penguin --foreground` для отладки требовал бы прав, которых
-        // у отладки нет.
         if Uid::effective().is_root() {
             assert!(is_system_path(&listen_path()));
         } else {
@@ -360,9 +338,8 @@ mod tests {
 
     #[test]
     fn we_are_an_administrator_or_we_are_not_but_asking_does_not_panic() {
-        // Вызывается на каждое подключение к каналу управления.
+        // Вызывается на каждое подключение.
         let _ = is_administrator(nix::unistd::getuid().as_raw());
-        // Несуществующий пользователь администратором быть не может.
         assert!(!is_administrator(u32::MAX - 1));
     }
 }

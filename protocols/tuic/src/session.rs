@@ -1,25 +1,9 @@
-//! Соединение целиком: подлинность, потоки, датаграммы, напоминания о себе.
+//! Постоянное соединение с сервером: подлинность, потоки, датаграммы, `Heartbeat`.
 //!
-//! # Одно соединение на профиль
-//!
-//! У TUIC, в отличие от SOCKS5 и Trojan, соединение постоянное: рукопожатие
-//! QUIC и проверка подлинности платятся **один раз**, а дальше каждое
-//! прикладное соединение — это поток внутри уже установленного. Отсюда
-//! [`Capabilities::multiplex`](penguin_proto::capabilities::Capabilities)
-//! у него `true`: маршрутизатор вправе считать открытие потока дешёвым.
-//!
-//! # Что здесь крутится само
-//!
-//! Две задачи на всё соединение:
-//!
-//! - **приём** — читает датаграммы и односторонние потоки, собирает из частей
-//!   целые датаграммы и раскладывает их по каналам;
-//! - **напоминание о себе** — шлёт `Heartbeat`. Без него шлюз с
-//!   преобразованием адресов забывает отображение через минуту молчания, и
-//!   соединение умирает, не сказав ни слова.
-//!
-//! Обе останавливаются вместе с сеансом: задача, читающая закрытое
-//! соединение, кончается сама, а напоминание снимается явно.
+//! Рукопожатие QUIC и проверка подлинности платятся один раз, каждое
+//! прикладное соединение — поток внутри него. Фоновых задач три: приём
+//! датаграмм, приём односторонних потоков (режим `quic`) и `Heartbeat`
+//! (иначе NAT забывает отображение).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,29 +21,23 @@ use crate::error::{TuicError, TuicResult};
 use crate::frame::command::{self, Packet, TOKEN_LEN};
 use crate::transport::QuicTransport;
 
-/// Сколько датаграмм держать в очереди канала, пока их не забрали.
+/// Глубина очереди канала датаграмм.
 const QUEUE: usize = 512;
 
-/// Наибольший односторонний поток, который мы согласны прочитать.
-///
-/// Односторонним потоком приезжает одна датаграмма. Верить объявленному без
-/// предела значит отдать памяти столько, сколько скажет сервер.
+/// Наибольший читаемый односторонний поток (одна датаграмма).
 const MAX_UNI: usize = 64 * 1024;
 
-/// Куда складываются пришедшие датаграммы: очередь на каждый канал.
+/// Очередь на каждый канал датаграмм.
 type Channels = Arc<parking_lot::Mutex<HashMap<u16, mpsc::Sender<(Bytes, SocketAddress)>>>>;
 
 /// Установленный и представившийся сеанс.
 pub struct Session {
-    /// Эндпойнт держится рядом: он владеет задачей ввода-вывода.
+    /// Владеет задачей ввода-вывода соединения.
     _endpoint: quinn::Endpoint,
     connection: quinn::Connection,
     mode: UdpMode,
-    /// Номер следующего канала датаграмм.
     next_association: AtomicU16,
-    /// Куда складывать датаграммы каждого канала.
     channels: Channels,
-    /// Задачи, живущие вместе с сеансом.
     tasks: parking_lot::Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -72,14 +50,15 @@ impl std::fmt::Debug for Session {
     }
 }
 
+fn disconnected(err: impl std::fmt::Display) -> TuicError {
+    TuicError::Disconnected(err.to_string())
+}
+
 impl Session {
     /// Представляется серверу и запускает задачи сеанса.
     ///
-    /// Отпечаток берётся **после** рукопожатия и из него самого: тридцать два
-    /// байта экспорта ключевого материала, где метка — шестнадцать сырых байт
-    /// UUID, а исходные данные — пароль. Посчитать его заранее нельзя, и в
-    /// этом весь смысл: подслушанный в одном соединении, в другом он не
-    /// подойдёт.
+    /// Отпечаток считается после рукопожатия: экспорт ключевого материала
+    /// (метка — сырые байты UUID, контекст — пароль).
     pub async fn start(transport: QuicTransport, config: &TuicConfig) -> TuicResult<Arc<Self>> {
         let QuicTransport {
             endpoint,
@@ -89,49 +68,36 @@ impl Session {
         let token = export_token(&connection, &config.uuid, &config.password)?;
         authenticate(&connection, &config.uuid, &token).await?;
 
-        let session = Arc::new(Self {
+        let channels = Channels::default();
+        let tasks = vec![
+            tokio::spawn(read_datagrams(connection.clone(), Arc::clone(&channels))),
+            tokio::spawn(read_uni_streams(connection.clone(), Arc::clone(&channels))),
+            tokio::spawn(heartbeat(connection.clone(), config.heartbeat())),
+        ];
+
+        Ok(Arc::new(Self {
             _endpoint: endpoint,
-            connection: connection.clone(),
+            connection,
             mode: config.udp_mode,
             next_association: AtomicU16::new(1),
-            channels: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            tasks: parking_lot::Mutex::new(Vec::new()),
-        });
-
-        let channels = Arc::clone(&session.channels);
-        let mut tasks = vec![
-            tokio::spawn(read_datagrams(connection.clone(), Arc::clone(&channels))),
-            tokio::spawn(read_uni_streams(connection.clone(), channels)),
-        ];
-        tasks.push(tokio::spawn(heartbeat(connection, config.heartbeat())));
-        session.tasks.lock().extend(tasks);
-
-        Ok(session)
+            channels,
+            tasks: parking_lot::Mutex::new(tasks),
+        }))
     }
 
-    /// Открывает поток до адреса назначения.
-    ///
-    /// Ответа сервер не шлёт: данные идут сразу за командой. Значит, отказ
-    /// виден только тем, что поток закрылся, — и различить его от
-    /// недостижимого адреса нечем.
+    /// Открывает поток до адреса назначения; ответа нет, отказ виден как закрытие потока.
     pub async fn open(
         &self,
         target: &SocketAddress,
     ) -> TuicResult<(quinn::SendStream, quinn::RecvStream)> {
-        let (mut send, recv) = self
-            .connection
-            .open_bi()
+        let (mut send, recv) = self.connection.open_bi().await.map_err(disconnected)?;
+        send.write_all(&command::connect(target)?)
             .await
-            .map_err(|e| TuicError::Disconnected(e.to_string()))?;
-
-        let command = command::connect(target)?;
-        send.write_all(&command)
-            .await
-            .map_err(|e| TuicError::Disconnected(e.to_string()))?;
+            .map_err(disconnected)?;
         Ok((send, recv))
     }
 
-    /// Заводит канал датаграмм и возвращает его номер и очередь ответов.
+    /// Заводит канал датаграмм: номер и очередь ответов.
     pub fn open_association(&self) -> (u16, mpsc::Receiver<(Bytes, SocketAddress)>) {
         let association = self.next_association.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel(QUEUE);
@@ -139,12 +105,9 @@ impl Session {
         (association, receiver)
     }
 
-    /// Закрывает канал датаграмм и сообщает об этом серверу.
+    /// Закрывает канал и сообщает серверу, чтобы он освободил своё состояние.
     pub async fn close_association(&self, association: u16) {
         self.channels.lock().remove(&association);
-
-        // Сервер держит за каналом своё состояние — сокет и таблицу адресов.
-        // Не сказать ему значит оставить это висеть до его собственного срока.
         if let Ok(mut send) = self.connection.open_uni().await {
             let _ = send.write_all(&command::dissociate(association)).await;
             let _ = send.finish();
@@ -160,7 +123,7 @@ impl Session {
         payload: &[u8],
     ) -> TuicResult<()> {
         match self.mode {
-            UdpMode::Native => self.send_native(association, packet, target, payload).await,
+            UdpMode::Native => self.send_native(association, packet, target, payload),
             UdpMode::Quic => {
                 self.send_over_stream(association, packet, target, payload)
                     .await
@@ -168,8 +131,8 @@ impl Session {
         }
     }
 
-    /// Датаграммами QUIC, с разрезанием по путевому MTU.
-    async fn send_native(
+    /// Датаграммами QUIC с разрезанием по путевому MTU.
+    fn send_native(
         &self,
         association: u16,
         packet: u16,
@@ -186,13 +149,7 @@ impl Session {
             .map_err(|_| TuicError::malformed("датаграмма не режется меньше чем на 256 частей"))?;
 
         for (index, part) in parts.into_iter().enumerate() {
-            // Адрес назван один раз, в первой части: повторять его незачем, и
-            // протокол этого не ждёт.
-            let address = if index == 0 {
-                Some(target.clone())
-            } else {
-                None
-            };
+            // Адрес только в первой части.
             let header = Packet {
                 association,
                 packet,
@@ -200,22 +157,20 @@ impl Session {
                 fragment: index as u16,
                 size: u16::try_from(part.len())
                     .map_err(|_| TuicError::malformed("часть длиннее 65535 байт"))?,
-                address,
+                address: (index == 0).then(|| target.clone()),
             };
 
-            let mut wire = header.encode()?;
+            let mut wire = Vec::with_capacity(header.encoded_len() + part.len());
+            header.encode_into(&mut wire)?;
             wire.extend_from_slice(part);
             self.connection
                 .send_datagram(Bytes::from(wire))
-                .map_err(|e| TuicError::Disconnected(e.to_string()))?;
+                .map_err(disconnected)?;
         }
         Ok(())
     }
 
-    /// Односторонним потоком, целиком и без разрезания.
-    ///
-    /// У потока предела длины нет, поэтому части здесь не нужны: датаграмма
-    /// едет одной командой.
+    /// Односторонним потоком целиком, без разрезания.
     async fn send_over_stream(
         &self,
         association: u16,
@@ -233,19 +188,13 @@ impl Session {
             address: Some(target.clone()),
         };
 
-        let mut wire = header.encode()?;
+        let mut wire = Vec::with_capacity(header.encoded_len() + payload.len());
+        header.encode_into(&mut wire)?;
         wire.extend_from_slice(payload);
 
-        let mut send = self
-            .connection
-            .open_uni()
-            .await
-            .map_err(|e| TuicError::Disconnected(e.to_string()))?;
-        send.write_all(&wire)
-            .await
-            .map_err(|e| TuicError::Disconnected(e.to_string()))?;
-        send.finish()
-            .map_err(|e| TuicError::Disconnected(e.to_string()))?;
+        let mut send = self.connection.open_uni().await.map_err(disconnected)?;
+        send.write_all(&wire).await.map_err(disconnected)?;
+        send.finish().map_err(disconnected)?;
         Ok(())
     }
 
@@ -271,12 +220,8 @@ impl Drop for Session {
 }
 
 /// Режет данные на части, помещающиеся в датаграмму QUIC.
-///
-/// Свободная функция с тестом: ошибка здесь даёт части, которые сервер не
-/// соберёт, а видно это будет как «UDP не работает, а TCP работает».
 fn split<'a>(payload: &'a [u8], limit: usize, target: &SocketAddress) -> TuicResult<Vec<&'a [u8]>> {
-    // Заголовок первой части длиннее остальных на адрес; чтобы не считать
-    // два предела, берём худший случай для всех.
+    // Худший случай для всех частей: заголовок с адресом.
     let header = 2 + 8 + crate::frame::address::encoded_len(Some(target));
     let room = limit
         .checked_sub(header)
@@ -301,8 +246,7 @@ fn export_token(
 ) -> TuicResult<[u8; TOKEN_LEN]> {
     let mut token = [0u8; TOKEN_LEN];
     connection
-        // Метка — шестнадцать сырых байт UUID, а не его запись с дефисами.
-        // В эталоне это `string(uuid[:])`, то есть побайтовое преобразование.
+        // Метка — сырые байты UUID, как `string(uuid[:])` в эталоне.
         .export_keying_material(&mut token, uuid.as_bytes(), password.as_bytes())
         .map_err(|_| TuicError::malformed("соединение не отдаёт ключевой материал"))?;
     Ok(token)
@@ -314,34 +258,26 @@ async fn authenticate(
     uuid: &Uuid,
     token: &[u8; TOKEN_LEN],
 ) -> TuicResult<()> {
-    let mut send = connection
-        .open_uni()
-        .await
-        .map_err(|e| TuicError::Disconnected(e.to_string()))?;
-
+    let mut send = connection.open_uni().await.map_err(disconnected)?;
     send.write_all(&command::authenticate(uuid, token))
         .await
-        .map_err(|e| TuicError::Disconnected(e.to_string()))?;
-    send.finish()
-        .map_err(|e| TuicError::Disconnected(e.to_string()))?;
+        .map_err(disconnected)?;
+    send.finish().map_err(disconnected)?;
     Ok(())
 }
 
 /// Читает датаграммы QUIC и раскладывает их по каналам.
 async fn read_datagrams(connection: quinn::Connection, channels: Channels) {
-    // Собиратель живёт в задаче и никем не разделяется: только сюда приходят
-    // части, и замок вокруг него был бы замком самого с собой.
     let mut reassembler = Reassembler::new();
 
     loop {
-        let datagram = match connection.read_datagram().await {
-            Ok(datagram) => datagram,
+        match connection.read_datagram().await {
+            Ok(datagram) => deliver(&datagram, &mut reassembler, &channels),
             Err(err) => {
                 tracing::debug!(%err, "приём датаграмм закончился");
                 return;
             }
-        };
-        deliver(&datagram, &mut reassembler, &channels).await;
+        }
     }
 }
 
@@ -359,17 +295,15 @@ async fn read_uni_streams(connection: quinn::Connection, channels: Channels) {
         };
 
         match recv.read_to_end(MAX_UNI).await {
-            Ok(bytes) => deliver(&bytes, &mut reassembler, &channels).await,
+            Ok(bytes) => deliver(&Bytes::from(bytes), &mut reassembler, &channels),
             Err(err) => tracing::debug!(%err, "односторонний поток не дочитался"),
         }
     }
 }
 
 /// Разбирает пришедшее и кладёт готовую датаграмму в её канал.
-async fn deliver(bytes: &[u8], reassembler: &mut Reassembler<SocketAddress>, channels: &Channels) {
+fn deliver(bytes: &Bytes, reassembler: &mut Reassembler<SocketAddress>, channels: &Channels) {
     let Some((kind, used)) = command::read_head(bytes).ok().flatten() else {
-        // Повреждённое сообщение. Жаловаться некому — на той стороне UDP, и
-        // единственное разумное действие тут выбросить.
         return;
     };
     if kind != command::CMD_PACKET {
@@ -380,64 +314,44 @@ async fn deliver(bytes: &[u8], reassembler: &mut Reassembler<SocketAddress>, cha
         return;
     };
     let start = used + header_len;
-    let Some(payload) = bytes.get(start..start + usize::from(header.size)) else {
+    let end = start + usize::from(header.size);
+    if end > bytes.len() {
         return;
-    };
+    }
 
-    // Адрес есть только у первой части; у остальных его берёт собиратель из
-    // той, что пришла первой.
-    let Some(address) = header.address.clone() else {
-        // Часть без адреса и без начатой сборки собрать не из чего.
-        let fragment = Fragment {
-            session: u64::from(header.association),
-            packet: header.packet,
-            count: header.fragments,
-            index: u8::try_from(header.fragment).unwrap_or(u8::MAX),
-            address: SocketAddress::domain("", 0),
-            payload: Bytes::copy_from_slice(payload),
-        };
-        if let Some((joined, address)) = reassembler.accept(fragment) {
-            send_to_channel(channels, header.association, joined, address).await;
-        }
-        return;
-    };
-
+    let association = header.association;
     let fragment = Fragment {
-        session: u64::from(header.association),
+        session: u64::from(association),
         packet: header.packet,
         count: header.fragments,
         index: u8::try_from(header.fragment).unwrap_or(u8::MAX),
-        address,
-        payload: Bytes::copy_from_slice(payload),
+        // У остальных частей адрес берёт собиратель из первой.
+        address: header
+            .address
+            .unwrap_or_else(|| SocketAddress::domain("", 0)),
+        payload: bytes.slice(start..end),
     };
     if let Some((joined, address)) = reassembler.accept(fragment) {
-        send_to_channel(channels, header.association, joined, address).await;
+        send_to_channel(channels, association, joined, address);
     }
 }
 
-/// Кладёт готовую датаграмму в очередь её канала.
-async fn send_to_channel(
-    channels: &Channels,
-    association: u16,
-    payload: Bytes,
-    address: SocketAddress,
-) {
-    let sender = channels.lock().get(&association).cloned();
-    let Some(sender) = sender else {
-        // Канал успели закрыть: датаграмма опоздала. Для UDP это то же самое,
-        // что потерянный пакет.
+/// Кладёт датаграмму в очередь канала; при переполнении теряет, как UDP.
+fn send_to_channel(channels: &Channels, association: u16, payload: Bytes, address: SocketAddress) {
+    let Some(sender) = channels.lock().get(&association).cloned() else {
         return;
     };
-    if sender.send((payload, address)).await.is_err() {
-        tracing::debug!(association, "канал датаграмм закрыт");
+    if sender.try_send((payload, address)).is_err() {
+        tracing::trace!(
+            association,
+            "очередь канала полна или закрыта, датаграмма отброшена"
+        );
     }
 }
 
 /// Напоминает серверу о себе.
 async fn heartbeat(connection: quinn::Connection, every: std::time::Duration) {
     let mut ticker = tokio::time::interval(every);
-    // Первый тик приходит сразу; напоминать о себе в тот же миг, когда
-    // соединение установлено, незачем.
     ticker.tick().await;
 
     loop {
@@ -461,8 +375,6 @@ mod tests {
 
     #[test]
     fn a_small_datagram_stays_whole() {
-        // Подавляющее большинство трафика — целые датаграммы; резать их значит
-        // платить заголовком дважды.
         let parts = split(b"query", 1200, &target()).expect("режется");
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], b"query");
@@ -487,7 +399,6 @@ mod tests {
 
     #[test]
     fn an_empty_datagram_is_still_one_part() {
-        // Пустая датаграмма законна: её шлют, чтобы открыть путь через NAT.
         let parts = split(b"", 1200, &target()).expect("режется");
         assert_eq!(parts.len(), 1);
         assert!(parts[0].is_empty());
@@ -495,8 +406,6 @@ mod tests {
 
     #[test]
     fn a_datagram_smaller_than_the_header_is_refused() {
-        // Иначе получились бы части по нулю байт, и датаграмма не уехала бы
-        // никогда — молча.
         assert!(split(b"query", 8, &target()).is_err());
     }
 }

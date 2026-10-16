@@ -1,9 +1,6 @@
 //! Параметры: адрес сервера, имя и пароль, перенос, TLS.
 //!
-//! TLS обязателен всегда, а не флагом: у TrustTunnel нет своего рукопожатия
-//! вовсе (`PROTOCOL.md`, §1.1) — вся конфиденциальность на TLS, и разговор в
-//! открытую был бы не «менее защищённым режимом», а протоколом без единой
-//! защиты данных.
+//! TLS обязателен всегда: своего рукопожатия нет (`PROTOCOL.md`, §1.1).
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
@@ -24,8 +21,6 @@ pub enum Transport {
 }
 
 /// Настройки подключения к серверу TrustTunnel.
-///
-/// `Debug` реализован вручную ниже — производный вывел бы пароль в журнал.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustTunnelConfig {
@@ -35,9 +30,7 @@ pub struct TrustTunnelConfig {
     /// Имя пользователя.
     pub username: String,
 
-    /// Пароль.
-    ///
-    /// В `Debug` не попадает: вывод пишется вручную ниже.
+    /// Пароль (в `Debug` скрыт).
     pub password: String,
 
     /// Перенос. Не задан — HTTP/2, как было до появления HTTP/3.
@@ -57,8 +50,6 @@ impl TrustTunnelConfig {
             .parse()
             .map_err(|e| TrustTunnelError::config(format!("адрес сервера `{raw}`: {e}")))?;
 
-        // Диапазон портов — это смена порта на ходу; у CONNECT поверх HTTP/2
-        // её нет вовсе: сервер один и слушает один порт (`PROTOCOL.md`, §4.2).
         if endpoint.ports.is_hopping() {
             return Err(TrustTunnelError::config(
                 "trusttunnel не умеет смену порта: укажите один порт",
@@ -72,10 +63,7 @@ impl TrustTunnelConfig {
         (&self.username, &self.password)
     }
 
-    /// Имя, которое подставляется в TLS.
-    ///
-    /// Явно заданное `sni` сильнее: сервер за подменённым адресом всё равно
-    /// ждёт своё имя, и без этого сертификат не сойдётся.
+    /// Имя для TLS; явно заданное `sni` сильнее адреса.
     pub fn server_name(&self) -> TrustTunnelResult<String> {
         if let Some(sni) = &self.tls.sni
             && !sni.is_empty()
@@ -84,7 +72,6 @@ impl TrustTunnelConfig {
         }
         Ok(match self.endpoint()?.0 {
             Address::Domain(domain) => domain,
-            // Без скобок и для IPv6: rustls ждёт сам адрес.
             Address::Ip(ip) => ip.to_string(),
         })
     }
@@ -95,10 +82,6 @@ impl TrustTunnelConfig {
         self.server_name()?;
         self.tls.validate()?;
 
-        // Опознание — часть протокола (`PROTOCOL.md`, §9.1): заголовок
-        // `proxy-authorization` уходит на каждом `CONNECT` без исключений, и
-        // сервер, ждущий Basic-опознания, откажет пустому имени точно так же,
-        // как неверному паролю, — только позже и по сети.
         if self.username.is_empty() {
             return Err(TrustTunnelError::config(
                 "не задано имя пользователя: опознание обязательно на каждом CONNECT",
@@ -108,8 +91,6 @@ impl TrustTunnelConfig {
     }
 }
 
-// Пароль не должен попасть в журнал ни целиком, ни частями: строка «первые
-// четыре символа» — это уже утечка, если паролей у пользователя два-три.
 impl std::fmt::Debug for TrustTunnelConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrustTunnelConfig")
@@ -176,8 +157,6 @@ mod tests {
 
     #[test]
     fn a_missing_username_is_reported() {
-        // Опознание уходит на каждом CONNECT: без имени сервер откажет
-        // первому же запросу, и ошибку лучше показать в поле сразу.
         let config = TrustTunnelConfig {
             username: String::new(),
             ..config("example.com:443")

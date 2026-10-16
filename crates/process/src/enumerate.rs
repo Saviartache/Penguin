@@ -1,8 +1,4 @@
-//! Список запущенных процессов — для выбора приложения в GUI.
-//!
-//! Нужен ровно одному экрану: пользователь отмечает мышью приложения, которые
-//! должны идти мимо тоннеля, и видеть он хочет то, что запущено прямо сейчас.
-//! На горячем пути этот список не участвует.
+//! Список запущенных процессов для выбора приложения в GUI.
 
 use std::collections::HashMap;
 
@@ -13,10 +9,7 @@ use crate::identity::ProcessIdentity;
 pub struct RunningApp {
     /// Личность процесса.
     pub identity: ProcessIdentity,
-    /// Сколько процессов с этим же путём запущено.
-    ///
-    /// Браузер — это два десятка процессов с одним путём. Показывать их
-    /// по отдельности бессмысленно: правило пишется на путь, а не на номер.
+    /// Сколько процессов с этим путём запущено.
     pub instances: usize,
 }
 
@@ -26,9 +19,6 @@ pub trait ProcessEnumerator: Send + Sync + 'static {
     fn list(&self) -> Vec<ProcessIdentity>;
 
     /// То же, свёрнутое по пути и отсортированное по имени.
-    ///
-    /// Реализация по умолчанию годится всем: сворачивание не зависит от
-    /// платформы.
     fn list_apps(&self) -> Vec<RunningApp> {
         let mut by_path: HashMap<String, RunningApp> = HashMap::new();
 
@@ -97,8 +87,6 @@ mod tests {
 
     #[test]
     fn collapses_instances_of_the_same_app() {
-        // Браузер — это два десятка процессов с одним путём; в списке для
-        // выбора он должен быть одной строкой.
         let enumerator = Fake(vec![
             ProcessIdentity::new(1, "/apps/chrome"),
             ProcessIdentity::new(2, "/apps/chrome"),

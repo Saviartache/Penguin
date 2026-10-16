@@ -1,25 +1,13 @@
 //! Сквозная проверка прокси-режима: через клиент проходят настоящие байты.
 //!
-//! Это тот путь, с которого начинается разбор любой неполадки («если через
-//! `penguin socks` трафик ходит, а через тоннель нет — дело не в протоколе»),
-//! и до сих пор он проверялся только по частям: рукопожатие SOCKS5 отдельно,
-//! правила отдельно, копирование отдельно. Собранным целиком его никто не
-//! проверял, а ломается он именно на стыках.
-//!
-//! Сервера здесь нет и не нужно: правила отправляют трафик **напрямую**, и
-//! проверяется вся цепочка, кроме самого протокола, — приём соединения,
-//! рукопожатие, разбор адреса, решение маршрутизатора, исходящее соединение и
-//! перекачка байтов в обе стороны.
+//! Сервера нет: правила отправляют трафик напрямую, проверяется вся цепочка
+//! кроме протокола.
 //!
 //! ```text
 //!   тест ──► SOCKS5 ──► маршрутизатор ──► напрямую ──► тестовый сервер
 //! ```
 
-// Вспомогательные функции этого файла паникуют вместо возврата ошибки, и это
-// здесь верное поведение: непрочитавшийся образец или не собравшийся набор
-// правил — не «ошибка, которую надо обработать», а провалившийся тест. Запрет
-// `expect` заведён ради горячего пути, где паника рвёт соединение; в тестах
-// обход его через `if let` даёт тест, молча проходящий при поломке.
+// Паника в тесте — провал, а не ошибка для обработки.
 #![allow(clippy::expect_used)]
 
 use std::net::SocketAddr;
@@ -41,16 +29,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
-/// Что тестовый сервер приписывает к полученному.
-///
-/// Приписка нужна, чтобы отличить «дошло и вернулось» от «прочитали то, что
-/// сами же и отправили»: без неё эхо неотличимо от петли в буфере.
+/// Приписка отличает ответ сервера от петли в буфере.
 const ECHO_SUFFIX: &[u8] = b" <- back";
 
-/// Поднимает сервер, который отвечает на всё, что ему прислали.
-///
-/// Настоящий сокет, а не заглушка: проверяется в том числе то, что клиент
-/// умеет открыть исходящее соединение и довести до него байты.
+/// Поднимает эхо-сервер на настоящем сокете.
 async fn echo_server() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -78,10 +60,7 @@ async fn echo_server() -> SocketAddr {
     addr
 }
 
-/// Поднимает SOCKS5, который всё отправляет напрямую.
-///
-/// `TunnelMode::Off` — режим «тоннель выключен, правила продолжают
-/// разбираться»: ровно то, что нужно, чтобы проверить всю цепочку без сервера.
+/// Поднимает SOCKS5, который всё отправляет напрямую (`TunnelMode::Off`).
 async fn socks_proxy() -> (SocketAddr, CancellationToken) {
     let dialer = Arc::new(SystemDialer::new(Arc::new(SystemResolver)));
     let outbounds = Arc::new(OutboundPool::new(dialer));
@@ -97,8 +76,6 @@ async fn socks_proxy() -> (SocketAddr, CancellationToken) {
 
     let pipeline = Arc::new(
         Pipeline::new(router, outbounds, Arc::new(NoResolver), Metrics::new())
-            // Владелец соединения не ищется: правил по процессам нет, а
-            // системный вызов на каждое соединение стоит денег.
             .with_process_lookup(false),
     );
 
@@ -109,8 +86,6 @@ async fn socks_proxy() -> (SocketAddr, CancellationToken) {
     let addr = inbound.local_addr().expect("адрес известен");
     let cancel = CancellationToken::new();
 
-    // `serve` берёт точку по значению в боксе: она работает, пока её не
-    // остановят, и делить её с кем-то незачем.
     let inbound: Box<dyn Inbound> = Box::new(inbound);
     tokio::spawn({
         let cancel = cancel.clone();
@@ -128,7 +103,6 @@ async fn socks_connect(proxy: SocketAddr, target: SocketAddr) -> TcpStream {
         .await
         .expect("прокси принял соединение");
 
-    // Приветствие: версия 5, один метод — без пароля.
     stream
         .write_all(&[0x05, 0x01, 0x00])
         .await
@@ -144,7 +118,6 @@ async fn socks_connect(proxy: SocketAddr, target: SocketAddr) -> TcpStream {
         "прокси не согласился работать без пароля"
     );
 
-    // Запрос CONNECT на адрес IPv4.
     let SocketAddr::V4(target_v4) = target else {
         panic!("тестовый сервер обязан быть на IPv4");
     };
@@ -153,7 +126,6 @@ async fn socks_connect(proxy: SocketAddr, target: SocketAddr) -> TcpStream {
     request.extend_from_slice(&target_v4.port().to_be_bytes());
     stream.write_all(&request).await.expect("запрос ушёл");
 
-    // Ответ: версия, код, резерв, тип адреса, адрес, порт.
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).await.expect("ответ на запрос");
     assert_eq!(head[0], 0x05, "не тот номер версии в ответе");
@@ -163,7 +135,6 @@ async fn socks_connect(proxy: SocketAddr, target: SocketAddr) -> TcpStream {
         head[1]
     );
 
-    // Дочитываем привязанный адрес, иначе он попадёт в поток данных.
     let mut bound = [0u8; 6];
     stream
         .read_exact(&mut bound)
@@ -199,7 +170,6 @@ async fn bytes_travel_through_the_proxy_in_both_directions() {
 
 #[tokio::test]
 async fn the_proxy_survives_several_connections() {
-    // Прокси на одно соединение бесполезен: браузер открывает их десятками.
     let target = echo_server().await;
     let (proxy, cancel) = socks_proxy().await;
 
@@ -223,12 +193,8 @@ async fn the_proxy_survives_several_connections() {
 
 #[tokio::test]
 async fn a_refused_target_is_reported_not_hung() {
-    // Соединение, которое не открылось, обязано вернуть отказ. Молчание в
-    // ответ выглядит для приложения как зависшая сеть, и ждать оно будет
-    // долго.
     let (proxy, cancel) = socks_proxy().await;
 
-    // Порт, который заведомо никто не слушает: занимаем и сразу отпускаем.
     let dead = {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("слушает");
         listener.local_addr().expect("адрес известен")

@@ -1,30 +1,5 @@
-//! Разбор `ServerHello` — ровно до того, что понадобится Reality на
-//! следующем шаге: версия, выбранный шифр, эхо `SessionID`, `key_share` и
-//! `supported_versions`. Сертификат и остальное рукопожатие сюда не входят —
-//! это уже за пределами задачи этого крейта (см. документ `lib.rs`).
-//!
-//! ```text
-//! TLSPlaintext
-//! ├─ 0x16          тип: handshake
-//! ├─ версия (2 Б)
-//! ├─ длина (2 Б)
-//! └─ Handshake
-//!    ├─ 0x02       тип: server_hello
-//!    ├─ длина (3 Б)
-//!    └─ ServerHello
-//!       ├─ версия (2 Б) · random (32 Б)
-//!       ├─ session_id      (1 Б длины + данные, эхо клиентского)
-//!       ├─ cipher_suite    (2 Б)
-//!       ├─ compression     (1 Б, всегда 0 — TLS 1.3 сжатие не поддерживает)
-//!       └─ extensions      (2 Б длины)
-//!          ├─ 0x002b supported_versions ──► настоящая версия TLS
-//!          └─ 0x0033 key_share          ──► группа сервера и его ключ
-//! ```
-//!
-//! Байты пришли из сети, и длины в них — числа с чужой стороны: каждое
-//! чтение проверяет границу, а не берёт её на веру (`AGENTS.md` §4.3).
-//! Обрезанный или подделанный `ServerHello` возвращает [`UtlsError`], а не
-//! паникует.
+//! Разбор `ServerHello`: версия, шифр, эхо `SessionID`, `key_share`,
+//! `supported_versions`. Все длины проверяются; ошибка вместо паники.
 
 use crate::error::{UtlsError, UtlsResult};
 use crate::record::{CONTENT_TYPE_HANDSHAKE, HANDSHAKE_TYPE_SERVER_HELLO};
@@ -44,36 +19,25 @@ pub struct KeyShare {
 /// Разобранный `ServerHello`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerHello {
-    /// Поле `legacy_version` тела сообщения. В TLS 1.3 оно всегда `0x0303`
-    /// (см. [`crate::record::LEGACY_VERSION`]) — настоящую версию называет
-    /// [`Self::supported_version`].
+    /// `legacy_version` тела (в TLS 1.3 всегда `0x0303`).
     pub legacy_version: u16,
-    /// Случайное значение сервера (`ServerHello.random`).
+    /// Случайное значение сервера.
     pub random: [u8; 32],
-    /// Эхо `SessionID`, которое клиент отправил в `ClientHello`. Длина может
-    /// быть короче 32 байт или нулевой — сервер имеет на это право, хотя ни
-    /// один настоящий TLS 1.3 сервер так не делает.
+    /// Эхо `SessionID` клиента.
     pub session_id: Vec<u8>,
-    /// Шифр, который выбрал сервер, — один из тех, что были в `ClientHello`.
+    /// Выбранный шифр.
     pub cipher_suite: u16,
-    /// Метод сжатия. У TLS 1.3 всегда `0`.
+    /// Метод сжатия (в TLS 1.3 всегда `0`).
     pub compression_method: u8,
-    /// `key_share`, если сервер его прислал. `None` означает, что впереди
-    /// `HelloRetryRequest` или сервер остался на TLS 1.2 — разбирать это
-    /// дальше не дело этого крейта.
+    /// `key_share`; `None` при `HelloRetryRequest` или TLS 1.2.
     pub key_share: Option<KeyShare>,
-    /// Единственное значение из `supported_versions`, если оно было.
+    /// Значение `supported_versions`, если было.
     pub supported_version: Option<u16>,
-    /// Остальные расширения как есть — код и тело, без разбора внутрь. Это
-    /// не лень, а честная граница: их разбор потребуется, только когда
-    /// появится тот, кто ими пользуется.
+    /// Остальные расширения как есть: код и тело.
     pub extensions: Vec<(u16, Vec<u8>)>,
 }
 
-/// Сколько байт нужно, чтобы разобрать одну TLS-запись с `ServerHello`.
-///
-/// `Ok(None)` — заголовка записи ещё не хватает; это обычное дело в потоке,
-/// а не ошибка.
+/// Полная длина записи с `ServerHello`; `Ok(None)` — заголовка ещё не хватает.
 pub fn record_len(bytes: &[u8]) -> UtlsResult<Option<usize>> {
     let Some(header) = bytes.get(..5) else {
         return Ok(None);
@@ -88,9 +52,7 @@ pub fn record_len(bytes: &[u8]) -> UtlsResult<Option<usize>> {
     Ok(Some(5 + len))
 }
 
-/// Разбирает `ServerHello` из одной полной TLS-записи (заголовок записи и
-/// сообщение рукопожатия целиком — ровно столько байт, сколько назвал
-/// [`record_len`]).
+/// Разбирает `ServerHello` из одной полной записи (ровно [`record_len`] байт).
 pub fn parse(record: &[u8]) -> UtlsResult<ServerHello> {
     let mut reader = Reader::new(record);
 
@@ -100,7 +62,7 @@ pub fn parse(record: &[u8]) -> UtlsResult<ServerHello> {
             "тип записи {record_type:#04x} вместо handshake (0x16)"
         )));
     }
-    reader.skip(2)?; // версия записи — не значима для ServerHello
+    reader.skip(2)?;
     let record_len = reader.u16()? as usize;
     let mut handshake = Reader::new(reader.take(record_len)?);
 
@@ -126,8 +88,6 @@ pub fn parse(record: &[u8]) -> UtlsResult<ServerHello> {
     let mut supported_version = None;
     let mut extensions = Vec::new();
 
-    // extensions — необязательное поле формата: сервер, ответивший TLS 1.2
-    // без единого расширения, вправе не прислать даже нулевую длину списка.
     if body.remaining() > 0 {
         let extensions_len = body.u16()? as usize;
         let mut list = Reader::new(body.take(extensions_len)?);
@@ -166,9 +126,7 @@ pub fn parse(record: &[u8]) -> UtlsResult<ServerHello> {
     })
 }
 
-/// Чтение из буфера с проверкой границ на каждом шаге — байты пришли с той
-/// стороны, и любое чтение без проверки читает за границей буфера по чужому
-/// числу.
+/// Чтение с проверкой границ на каждом шаге.
 struct Reader<'a> {
     data: &'a [u8],
     position: usize,
@@ -222,8 +180,7 @@ fn too_short() -> UtlsError {
 mod tests {
     use super::*;
 
-    /// Собирает запись с `ServerHello`, у которого есть `key_share` и
-    /// `supported_versions`, — то, что реально шлёт сервер TLS 1.3.
+    /// Запись `ServerHello` TLS 1.3 с `key_share` и `supported_versions`.
     fn server_hello_record(cipher_suite: u16, group: u16, key_data: &[u8]) -> Vec<u8> {
         let mut key_share_ext = Vec::new();
         key_share_ext.extend_from_slice(&group.to_be_bytes());
@@ -237,8 +194,7 @@ mod tests {
         extensions.extend_from_slice(&EXTENSION_KEY_SHARE.to_be_bytes());
         extensions.extend_from_slice(&(key_share_ext.len() as u16).to_be_bytes());
         extensions.extend_from_slice(&key_share_ext);
-        // Неизвестное расширение — чтобы убедиться, что оно попадает в
-        // «остальное» нетронутым, а не роняет разбор.
+        // Неизвестное расширение
         extensions.extend_from_slice(&0x00ffu16.to_be_bytes());
         extensions.extend_from_slice(&3u16.to_be_bytes());
         extensions.extend_from_slice(&[1, 2, 3]);
@@ -306,9 +262,6 @@ mod tests {
     fn a_truncated_server_hello_is_refused() {
         let record = server_hello_record(0x1301, 29, &[0xEE; 32]);
         for cut in 0..record.len() {
-            // Каждая длина — ни `unwrap`, ни выход за границы: только
-            // `Err` или, в редких случаях совпадения границ, `Ok` на
-            // случайно валидном префиксе.
             let _ = parse(&record[..cut]);
         }
         assert!(parse(&record[..record.len() - 1]).is_err());
@@ -323,7 +276,6 @@ mod tests {
     #[test]
     fn a_handshake_message_of_the_wrong_type_is_refused() {
         let mut record = server_hello_record(0x1301, 29, &[0xEE; 32]);
-        // Пятый байт — тип сообщения рукопожатия, сразу после заголовка записи.
         record[5] = 0x01; // client_hello вместо server_hello
         let err = parse(&record).expect_err("это не ServerHello");
         assert!(err.to_string().contains("server_hello"));

@@ -1,17 +1,11 @@
 //! Пул активных исходящих: по одному на профиль, общие для всех соединений.
 //!
-//! Здесь же — **единственное место во всей программе, где перечислены
-//! протоколы**. Ни `router`, ни `netstack`, ни `gui` не содержат ни одной
-//! строки, знающей слово «hysteria»; добавление второго протокола — это новая
-//! фича в `Cargo.toml` и одна строка регистрации ниже.
-//!
-//! Направление создаётся один раз на профиль и живёт, пока профиль активен.
-//! Пересоздавать его на каждое соединение значило бы платить рукопожатием
-//! QUIC за каждую вкладку браузера.
+//! Единственное место, где перечислены протоколы (AGENTS §8).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use parking_lot::RwLock;
 use penguin_config::schema::profile::Profile;
 use penguin_core::id::OutboundId;
 use penguin_proto::dialer::Dialer;
@@ -28,9 +22,8 @@ use crate::packet_tunnel::PacketTunnel;
 pub struct OutboundPool {
     registry: ProtocolRegistry,
     dialer: Arc<dyn Dialer>,
-    active: DashMap<OutboundId, Arc<dyn Outbound>>,
-    /// Замок на создание: два одновременных соединения к одному профилю не
-    /// должны поднять два соединения QUIC.
+    active: RwLock<HashMap<OutboundId, Arc<dyn Outbound>>>,
+    /// Не даёт двум соединениям к одному профилю поднять два QUIC.
     building: Mutex<()>,
 }
 
@@ -38,7 +31,7 @@ impl std::fmt::Debug for OutboundPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OutboundPool")
             .field("protocols", &self.registry.protocols().collect::<Vec<_>>())
-            .field("active", &self.active.len())
+            .field("active", &self.active.read().len())
             .finish()
     }
 }
@@ -49,19 +42,14 @@ impl OutboundPool {
         let mut registry = ProtocolRegistry::new();
         register_protocols(&mut registry);
 
-        let pool = Self {
+        // Прямой выход — обычное направление: отдельной ветки в движке нет.
+        let direct: Arc<dyn Outbound> = Arc::new(DirectOutbound::new(Arc::clone(&dialer)));
+        Self {
             registry,
-            dialer: Arc::clone(&dialer),
-            active: DashMap::new(),
+            dialer,
+            active: RwLock::new(HashMap::from([(OutboundId::direct(), direct)])),
             building: Mutex::new(()),
-        };
-
-        // Прямой выход — такое же направление, как любое другое. Благодаря
-        // этому у движка нет отдельной ветки «а если напрямую»: решение
-        // маршрутизатора всегда превращается в поиск направления по имени.
-        pool.active
-            .insert(OutboundId::direct(), Arc::new(DirectOutbound::new(dialer)));
-        pool
+        }
     }
 
     /// Имена протоколов, доступных в этой сборке.
@@ -72,9 +60,6 @@ impl OutboundPool {
     }
 
     /// Проверяет параметры профиля, не подключаясь.
-    ///
-    /// Через общую точку входа реестра: протокол может работать на потоках
-    /// или на пакетах, и ошибку в поле интерфейс показывает одинаково.
     pub fn validate(&self, profile: &Profile) -> Result<(), ProtocolError> {
         self.registry
             .validate(&profile.outbound.protocol, &profile.outbound.params)
@@ -86,18 +71,14 @@ impl OutboundPool {
         profile: &Profile,
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let id = OutboundId::from(profile.id.clone());
-
-        if let Some(existing) = self.active.get(&id) {
-            return Ok(Arc::clone(&existing));
+        if let Some(existing) = self.get(&id) {
+            return Ok(existing);
         }
 
-        // Замок держится на время подключения: без него десяток соединений,
-        // стартовавших разом, поднял бы десяток соединений QUIC.
         let _guard = self.building.lock().await;
-
-        // Пока ждали замок, направление мог создать кто-то другой.
-        if let Some(existing) = self.active.get(&id) {
-            return Ok(Arc::clone(&existing));
+        // Пока ждали замок, направление мог создать другой.
+        if let Some(existing) = self.get(&id) {
+            return Ok(existing);
         }
 
         let ctx = BuildContext {
@@ -105,10 +86,7 @@ impl OutboundPool {
             dialer: Arc::clone(&self.dialer),
         };
 
-        // Два реестра, одно направление наружу. Протокол уровня пакетов
-        // (WireGuard и его родня) приезжает сюда обёрнутым в мост
-        // ([`crate::packet_tunnel`]), и для всего, что выше, он неотличим от
-        // обычного: ни `router`, ни конвейер про пакеты не знают.
+        // Пакетный протокол приезжает в мосте и неотличим от обычного.
         let outbound: Arc<dyn Outbound> =
             if let Some(packets) = self.registry.get_packet(&profile.outbound.protocol) {
                 let tunnel = packets.build(ctx, &profile.outbound.params).await?;
@@ -123,22 +101,18 @@ impl OutboundPool {
             protocol = profile.outbound.protocol,
             "направление поднято"
         );
-        self.active.insert(id, Arc::clone(&outbound));
+        self.active.write().insert(id, Arc::clone(&outbound));
         Ok(outbound)
     }
 
     /// Направление по идентификатору, если оно уже поднято.
     pub fn get(&self, id: &OutboundId) -> Option<Arc<dyn Outbound>> {
-        self.active.get(id).map(|entry| Arc::clone(&entry))
+        self.active.read().get(id).cloned()
     }
 
-    /// Прямой выход.
-    ///
-    /// Есть всегда: он создаётся вместе с пулом и не требует подключения.
+    /// Прямой выход: есть всегда.
     pub fn direct(&self) -> Arc<dyn Outbound> {
-        self.active
-            .get(&OutboundId::direct())
-            .map(|entry| Arc::clone(&entry))
+        self.get(&OutboundId::direct())
             .unwrap_or_else(|| Arc::new(DirectOutbound::new(Arc::clone(&self.dialer))))
     }
 
@@ -147,7 +121,8 @@ impl OutboundPool {
         if id.is_direct() {
             return;
         }
-        if let Some((_, outbound)) = self.active.remove(id)
+        let removed = self.active.write().remove(id);
+        if let Some(outbound) = removed
             && let Err(err) = outbound.close().await
         {
             tracing::debug!(%id, %err, "направление закрылось с ошибкой");
@@ -158,9 +133,10 @@ impl OutboundPool {
     pub async fn close_all(&self) {
         let ids: Vec<OutboundId> = self
             .active
-            .iter()
-            .map(|e| e.key().clone())
+            .read()
+            .keys()
             .filter(|id| !id.is_direct())
+            .cloned()
             .collect();
         for id in ids {
             self.close(&id).await;
@@ -168,26 +144,13 @@ impl OutboundPool {
     }
 }
 
-/// Фичи, включённые в эту сборку, через запятую.
-///
-/// Считает `build.rs` по переменным Cargo — то есть по тому, что на самом
-/// деле включено, а не по списку, который можно забыть пополнить. Ради этого
-/// он и заведён: см. тест `every_enabled_feature_brings_its_protocols`.
+/// Фичи, включённые в эту сборку, через запятую (считает `build.rs`).
 pub const FEATURES: &str = env!("PENGUIN_FEATURES");
 
-/// Что каждая фича обязана положить в реестр.
-///
-/// Оракул для тестов ниже, и потому `cfg(test)`: в работе программе это знание
-/// не нужно — она спрашивает реестр. Нужно оно проверке, и забыть здесь так же
-/// нельзя, как забыть строку регистрации: тест смотрит в обе стороны — и что
-/// объявленное зарегистрировано, и что зарегистрированное объявлено.
-///
-/// `None` — фича не про протоколы (`default`) либо про протокол, о котором
-/// здесь не написали. Второе тест считает ошибкой.
+/// Что каждая фича обязана положить в реестр; `None` — фича не описана.
 #[cfg(test)]
 fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
     Some(match feature {
-        // Не протокол: перечисление остальных.
         "default" => &[],
         "pingwin" => &["pingwin"],
         "dpi" => &["dpi"],
@@ -199,31 +162,21 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "tuic" => &["tuic"],
         "anytls" => &["anytls"],
         "juicity" => &["juicity"],
-        // Одна фича, два имени: по HTTP/2 и по HTTP/3.
         "naive" => &["http2", "http3"],
         "masque" => &["masque", "masque-ip"],
         "wireguard" => &["wireguard"],
         "trusttunnel" => &["trusttunnel"],
-        // Одна фича, два имени: с TLS и без.
         "socks5" => &["socks5", "socks5-tls"],
         _ => return None,
     })
 }
 
-/// Регистрирует протоколы, включённые в сборку.
-///
-/// Добавление протокола — одна строка здесь, одна фича в `Cargo.toml` и одна
-/// строка в [`protocols_of`]. Больше нигде в программе трогать ничего не нужно.
+/// Регистрирует протоколы, включённые в сборку: строка здесь, фича в
+/// `Cargo.toml`, строка в [`protocols_of`].
 fn register_protocols(registry: &mut ProtocolRegistry) {
-    // Свой протокол, а не чужой: рукопожатие в форме TLS 1.3, 0-RTT,
-    // мультиплексор и обход DPI в первой посылке. Сервер к нему —
-    // `servers/pingwin` в этом же дереве.
     #[cfg(feature = "pingwin")]
     registry.register(Arc::new(penguin_pingwin::PingwinFactory::new()));
 
-    // Единственное направление в реестре, у которого нет сервера: соединение
-    // идёт прямо к сайту, а обход применяется к его первой посылке. Нужен он
-    // там, где адрес сайта достижим, а разговор рвут по имени узла.
     #[cfg(feature = "dpi")]
     registry.register(Arc::new(penguin_dpi::DpiFactory::new()));
 
@@ -251,9 +204,7 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
     #[cfg(feature = "juicity")]
     registry.register(Arc::new(penguin_juicity::JuicityFactory::new()));
 
-    // Первый протокол уровня пакетов, и потому вторая таблица реестра.
-    // Превращать его пакеты в соединения будет мост (`crate::packet_tunnel`),
-    // и выше по дереву он неотличим от обычного направления.
+    // Пакетные протоколы — вторая таблица реестра.
     #[cfg(feature = "wireguard")]
     registry.register_packet(Arc::new(penguin_wireguard::WireguardFactory::new()));
 
@@ -262,21 +213,16 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
 
     #[cfg(feature = "masque")]
     registry.register(Arc::new(penguin_masque::MasqueFactory::new()));
-    // Второй режим одного семейства (RFC 9484, `CONNECT-IP`) — труба для
-    // пакетов, а не для датаграмм с адресом, и потому второй реестр, как у
-    // WireGuard.
+    // RFC 9484 (`CONNECT-IP`): пакеты, а не датаграммы.
     #[cfg(feature = "masque")]
     registry.register_packet(Arc::new(penguin_masque::MasqueIpFactory::new()));
 
-    // Две записи из одного крейта: по HTTP/2 и по HTTP/3.
     #[cfg(feature = "naive")]
     {
         registry.register(Arc::new(penguin_naive::NaiveFactory::http2()));
         registry.register(Arc::new(penguin_naive::NaiveFactory::http3()));
     }
 
-    // Две записи из одного крейта: `socks5` и `socks5-tls`. Под TLS не видны
-    // ни имя сервера назначения, ни пароль — а без TLS видно и то и другое.
     #[cfg(feature = "socks5")]
     {
         registry.register(Arc::new(penguin_socks5::Socks5Factory::new()));
@@ -313,8 +259,6 @@ mod tests {
     #[cfg(feature = "socks5")]
     #[test]
     fn a_proxy_profile_is_checked_without_network() {
-        // Ошибку в поле интерфейс обязан показать сразу, а не через минуту
-        // неудачного подключения.
         let pool = pool();
         assert!(
             pool.validate(&profile("socks5", json!({ "server": "127.0.0.1" })))
@@ -325,7 +269,6 @@ mod tests {
             .expect("настройки верны");
     }
 
-    /// Фичи этой сборки, кроме служебных.
     fn enabled_features() -> Vec<&'static str> {
         FEATURES
             .split(',')
@@ -333,16 +276,9 @@ mod tests {
             .collect()
     }
 
-    // Своего теста «протокол зарегистрирован» у протоколов нет намеренно:
-    // два теста ниже покрывают их все сразу и по построению не могут отстать
-    // от списка. Двадцать шесть одинаковых тестов — это двадцать шесть
-    // поводов забыть двадцать седьмой.
+    // Два теста ниже покрывают все протоколы сразу и не отстают от списка.
     #[test]
     fn every_enabled_feature_brings_its_protocols() {
-        // Главная ошибка при добавлении протокола: фича есть, зависимость
-        // подключилась, крейт собрался — а строку регистрации забыли.
-        // Собирается такое молча, а находится профилем «неизвестный протокол»
-        // у человека, который ничего не менял.
         let registered = pool().protocols();
 
         for feature in enabled_features() {
@@ -362,9 +298,6 @@ mod tests {
 
     #[test]
     fn every_registered_protocol_comes_from_an_enabled_feature() {
-        // Обратная сторона: протокол, зарегистрированный мимо фичи, нельзя ни
-        // выключить, ни найти по имени фичи — и `--no-default-features`
-        // соберёт демона с ним внутри.
         let announced: Vec<&str> = enabled_features()
             .into_iter()
             .filter_map(protocols_of)
@@ -391,8 +324,6 @@ mod tests {
     #[cfg(feature = "hysteria2")]
     #[test]
     fn validation_happens_without_network() {
-        // Ошибку в поле интерфейс обязан показать сразу, а не через минуту
-        // неудачного подключения.
         let pool = pool();
         assert!(
             pool.validate(&profile(
@@ -410,8 +341,6 @@ mod tests {
 
     #[tokio::test]
     async fn direct_survives_close_all() {
-        // Прямой выход не поднимается и не опускается: он нужен всегда, в том
-        // числе чтобы выпустить трафик после отключения тоннеля.
         let pool = pool();
         pool.close_all().await;
         assert!(pool.get(&OutboundId::direct()).is_some());

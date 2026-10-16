@@ -1,12 +1,4 @@
-//! Статические записи, свои и системные.
-//!
-//! Отвечают раньше всех остальных: имя, названное в настройках, не должно
-//! зависеть ни от сервера, ни от тоннеля. Этим же пользуются, чтобы отправить
-//! рекламный домен в никуда.
-//!
-//! Системный `hosts` тоже читается: пользователь, прописавший там запись,
-//! ждёт, что она подействует, — и то, что трафик идёт через VPN-клиент, для
-//! него ничего не меняет.
+//! Статические записи, свои и из системного `hosts`; отвечают раньше всех остальных.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -58,10 +50,7 @@ impl Hosts {
         self.entries.len()
     }
 
-    /// Дочитывает системный файл `hosts`.
-    ///
-    /// Отсутствие файла и любая ошибка чтения — не повод отказываться
-    /// работать: своих записей это не отменяет.
+    /// Дочитывает системный файл `hosts`; ошибка чтения своих записей не отменяет.
     pub fn merge_system(&mut self) {
         let Some(path) = system_hosts_path() else {
             return;
@@ -76,18 +65,11 @@ impl Hosts {
     /// Разбирает содержимое файла `hosts`.
     pub fn merge_text(&mut self, contents: &str) {
         for line in contents.lines() {
-            // Комментарий может стоять и в конце строки.
-            let line = line.split('#').next().unwrap_or_default().trim();
-            if line.is_empty() {
-                continue;
-            }
-
+            let line = line.split('#').next().unwrap_or_default();
             let mut parts = line.split_whitespace();
             let Some(address) = parts.next().and_then(|a| a.parse::<IpAddr>().ok()) else {
                 continue;
             };
-            // Имён в строке может быть несколько, и все они указывают на один
-            // адрес.
             for name in parts {
                 self.add(name, address);
             }
@@ -116,8 +98,6 @@ mod tests {
 
     #[test]
     fn looks_up_by_normalized_name() {
-        // Имя нормализуется при добавлении: запрос всегда приходит в нижнем
-        // регистре и без завершающей точки.
         let mut hosts = Hosts::new();
         hosts.add("Example.COM.", IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
         assert_eq!(
@@ -137,7 +117,6 @@ mod tests {
         );
 
         assert!(hosts.lookup("localhost").is_some());
-        // Несколько имён в строке указывают на один адрес.
         assert_eq!(hosts.lookup("ads.example"), hosts.lookup("tracker.example"));
         assert_eq!(hosts.len(), 3);
     }
@@ -146,7 +125,6 @@ mod tests {
     fn ignores_garbage_lines() {
         let mut hosts = Hosts::new();
         hosts.merge_text("не адрес вообще\n::1 localhost6\nтолько-текст\n");
-        // Строка без адреса пропускается, IPv6 разбирается.
         assert!(hosts.lookup("localhost6").is_some());
         assert_eq!(hosts.len(), 1);
     }
@@ -168,7 +146,6 @@ mod tests {
 
     #[test]
     fn missing_system_file_is_not_fatal() {
-        // Отсутствие файла не отменяет своих записей.
         let mut hosts = Hosts::new();
         hosts.add("mine.example", IpAddr::V4(Ipv4Addr::LOCALHOST));
         hosts.merge_system();

@@ -1,8 +1,4 @@
-//! Newtype-идентификаторы: `ProfileId`, `OutboundId`, `RuleId`. Их нельзя перепутать местами.
-//!
-//! Все три — строки, и без обёрток компилятор молча пропустил бы вызов, где
-//! на месте профиля стоит правило. Обёртки стоят ноль во время выполнения и
-//! ловят такое на сборке.
+//! Newtype-идентификаторы: `ProfileId`, `OutboundId`, `RuleId`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -45,9 +41,7 @@ macro_rules! string_id {
             }
         }
 
-        // Вручную, а не через `derive`: `Arc<str>` умеет serde только под
-        // фичей `rc`, а включать её ради трёх обёрток — тянуть поддержку
-        // ссылочных циклов во весь workspace.
+        // Вручную: `Arc<str>` умеет serde только под фичей `rc`.
         impl Serialize for $name {
             fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
                 ser.serialize_str(&self.0)
@@ -93,7 +87,7 @@ impl OutboundId {
 }
 
 impl From<ProfileId> for OutboundId {
-    /// Направление именуется по профилю: они соответствуют один к одному.
+    /// Направление именуется по профилю один к одному.
     fn from(profile: ProfileId) -> Self {
         Self(profile.0)
     }

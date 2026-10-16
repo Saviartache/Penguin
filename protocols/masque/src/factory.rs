@@ -16,7 +16,7 @@ use crate::outbound::MasqueOutbound;
 pub struct MasqueFactory;
 
 impl MasqueFactory {
-    /// Заводит фабрику. Состояния у неё нет — она только разбирает параметры.
+    /// Заводит фабрику.
     pub fn new() -> Self {
         Self
     }
@@ -34,8 +34,6 @@ impl ProtocolFactory for MasqueFactory {
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
-        // Проверка без сети: интерфейс должен показать ошибку в поле сразу,
-        // а не через минуту неудачного подключения.
         self.parse(params)?.validate().map_err(Into::into)
     }
 
@@ -45,9 +43,6 @@ impl ProtocolFactory for MasqueFactory {
         params: &serde_json::Value,
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = self.parse(params)?;
-        // Соединение поднимается сразу и держится открытым на весь профиль:
-        // у CONNECT-UDP есть мультиплексирование, и повторное рукопожатие на
-        // каждую UDP-ассоциацию было бы платой за то, ради чего его выбирают.
         let outbound = MasqueOutbound::connect(ctx.id, config, ctx.dialer).await?;
         Ok(Arc::new(outbound))
     }
@@ -78,7 +73,6 @@ mod tests {
 
     #[test]
     fn the_protocol_name_is_stable() {
-        // Имя стоит в конфигурациях пользователей — менять его нельзя.
         assert_eq!(MasqueFactory.protocol(), "masque");
     }
 }

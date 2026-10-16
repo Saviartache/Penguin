@@ -8,36 +8,14 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
-/// Чем шифруется соединение до сервера.
-///
-/// `tls` первым: это обычный случай. `none` законен ровно тогда, когда TLS
-/// снимает кто-то другой — сеть доставки перед сервером; сам по себе он
-/// означает, что UUID уходит по сети открытым текстом.
-///
-/// `reality` — рукопожатие доведено до прикладных ключей TLS 1.3, и канал
-/// несёт байты VLESS (`penguin_vless::reality::handshake::connect`). Но
-/// «подключилось» здесь ещё не значит «сервер нас узнал»: сама формула
-/// Reality сверена только между `Xray-core` и `sing-box`, без официальных
-/// тестовых векторов, — не узнавший клиента сервер не откажет, а молча
-/// перешлёт его настоящему сайту. Об этом форма говорит отдельной строкой
-/// (`SPEC.note`, `crate::i18n::Strings::reality_unverified`), а не молчит.
+/// Чем шифруется соединение до сервера. `none` законен, когда TLS снимает сеть
+/// доставки перед сервером. `reality` сверен только между Xray-core и sing-box:
+/// непризнанного клиента сервер молча шлёт на настоящий сайт, об этом `SPEC.note`.
 const SECURITY: &[&str] = &["tls", "none", "reality"];
 
-/// Поля формы в том порядке, в каком они показываются.
-///
-/// Поля Reality (`reality_*`) не помечены `.required()`, хотя без них
-/// `security = "reality"` не поднимется, — конфликта с `tls`/`none` тогда бы
-/// не было, потому что этой форме нечем спросить «обязательно, только если
-/// security = reality» (`FieldSpec::required` не видит других полей). Как и
-/// у `path`/`host` под `grpc`/`xhttp`, недостающее здесь ловит
-/// `RealityConfig::validate` — понятной ошибкой, а не пустым ключом сервера.
-///
-/// Отпечатка браузера (`penguin_utls::Fingerprint`) в форме нет нарочно:
-/// поле выбора не умеет быть пустым (`FieldSpec::choice`, см. `spec.rs`) и
-/// писало бы `reality.fingerprint` даже в профиль `tls`/`none`, заводя
-/// группу `reality`, которой там взяться неоткуда, — `RealityConfig` и так
-/// по умолчанию берёт `chrome` (`config.rs`), и ссылка `fp=` от провайдера
-/// сюда не заводится по той же причине.
+/// Поля Reality не `.required()`: форма не видит других полей, недостающее ловит
+/// `RealityConfig::validate`. Отпечатка браузера нет: поле выбора не бывает
+/// пустым и заводило бы группу `reality` в профиле `tls`; умолчание — `chrome`.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -48,12 +26,7 @@ static FIELDS: &[FieldSpec] = &[
         .check(check::uuid),
     FieldSpec::choice("security", &["security"], |s| s.security, SECURITY),
     FieldSpec::choice("transport", &["transport"], |s| s.transport, TRANSPORTS),
-    // Свободный текст, а не выбор: единственное принимаемое значение —
-    // `penguin_vless::frame::addons::FLOW_VISION`, а поле выбора не умеет
-    // быть пустым (см. документ `FIELDS` про отпечаток чуть ниже) — здесь же
-    // пустое как раз законное и самое частое значение. Неверную комбинацию
-    // (не та `security`, не тот `transport`, не то значение) ловит
-    // `VlessConfig::validate` понятной ошибкой, а не эта форма.
+    // Текст, не выбор: пустое законно, неверную комбинацию ловит `VlessConfig::validate`.
     FieldSpec::text("flow", &["flow"], |s| s.flow).example(|s| s.flow_example),
     FieldSpec::text("path", &["path"], |s| s.path).example(|s| s.path_example),
     FieldSpec::text("host", &["host"], |s| s.http_host).example(|s| s.optional_hint),
@@ -81,11 +54,7 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["vless://"],
     from_link: Some(from_link),
-    // Строка не про VLESS вообще, а про security = reality — см. документ
-    // константы `SECURITY` и `crate::i18n::Strings::reality_unverified`.
-    // Показывать её и при tls/none тоже — цена статичной строки в этой
-    // форме: другого способа сказать это только при выборе reality сейчас
-    // нет (`FieldKind::Choice` не показывает `example`, см. `editor.rs`).
+    // Строка про reality, но показывается всегда: при выборе сказать нельзя.
     note: Some(|s| s.reality_unverified),
 };
 
@@ -95,10 +64,7 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
 ///  vless://uuid@хост:порт?encryption=none&security=tls&type=xhttp&path=/…#имя
 /// ```
 ///
-/// `encryption` в ссылке всегда `none` и означает не «без шифрования», а
-/// «своего шифрования у протокола нет». Поля под него в форме нет: другого
-/// значения не бывает, а показывать переключатель с одним положением — значит
-/// спрашивать о том, чего не выбирают.
+/// `encryption` всегда `none`, поля под него нет.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let uuid = link.userinfo();
     if uuid.is_empty() {
@@ -112,10 +78,7 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
         values.push(("security", security));
     }
     values.extend(carrier::from_link(link)?);
-    // Одно и то же имя сайта у обычного TLS (`tls.sni`) и у Reality
-    // (`reality.server_name`) значит разное — совсем не подделка личности
-    // против ровно этой подделки — и лежит в разных полях
-    // (`RealityConfig::validate` отказывает, если заданы оба сразу).
+    // Имя сайта у TLS и Reality — разные поля (`RealityConfig::validate` отказывает при обоих).
     if let Some(sni) = link.query.get("sni").or_else(|| link.query.get("peer")) {
         values.push((
             if is_reality {
@@ -129,10 +92,7 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if link.query.flag("allowInsecure") || link.query.flag("insecure") {
         values.push(("insecure", "1".to_owned()));
     }
-    // `pbk`/`sid` — обычные имена параметров Reality в ссылках `vless://`
-    // (`Xray-core`, `infra/conf/transport_security.go`, разбор `RealityOpts`).
-    // Отпечаток (`fp`) сюда не попадает — поля под него в форме нет (см.
-    // документ `FIELDS`), и ссылка с ним просто оставляет умолчание `chrome`.
+    // `pbk`/`sid` — имена параметров Reality в Xray-core (`RealityOpts`).
     if let Some(public_key) = link.query.get("pbk") {
         values.push(("reality_public_key", public_key));
     }
@@ -150,14 +110,16 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
 mod tests {
     use super::*;
     use crate::forms::link;
+    use crate::forms::protocol::testing::{self, Values, value};
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 
+    fn parse(raw: &str) -> Values {
+        testing::parse(from_link, raw)
+    }
+
     #[test]
     fn reality_is_offered_now_that_the_handshake_carries_traffic() {
-        // Рукопожатие доведено до прикладных ключей TLS 1.3
-        // (`penguin_vless::reality::handshake::connect`) — канал несёт байты
-        // VLESS, и пункт в списке снова можно выбрать с пользой.
         assert!(SECURITY.contains(&"reality"));
     }
 
@@ -169,18 +131,6 @@ mod tests {
     #[test]
     fn the_flow_field_is_exposed_in_the_form() {
         assert!(SPEC.index_of("flow").is_some());
-    }
-
-    fn parse(raw: &str) -> Vec<(&'static str, String)> {
-        let link = link::split(raw).expect("ссылка разбирается");
-        from_link(&link).expect("поля заполняются")
-    }
-
-    fn value<'a>(values: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
-        values
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, value)| value.as_str())
     }
 
     #[test]
@@ -234,14 +184,12 @@ mod tests {
             value(&values, "reality_server_name"),
             Some("www.example.com")
         );
-        // `sni` (обычный TLS) не заполняется рядом — иначе `RealityConfig::validate`
-        // отказала бы: Reality не использует обычный TLS вовсе.
+        // Иначе `RealityConfig::validate` отказала бы.
         assert_eq!(value(&values, "sni"), None);
     }
 
     #[test]
     fn an_unrecognized_security_still_carries_the_site_name_into_plain_sni() {
-        // Без `security=reality` имя сайта — это обычный TLS SNI, не Reality.
         let values = parse(&format!(
             "vless://{UUID}@example.com:443?security=tls&sni=cdn.example.com"
         ));

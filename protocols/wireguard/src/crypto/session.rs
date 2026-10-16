@@ -1,30 +1,24 @@
 //! Установленный сеанс: ключи данных, счётчик отправки, окно приёма.
-//!
-//! Рукопожатие (`crate::crypto::handshake`) заканчивается здесь: у него была
-//! своя жизнь на время обмена двумя сообщениями, у сеанса — своя, на все
-//! пакеты данных, пока не пришла пора обновиться.
 
 use std::time::{Duration, Instant};
 
 use crate::crypto::constants::{
     KEY_LEN, REJECT_AFTER_MESSAGES, REJECT_AFTER_TIME, REKEY_AFTER_MESSAGES, REKEY_AFTER_TIME,
+    TRANSPORT_HEADER_LEN,
 };
 use crate::crypto::handshake::SessionKeys;
-use crate::crypto::primitives::{aead_open, aead_seal};
+use crate::crypto::primitives::{aead_open_in_place, aead_seal_in_place};
 use crate::crypto::replay::ReplayWindow;
 use crate::error::{WireguardError, WireguardResult};
+use crate::frame::transport::{self, TransportHeader};
 
-/// Сеанс данных поверх завершённого рукопожатия.
-///
-/// Живёт до [`REJECT_AFTER_TIME`] или [`REJECT_AFTER_MESSAGES`] пакетов,
-/// смотря что раньше, — после этого шифрование и расшифровка отказывают, а не
-/// молча продолжают на просроченных ключах.
+/// Сеанс данных; после [`REJECT_AFTER_TIME`] или [`REJECT_AFTER_MESSAGES`] отказывает.
 pub struct Session {
     send_key: [u8; KEY_LEN],
     recv_key: [u8; KEY_LEN],
-    /// Наш индекс — сервер вставляет его в заголовок пакетов к нам.
+    /// Наш индекс: сервер ставит его в заголовок пакетов к нам.
     pub local_index: u32,
-    /// Индекс сервера — мы вставляем его в заголовок пакетов к нему.
+    /// Индекс сервера: ставится в заголовок пакетов к нему.
     pub remote_index: u32,
     tx_counter: u64,
     replay: ReplayWindow,
@@ -45,34 +39,54 @@ impl Session {
         }
     }
 
-    /// Шифрует пакет для отправки. Возвращает счётчик (он же нонс) и
-    /// шифротекст с меткой.
-    pub fn encrypt(&mut self, plaintext: &[u8]) -> WireguardResult<(u64, Vec<u8>)> {
+    /// Собирает в `out` пакет данных: заголовок, шифротекст и метка. Буфер переиспользуется.
+    pub fn seal_packet(
+        &mut self,
+        reserved: [u8; 3],
+        plaintext: &[u8],
+        out: &mut Vec<u8>,
+    ) -> WireguardResult<()> {
         if self.tx_counter >= REJECT_AFTER_MESSAGES {
-            return Err(WireguardError::SessionExpired(
-                self.established_at.elapsed(),
-            ));
+            return Err(WireguardError::SessionExpired(self.age()));
         }
         let counter = self.tx_counter;
         self.tx_counter += 1;
-        Ok((counter, aead_seal(&self.send_key, counter, plaintext, &[])))
+
+        let header = TransportHeader {
+            receiver_index: self.remote_index,
+            counter,
+        };
+        out.clear();
+        out.extend_from_slice(&transport::encode_header(&header, reserved));
+        out.extend_from_slice(plaintext);
+        let tag = aead_seal_in_place(
+            &self.send_key,
+            counter,
+            &mut out[TRANSPORT_HEADER_LEN..],
+            &[],
+        )?;
+        out.extend_from_slice(&tag);
+        Ok(())
     }
 
-    /// Расшифровывает пакет, пришедший с этим счётчиком, и проверяет его по
-    /// окну защиты от повторов.
+    /// Расшифровывает пакет данных на месте и возвращает открытый текст.
     ///
-    /// Порядок важен: окно смотрит на счётчик только после того, как метка
-    /// подлинности AEAD сошлась, — иначе поддельный пакет с угаданным
-    /// счётчиком мог бы стереть из окна место настоящего (см.
-    /// `crate::crypto::replay`).
-    pub fn decrypt(&mut self, counter: u64, ciphertext: &[u8]) -> WireguardResult<Vec<u8>> {
-        if counter >= REJECT_AFTER_MESSAGES {
-            return Err(WireguardError::SessionExpired(
-                self.established_at.elapsed(),
-            ));
+    /// Окно повторов смотрит на счётчик только после проверки метки.
+    pub fn open_packet<'a>(&mut self, datagram: &'a mut [u8]) -> WireguardResult<&'a mut [u8]> {
+        let (header, _) = transport::split(datagram)?;
+        if header.receiver_index != self.local_index {
+            return Err(WireguardError::malformed("чужой индекс получателя"));
         }
-        let plaintext = aead_open(&self.recv_key, counter, ciphertext, &[])?;
-        if !self.replay.accept(counter) {
+        if header.counter >= REJECT_AFTER_MESSAGES {
+            return Err(WireguardError::SessionExpired(self.age()));
+        }
+        let plaintext = aead_open_in_place(
+            &self.recv_key,
+            header.counter,
+            &mut datagram[TRANSPORT_HEADER_LEN..],
+            &[],
+        )?;
+        if !self.replay.accept(header.counter) {
             return Err(WireguardError::malformed(
                 "счётчик пакета уже был принят: повтор",
             ));
@@ -80,22 +94,25 @@ impl Session {
         Ok(plaintext)
     }
 
-    /// Сеанс исчерпал срок или счётчик — держать его дальше нельзя ни в
-    /// какую сторону.
+    /// Сеанс исчерпал срок или счётчик.
     pub fn is_expired(&self) -> bool {
         self.established_at.elapsed() >= REJECT_AFTER_TIME * 3
             || self.tx_counter >= REJECT_AFTER_MESSAGES
     }
 
-    /// Пора начинать новое рукопожатие: либо истекло время, либо разменяно
-    /// слишком много сообщений, чтобы ждать штатного срока.
-    ///
-    /// Источник условия по времени — `RekeyAfterTime` в
-    /// `wireguard-go/device/constants.go`: инициатор обновляет рукопожатие
-    /// не дожидаясь конца сеанса, чтобы стороны разошлись без перерыва в
-    /// трафике.
+    /// Пора начинать новое рукопожатие (`RekeyAfterTime` в `wireguard-go/device/constants.go`).
     pub fn needs_rekey(&self) -> bool {
         self.established_at.elapsed() >= REKEY_AFTER_TIME || self.tx_counter >= REKEY_AFTER_MESSAGES
+    }
+
+    /// Когда сеанс истечёт по времени.
+    pub fn expires_at(&self) -> Instant {
+        self.established_at + REJECT_AFTER_TIME * 3
+    }
+
+    /// Когда сеанс начнёт просить обновления по времени.
+    pub fn rekey_at(&self) -> Instant {
+        self.established_at + REKEY_AFTER_TIME
     }
 
     /// Сколько сеанс уже живёт.
@@ -103,10 +120,7 @@ impl Session {
         self.established_at.elapsed()
     }
 
-    /// Выставляет счётчик отправки напрямую, в обход реального шифрования.
-    ///
-    /// Только для тестов предела: прогнать `encrypt` два в шестьдесят раз
-    /// подряд, чтобы дойти до настоящего предела, — не тест, а зависание.
+    /// Выставляет счётчик отправки: дойти до предела настоящими пакетами нельзя.
     #[cfg(test)]
     fn set_tx_counter_for_test(&mut self, counter: u64) {
         self.tx_counter = counter;
@@ -126,6 +140,23 @@ mod tests {
         })
     }
 
+    fn peer() -> Session {
+        Session::new(SessionKeys {
+            send_key: [1u8; KEY_LEN],
+            recv_key: [1u8; KEY_LEN],
+            local_index: 2,
+            remote_index: 1,
+        })
+    }
+
+    fn seal(session: &mut Session, plaintext: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        session
+            .seal_packet([0; 3], plaintext, &mut out)
+            .expect("шифруется");
+        out
+    }
+
     #[test]
     fn a_fresh_session_does_not_need_a_rekey_yet() {
         assert!(!session().needs_rekey());
@@ -133,57 +164,45 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_data_round_trips_through_decrypt() {
-        let mut sender = session();
-        let mut receiver = Session::new(SessionKeys {
-            // Симметричный сеанс для теста: получатель расшифровывает тем
-            // же ключом, которым отправитель шифровал — в жизни это два
-            // разных ключа сеанса, но здесь важна только пара `encrypt`/`decrypt`.
-            send_key: [1u8; KEY_LEN],
-            recv_key: [1u8; KEY_LEN],
-            local_index: 2,
-            remote_index: 1,
-        });
-
-        let (counter, ciphertext) = sender.encrypt(b"hello, tunnel").expect("шифруется");
-        let plaintext = receiver
-            .decrypt(counter, &ciphertext)
-            .expect("расшифровывается");
+    fn sealed_data_round_trips_through_open() {
+        let mut packet = seal(&mut session(), b"hello, tunnel");
+        let plaintext = peer().open_packet(&mut packet).expect("расшифровывается");
         assert_eq!(plaintext, b"hello, tunnel");
     }
 
     #[test]
     fn counters_climb_by_one_per_packet() {
         let mut sender = session();
-        let (first, _) = sender.encrypt(b"a").expect("шифруется");
-        let (second, _) = sender.encrypt(b"b").expect("шифруется");
-        assert_eq!(second, first + 1);
+        let first = transport::split(&seal(&mut sender, b"a"))
+            .expect("разбирается")
+            .0;
+        let second = transport::split(&seal(&mut sender, b"b"))
+            .expect("разбирается")
+            .0;
+        assert_eq!(second.counter, first.counter + 1);
     }
 
     #[test]
-    fn a_replayed_counter_is_refused_on_the_receiving_side() {
-        let mut sender = session();
-        let mut receiver = Session::new(SessionKeys {
-            send_key: [1u8; KEY_LEN],
-            recv_key: [1u8; KEY_LEN],
-            local_index: 2,
-            remote_index: 1,
-        });
-
-        let (counter, ciphertext) = sender.encrypt(b"data").expect("шифруется");
+    fn a_replayed_packet_is_refused_on_the_receiving_side() {
+        let packet = seal(&mut session(), b"data");
+        let mut receiver = peer();
         receiver
-            .decrypt(counter, &ciphertext)
+            .open_packet(&mut packet.clone())
             .expect("проходит первый раз");
-        assert!(receiver.decrypt(counter, &ciphertext).is_err());
+        assert!(receiver.open_packet(&mut packet.clone()).is_err());
     }
 
     #[test]
-    fn a_session_at_the_message_ceiling_refuses_to_encrypt_further() {
-        // Прогнать `encrypt` 2^64 раз, чтобы дойти сюда по-настоящему, —
-        // не тест, а зависание; счётчик выставляется напрямую.
+    fn a_packet_for_another_index_is_refused() {
+        let mut packet = seal(&mut session(), b"data");
+        assert!(session().open_packet(&mut packet).is_err());
+    }
+
+    #[test]
+    fn a_session_at_the_message_ceiling_refuses_to_seal_further() {
         let mut session = session();
         session.set_tx_counter_for_test(REJECT_AFTER_MESSAGES);
-        assert!(session.encrypt("один пакет лишний".as_bytes()).is_err());
+        assert!(session.seal_packet([0; 3], b"x", &mut Vec::new()).is_err());
     }
 
     #[test]

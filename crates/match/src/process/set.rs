@@ -1,13 +1,4 @@
-//! Набор процессов: точные пути в хеш-таблице, шаблоны — отдельным списком.
-//!
-//! Список выбранных приложений — самая частая и самая большая часть правил:
-//! пользователь отмечает мышью два десятка программ, и все они попадают в одно
-//! правило. Проверять их перебором значило бы платить двадцатью сравнениями
-//! строк за каждое новое соединение.
-//!
-//! Поэтому точные пути и имена лежат в хеш-таблицах — проверка за один
-//! просмотр, сколько бы записей ни было, — а перебираются только шаблоны и
-//! префиксы, которых обычно единицы.
+//! Набор процессов: пути и имена в хеш-таблицах, перебираются только префиксы и шаблоны.
 
 use crate::matcher::Matcher;
 use crate::process::name::NameSet;
@@ -85,9 +76,6 @@ impl ProcessSetBuilder {
 
 impl Matcher for ProcessSet {
     fn matches(&self, target: &MatchTarget<'_>) -> bool {
-        // Порядок не случаен: дешёвые проверки впереди. Хеш-таблица отвечает
-        // за один просмотр, перебор префиксов — за их число, шаблоны — дороже
-        // всех.
         self.paths.matches(target)
             || self.names.matches(target)
             || self.prefixes.matches(target)
@@ -98,19 +86,11 @@ impl Matcher for ProcessSet {
     }
 
     fn describe(&self) -> String {
-        let mut parts = Vec::new();
-        for (matcher, empty) in [
-            (self.paths.describe(), self.paths.describe().ends_with("[]")),
-            (self.names.describe(), self.names.describe().ends_with("[]")),
-            (
-                self.prefixes.describe(),
-                self.prefixes.describe().ends_with("[]"),
-            ),
-        ] {
-            if !empty {
-                parts.push(matcher);
-            }
-        }
+        let mut parts: Vec<String> = [&self.paths as &dyn Matcher, &self.names, &self.prefixes]
+            .into_iter()
+            .map(Matcher::describe)
+            .filter(|description| !description.ends_with("[]"))
+            .collect();
         if let Some(globs) = &self.globs {
             parts.push(globs.describe());
         }
@@ -160,7 +140,6 @@ mod tests {
 
     #[test]
     fn broken_glob_fails_at_build_time() {
-        // Ошибка должна прийти при сборке правил, а не на первом соединении.
         assert!(
             ProcessSetBuilder::new()
                 .globs(["[unclosed"])

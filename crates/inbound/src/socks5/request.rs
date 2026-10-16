@@ -1,18 +1,15 @@
-//! Разбор CONNECT/BIND/ASSOCIATE и формирование ответа.
+//! Запрос CONNECT/BIND/ASSOCIATE и ответ на него.
 //!
 //! ```text
 //! клиент → 0x05 CMD 0x00 ATYP АДРЕС ПОРТ
 //! сервер → 0x05 REP 0x00 ATYP АДРЕС ПОРТ
 //! ```
 //!
-//! Ответ приходит **после** того, как соединение до цели установлено: код в
-//! нём — это результат настоящей попытки, а не обещание. Приложение по нему
-//! показывает пользователю «отказано в соединении» или «узел недоступен», и
-//! отвечать успехом заранее значило бы врать.
+//! Ответ уходит после настоящей попытки соединения: его код видит пользователь.
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use bytes::{BufMut, BytesMut};
+use bytes::BufMut;
 use penguin_core::address::SocketAddress;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -30,13 +27,15 @@ pub const CMD_UDP_ASSOCIATE: u8 = 0x03;
 /// Всё получилось.
 pub const REP_SUCCESS: u8 = 0x00;
 
+/// Самый длинный ответ: заголовок 3 + ATYP 1 + IPv6 16 + порт 2.
+const REPLY_MAX: usize = 22;
+
 /// Что попросил клиент.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Соединиться с адресом.
     Connect(SocketAddress),
-    /// Открыть канал для UDP. Адрес — тот, с которого клиент будет слать
-    /// датаграммы; нули означают «пока не знаю».
+    /// Открыть канал для UDP; адрес — откуда клиент будет слать, нули — «не знаю».
     UdpAssociate(SocketAddress),
 }
 
@@ -45,20 +44,17 @@ pub async fn read<S>(stream: &mut S) -> InboundResult<Command>
 where
     S: AsyncRead + Unpin + ?Sized,
 {
-    let version = stream.read_u8().await?;
+    let mut head = [0u8; 4];
+    stream.read_exact(&mut head).await?;
+    let [version, command, _reserved, atyp] = head;
     if version != VERSION {
         return Err(InboundError::NotSocks5(version));
     }
-
-    let command = stream.read_u8().await?;
-    let _reserved = stream.read_u8().await?;
-    let address = address::read(stream).await?;
+    let address = address::read_after_type(stream, atyp).await?;
 
     match command {
         CMD_CONNECT => Ok(Command::Connect(address)),
         CMD_UDP_ASSOCIATE => Ok(Command::UdpAssociate(address)),
-        // BIND нужен активному режиму FTP и почти ничему больше. Отвечать на
-        // него «не поддерживается» честнее, чем делать вид, что получилось.
         other => Err(InboundError::UnsupportedCommand(other)),
     }
 }
@@ -68,34 +64,33 @@ pub async fn reply_success<S>(stream: &mut S, bound: SocketAddr) -> InboundResul
 where
     S: AsyncWrite + Unpin + ?Sized,
 {
-    let mut buf = BytesMut::with_capacity(22);
-    buf.put_u8(VERSION);
-    buf.put_u8(REP_SUCCESS);
-    buf.put_u8(0x00);
-    address::encode_socket_addr(bound, &mut buf);
-    stream.write_all(&buf).await?;
-    Ok(())
+    reply(stream, REP_SUCCESS, bound).await
 }
 
-/// Отправляет отказ.
-///
-/// Адрес в отказе нулевой: настоящего соединения нет, и подставлять туда
-/// что-то осмысленное нечего.
+/// Отправляет отказ с нулевым адресом: соединения нет.
 pub async fn reply_failure<S>(stream: &mut S, code: u8) -> InboundResult<()>
 where
     S: AsyncWrite + Unpin + ?Sized,
 {
-    let mut buf = BytesMut::with_capacity(10);
-    buf.put_u8(VERSION);
-    buf.put_u8(code);
-    buf.put_u8(0x00);
-    address::encode_socket_addr(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), &mut buf);
-    stream.write_all(&buf).await?;
+    reply(stream, code, SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).await
+}
+
+async fn reply<S>(stream: &mut S, code: u8, bound: SocketAddr) -> InboundResult<()>
+where
+    S: AsyncWrite + Unpin + ?Sized,
+{
+    let mut buf = [0u8; REPLY_MAX];
+    let mut cursor = &mut buf[..];
+    cursor.put_slice(&[VERSION, code, 0x00]);
+    address::encode_socket_addr(bound, &mut cursor);
+    let len = REPLY_MAX - cursor.len();
+    stream.write_all(&buf[..len]).await?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
     use tokio::io::duplex;
 
     use super::*;
@@ -139,9 +134,20 @@ mod tests {
         theirs.read_exact(&mut reply).await.expect("прочитано");
         assert_eq!(reply[0], VERSION);
         assert_eq!(reply[1], REP_SUCCESS);
-        // Адрес в ответе — тот, что передали: для UDP по нему клиент и шлёт.
         let (decoded, _) = address::decode(&reply[3..]).expect("адрес разбирается");
         assert_eq!(decoded, SocketAddress::from(bound));
+    }
+
+    #[tokio::test]
+    async fn writes_ipv6_reply_in_full() {
+        let (mut ours, mut theirs) = duplex(1024);
+        let bound: SocketAddr = "[::1]:1080".parse().expect("адрес");
+        reply_success(&mut ours, bound).await.expect("записано");
+        drop(ours);
+
+        let mut reply = Vec::new();
+        theirs.read_to_end(&mut reply).await.expect("прочитано");
+        assert_eq!(reply.len(), REPLY_MAX);
     }
 
     #[tokio::test]
@@ -151,8 +157,6 @@ mod tests {
 
         let mut reply = vec![0u8; 10];
         theirs.read_exact(&mut reply).await.expect("прочитано");
-        // Браузер по этому коду покажет «отказано в соединении», а не общую
-        // ошибку, — разница видна пользователю.
         assert_eq!(reply[1], 0x05);
     }
 

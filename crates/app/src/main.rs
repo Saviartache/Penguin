@@ -1,79 +1,70 @@
-//! Penguin: один исполняемый файл на три роли.
+//! Penguin: один исполняемый файл на три роли — окно, терминал, служба.
 //!
-//! # Почему ролей три, а файл один
-//!
-//! Тоннелю нужны права системы: TUN-адаптер, таблица маршрутизации и
-//! брандмауэр без них недоступны. Окну права не нужны и **вредны** — вместе с
-//! ним под системной учётной записью работал бы весь `iced`, `wgpu` и драйвер
-//! видеокарты. Поэтому внутри программа остаётся тремя процессами.
-//!
-//! Но это устройство программы, а не забота человека. Ему выдаётся один файл;
-//! кем быть в этот раз, программа решает сама по своим аргументам
-//! ([`args`]), а права запрашивает тогда и только тогда, когда они нужны
-//! ([`penguin_platform::run_elevated`]).
-//!
-//! # Консоль
-//!
-//! Файл собран как **оконный**: иначе двойной щелчок открывал бы чёрное окно
-//! консоли рядом с интерфейсом. Оконная программа своей консоли не имеет, и
-//! `penguin doctor`, запущенный из терминала, печатал бы в пустоту. Лечится
-//! это подключением к консоли **родителя** — см. [`console`].
+//! Тоннелю нужны права системы, окну они вредны, поэтому процессов три; кем быть
+//! в этот раз, файл решает по аргументам ([`args`]) и права просит только когда
+//! они нужны ([`penguin_platform::run_elevated`]). Файл собран как оконный, а к
+//! консоли родителя подключается [`console`].
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-// В исполняемом крейте `pub` не образует публичного API — он лишь открывает
-// элемент соседним модулям.
+// В исполняемом крейте `pub` лишь открывает элемент соседним модулям.
 #![allow(unreachable_pub)]
 
 mod args;
 mod console;
+mod help;
 mod logging;
 mod service;
 
+use std::io::Write;
+
 use anyhow::{Context, Result};
 use args::{Cli, Command, ServiceCommand};
-use clap::Parser;
+use penguin_cli::args::Parsed;
 
 fn main() -> Result<()> {
-    let mut cli = Cli::parse();
+    let mut cli = match args::from_env() {
+        Ok(Parsed::Run(cli)) => cli,
+        Ok(Parsed::Print(text)) => {
+            console::attach_to_parent();
+            let _ = std::io::stdout().write_all(text.as_bytes());
+            return Ok(());
+        }
+        Err(err) => {
+            console::attach_to_parent();
+            eprintln!("ошибка: {err}\n\nПодробнее: penguin --help");
+            std::process::exit(2);
+        }
+    };
 
-    // До первой печати: подключаться к консоли родителя надо раньше, чем в неё
-    // что-то пойдёт.
+    // До первой печати.
     if cli.writes_to_console() {
         console::attach_to_parent();
     }
     prepare_arguments(&mut cli)?;
 
-    // Права спрашиваются один раз и заранее — до того, как команда начнёт
-    // работать и упрётся в отказ на середине.
+    // Права спрашиваются один раз и заранее, а не на середине команды.
     if cli.needs_elevation() && !penguin_platform::is_elevated() {
         return elevate_and_exit(&cli);
     }
 
-    let _guard = logging::init(&cli);
+    logging::init(&cli);
 
     match &cli.command {
-        // --- служба ---
         Some(Command::Service(command)) => {
             service::run(command, cli.controller_uid, cli.import_config.as_deref())
         }
-
-        // --- терминал ---
         Some(Command::Client(command)) => {
             penguin_cli::run(command, cli.config_dir.as_deref(), cli.json)
         }
-
-        // --- сама служба ---
         None if cli.service => penguin_daemon::service::run_as_service(cli.config_dir),
         None if cli.foreground => {
             penguin_daemon::runtime::run_foreground(cli.config_dir, cli.verbose)
         }
-
-        // --- окно ---
         None => penguin_gui::run(cli.tray).context("окно не открылось"),
     }
 }
 
-/// Capture user-specific values before pkexec/osascript replace the environment.
+/// Запоминает пользовательские значения до того, как pkexec/osascript сменят окружение.
 fn prepare_arguments(cli: &mut Cli) -> Result<()> {
     let Some(Command::Service(command)) = &cli.command else {
         anyhow::ensure!(
@@ -94,7 +85,7 @@ fn prepare_arguments(cli: &mut Cli) -> Result<()> {
         return Ok(());
     }
     if !penguin_platform::is_elevated() {
-        // Never take the elevated account's HOME as the import source.
+        // HOME повышенной учётной записи источником импорта быть не может.
         cli.controller_uid = penguin_daemon::current_user_id();
         if cli.import_config.is_none() {
             cli.import_config = penguin_config::Paths::user()
@@ -117,40 +108,27 @@ fn elevate_and_exit(cli: &Cli) -> Result<()> {
     if penguin_platform::run_elevated(&borrowed)? {
         return Ok(());
     }
-    // Отказ в окне UAC — не сбой программы, а решение человека. Сказать о нём
-    // надо, а падать с ошибкой незачем.
+    // Отказ в окне UAC — решение человека, а не сбой.
     anyhow::bail!("нужны права администратора");
 }
 
-/// Аргументы, с которыми себя перезапустить.
-///
-/// Свободная функция с тестом: потерянный здесь `--config-dir` означает
-/// службу, поставленную не для того каталога настроек, который правил человек.
+/// Аргументы для перезапуска; потерянный `--config-dir` — служба не для того каталога.
 fn elevated_arguments(cli: &Cli) -> Vec<String> {
-    let mut arguments = vec!["service".to_owned()];
-
-    arguments.push(
-        match cli.command {
-            Some(Command::Service(ServiceCommand::Ensure)) => "ensure",
-            Some(Command::Service(ServiceCommand::Install)) => "install",
-            Some(Command::Service(ServiceCommand::Uninstall)) => "uninstall",
-            Some(Command::Service(ServiceCommand::Restart)) => "restart",
-            Some(Command::Service(ServiceCommand::Start)) => "start",
-            Some(Command::Service(ServiceCommand::Stop)) => "stop",
-            // Сюда попадают только команды, которым нужны права; остальные
-            // отсеяны в `needs_elevation`.
-            _ => "status",
-        }
-        .to_owned(),
-    );
+    let name = match cli.command {
+        Some(Command::Service(ServiceCommand::Ensure)) => "ensure",
+        Some(Command::Service(ServiceCommand::Install)) => "install",
+        Some(Command::Service(ServiceCommand::Uninstall)) => "uninstall",
+        Some(Command::Service(ServiceCommand::Restart)) => "restart",
+        Some(Command::Service(ServiceCommand::Start)) => "start",
+        Some(Command::Service(ServiceCommand::Stop)) => "stop",
+        // Остальные команды отсеяны в `needs_elevation`.
+        _ => "status",
+    };
+    let mut arguments = vec!["service".to_owned(), name.to_owned()];
 
     if let Some(dir) = &cli.config_dir {
-        arguments.push("--config-dir".to_owned());
-        // Без кавычек: заключить путь с пробелом в них — забота той системы,
-        // которая передаёт аргументы одной строкой
-        // ([`penguin_platform::run_elevated`]). Там, где программа
-        // запускается напрямую, кавычка стала бы частью имени каталога.
-        arguments.push(dir.display().to_string());
+        // Кавычки пути ставит платформа, передающая аргументы одной строкой.
+        arguments.extend(["--config-dir".to_owned(), dir.display().to_string()]);
     }
     if cli.verbose {
         arguments.push("--verbose".to_owned());
@@ -159,10 +137,8 @@ fn elevated_arguments(cli: &Cli) -> Vec<String> {
         arguments.extend(["--controller-uid".to_owned(), uid.to_string()]);
     }
     if let Some(path) = &cli.import_config {
-        arguments.push("--import-config".to_owned());
-        arguments.push(path.display().to_string());
+        arguments.extend(["--import-config".to_owned(), path.display().to_string()]);
     }
-
     arguments
 }
 
@@ -170,8 +146,21 @@ fn elevated_arguments(cli: &Cli) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn parse(args: &[String]) -> Cli {
+        match args::parse(args.to_vec()) {
+            Ok(Parsed::Run(cli)) => cli,
+            other => panic!("не запуск: {other:?}"),
+        }
+    }
+
     fn cli(args: &[&str]) -> Cli {
-        Cli::try_parse_from(args).expect("разбирается")
+        parse(
+            &args
+                .iter()
+                .skip(1)
+                .map(|arg| (*arg).to_owned())
+                .collect::<Vec<_>>(),
+        )
     }
 
     #[test]
@@ -188,8 +177,6 @@ mod tests {
 
     #[test]
     fn elevated_arguments_keep_the_config_directory() {
-        // Потерянный каталог означает службу, поставленную не для тех
-        // настроек, которые правил человек.
         let arguments = elevated_arguments(&cli(&[
             "penguin",
             "service",
@@ -208,10 +195,7 @@ mod tests {
 
     #[test]
     fn a_path_with_spaces_stays_one_argument() {
-        // Путь пользователя почти всегда содержит пробел. Кавычки ему здесь
-        // не ставятся: их поставит та система, которая передаёт аргументы
-        // одной строкой, — а там, где программа запускается напрямую, кавычка
-        // стала бы частью имени каталога.
+        // Кавычки поставит платформа; здесь они стали бы частью имени.
         let arguments = elevated_arguments(&cli(&[
             "penguin",
             "service",
@@ -241,9 +225,7 @@ mod tests {
             "--import-config",
             "/Users/alice/My Settings/config.toml",
         ]);
-        let arguments = elevated_arguments(&original);
-        let reparsed = Cli::try_parse_from(std::iter::once("penguin".to_owned()).chain(arguments))
-            .expect("arguments");
+        let reparsed = parse(&elevated_arguments(&original));
         assert_eq!(reparsed.controller_uid, Some(501));
         assert_eq!(reparsed.import_config, original.import_config);
     }

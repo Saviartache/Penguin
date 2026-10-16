@@ -1,20 +1,10 @@
-//! Мост целиком: соединение, открытое исходящим стеком, принимается входящим.
-//!
-//! Проверка на живых стеках, а не на записанных байтах. Между двумя стеками
-//! стоит труба из двух очередей — тот же шов, что в жизни занимает
-//! направление уровня пакетов. Всё, что идёт по этой трубе, — настоящие
-//! IP-пакеты, собранные и разобранные настоящим smoltcp.
+//! Мост целиком на живых стеках: соединение, открытое исходящим стеком, принимается входящим.
 //!
 //! ```text
 //!   outgoing::spawn ──пакеты──► [труба] ──пакеты──► stack::spawn
 //!        connect()                                     accept()
 //! ```
-//!
-//! Так проверяется ровно то, ради чего мост писался: у нас есть адрес
-//! назначения, и соединение открывается через интерфейс, который дало
-//! направление.
 
-// Тесты вправе падать громко: `expect` здесь и есть проверка.
 #![allow(clippy::expect_used)]
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -93,7 +83,7 @@ fn outgoing_config() -> StackConfig {
     }
 }
 
-/// Адрес, до которого идём. Настоящего сервера за ним нет — за ним второй стек.
+/// Адрес, до которого идём (за ним второй стек).
 fn target() -> SocketAddr {
     "93.184.216.34:443".parse().expect("адрес")
 }
@@ -127,10 +117,7 @@ async fn a_connection_opened_outward_is_accepted_on_the_other_side() {
         .expect("вторая сторона не дождалась соединения")
         .expect("стек остановился");
 
-    // Назначение доехало как есть: соединение открыто именно туда, куда просили.
     assert_eq!(accepted.destination, target());
-    // Отправителем стоит адрес интерфейса, а не адрес приложения: на провод
-    // уходит то, что дал сервер.
     assert_eq!(
         accepted.source.ip(),
         std::net::IpAddr::V4(Ipv4Addr::new(10, 7, 0, 2))
@@ -149,10 +136,7 @@ async fn data_flows_both_ways_through_the_bridge() {
     let cancel = CancellationToken::new();
     let (out, mut inbound) = both_stacks(&cancel);
 
-    // Заодно проверяется, что открытое соединение переживает потерю того, кто
-    // его открыл: `out` уезжает в задачу и умирает вместе с ней, а поток после
-    // этого обязан работать. Закрывать живые потоки из-за того, что никто
-    // больше не просит новых, нельзя.
+    // `out` умирает вместе с задачей, поток обязан пережить это.
     let connecting = tokio::spawn(async move { out.connector.connect(target()).await });
 
     let mut accepted = tokio::time::timeout(Duration::from_secs(10), inbound.tcp.accept())
@@ -200,8 +184,6 @@ async fn a_datagram_goes_out_and_the_answer_comes_back_to_its_owner() {
     let cancel = CancellationToken::new();
     let (mut out, mut inbound) = both_stacks(&cancel);
 
-    // Адрес приложения на провод не попадает — по нему движок узнаёт свою
-    // сессию в ответе.
     let app: SocketAddr = "10.0.0.9:51000".parse().expect("адрес");
     let dns: SocketAddr = "8.8.8.8:53".parse().expect("адрес");
 
@@ -221,8 +203,6 @@ async fn a_datagram_goes_out_and_the_answer_comes_back_to_its_owner() {
     assert_eq!(seen.destination, dns);
     assert_eq!(&seen.payload[..], b"query");
 
-    // Отвечаем той же стороне: для входящего стека это обычный ответ
-    // приложению, а для исходящего — ответ на его запрос.
     inbound
         .udp_outgoing
         .send(penguin_netstack::Datagram {
@@ -238,8 +218,6 @@ async fn a_datagram_goes_out_and_the_answer_comes_back_to_its_owner() {
         .expect("ответ не дошёл")
         .expect("стек остановился");
 
-    // Хозяин найден по своему порту: движок получает ровно те адреса, с
-    // которыми посылал.
     assert_eq!(back.source, app);
     assert_eq!(back.destination, dns);
     assert_eq!(&back.payload[..], b"answer");
@@ -249,11 +227,9 @@ async fn a_datagram_goes_out_and_the_answer_comes_back_to_its_owner() {
 
 #[tokio::test]
 async fn nobody_answers_and_the_request_ends_with_silence_not_a_hang() {
-    // Труба в никуда: пакеты уходят, ответа нет. Запрос обязан кончиться сам.
     let cancel = CancellationToken::new();
     let (left, right) = pipe(1420);
-    // Второй конец держим, но не читаем: так выглядит сервер, до которого не
-    // дошло.
+    // Второй конец держим, но не читаем.
     let _dangling = right;
 
     let out = outgoing::spawn(Box::new(left), outgoing_config(), cancel.clone());
@@ -280,7 +256,6 @@ async fn a_stopped_stack_answers_instead_of_leaving_the_request_hanging() {
     let out = outgoing::spawn(Box::new(left), outgoing_config(), cancel.clone());
 
     cancel.cancel();
-    // Даём циклу закончиться.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let error = tokio::time::timeout(Duration::from_secs(5), out.connector.connect(target()))
@@ -292,8 +267,6 @@ async fn a_stopped_stack_answers_instead_of_leaving_the_request_hanging() {
 
 #[tokio::test]
 async fn a_v6_destination_without_a_v6_address_fails_at_once() {
-    // Сервер выдал только IPv4. Уйти на адрес IPv6 через такой интерфейс
-    // нельзя, и узнать об этом надо сразу, а не через пятнадцать секунд.
     let cancel = CancellationToken::new();
     let (left, _right) = pipe(1420);
     let out = outgoing::spawn(Box::new(left), outgoing_config(), cancel.clone());

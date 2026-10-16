@@ -44,22 +44,17 @@ fn dispatch(command: &ServiceCommand, access_changed: bool) -> Result<()> {
 
 fn ensure(access_changed: bool) -> Result<()> {
     let status = service::status().context("could not query service state")?;
-    // Registration is repaired by writing it again, never by removing it
-    // first: a reinstall that fails halfway would otherwise leave the machine
-    // without a service at all, and it is the service that lowers the tunnel.
+    // Repair by rewriting, never remove first: a half-done reinstall leaves no service.
     let registered = status != ServiceStatus::NotInstalled && service::registered_verbatim();
     if !registered {
         penguin_daemon::install()?;
     }
     if status == ServiceStatus::Running {
-        // A replaced registration still runs the previous image. Otherwise a
-        // running process can simply be initializing: give it time before
-        // repairing, and a changed controller needs new socket ownership.
+        // New registration or controller needs a restart; else give it time to initialize.
         if !registered || access_changed || penguin_daemon::wait_until_ready().is_err() {
             return restart();
         }
     } else {
-        // Registration does not launch the daemon on any platform.
         service::start().context("could not start service")?;
         penguin_daemon::wait_until_ready()?;
     }
@@ -79,8 +74,7 @@ fn start(access_changed: bool) -> Result<()> {
 }
 
 fn restart() -> Result<()> {
-    // Unix stop ignores only absence. On Windows skip an already stopped
-    // service, since SCM rejects another stop control in that state.
+    // SCM rejects stop on an already stopped service.
     if service::status()? != ServiceStatus::Stopped {
         service::stop().context("could not stop service before restart")?;
     }

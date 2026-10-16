@@ -1,24 +1,13 @@
 //! Черновик правила: что отмечено и во что это превращается.
 //!
-//! Тонкость ровно одна, и она смысловая: **что означает несколько условий
-//! сразу**.
-//!
-//! Ответ — «и». Пользователь, отметивший приложение и вписавший домен, имеет в
-//! виду «этот домен у этого приложения», а не «этот домен или это приложение».
-//! Второе прочтение утащило бы в тоннель весь трафик приложения — и человек
-//! узнал бы об этом не скоро.
-//!
-//! Внутри одного условия — наоборот «или»: пять отмеченных приложений это пять
-//! вариантов, а не пять одновременных требований.
+//! Несколько условий сразу означают «и» (этот домен у этого приложения; «или»
+//! утащило бы в тоннель весь трафик приложения), внутри одного условия — «или».
 
 use penguin_config::schema::rule::{Condition, Leaf, RuleAction, RuleConfig};
 
 use crate::forms::addresses;
 
-/// Что делает правило.
-///
-/// Своё перечисление, а не [`RuleAction`]: тому нужен профиль, а выпадающему
-/// списку — короткая подпись и `Copy`.
+/// Что делает правило; свой тип, а не [`RuleAction`]: тому нужен профиль, списку — `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Action {
     /// Мимо тоннеля.
@@ -48,7 +37,7 @@ impl std::fmt::Display for Action {
 impl From<Action> for RuleAction {
     fn from(action: Action) -> Self {
         match action {
-            // Без профиля: правило должно пережить смену активного сервера.
+            // Без профиля: правило переживает смену сервера.
             Action::Tunnel => Self::Tunnel { profile: None },
             Action::Direct => Self::Direct,
             Action::Block => Self::Block,
@@ -75,10 +64,7 @@ impl Draft {
         self.processes.iter().any(|known| known == path)
     }
 
-    /// Отмечает или снимает приложение.
-    ///
-    /// Список приходит от службы и перерисовывается; двойной щелчок по одной
-    /// строке не должен давать два одинаковых пути в правиле.
+    /// Отмечает или снимает приложение; повтор не дублирует путь.
     pub fn toggle_process(&mut self, path: &str, checked: bool) {
         if checked {
             if !self.has_process(path) {
@@ -94,18 +80,12 @@ impl Draft {
         self.processes.is_empty() && addresses::parse(&self.addresses).is_empty()
     }
 
-    /// Что из вписанного не удалось опознать.
-    ///
-    /// Молча выбросить это нельзя: правило соберётся, но не тем, чего ждали, и
-    /// разбираться человек будет уже по последствиям.
+    /// Что из вписанного не опознано; молча выбросить нельзя.
     pub fn unknown(&self) -> Vec<String> {
         addresses::parse(&self.addresses).unknown
     }
 
-    /// Собирает правило.
-    ///
-    /// `None` — не задано ни одного условия: правило без условий совпадает со
-    /// всем подряд, и сохранять такое молча нельзя.
+    /// Собирает правило; `None` — условий нет, а такое совпало бы со всем.
     pub fn build(&self, id: impl Into<String>) -> Option<RuleConfig> {
         let parsed = addresses::parse(&self.addresses);
         let mut conditions = Vec::new();
@@ -125,10 +105,7 @@ impl Draft {
 
         let when = match conditions.len() {
             0 => return None,
-            // Одно условие не заворачивается в `all`: лишний уровень читался
-            // бы в файле как ошибка.
             1 => conditions.remove(0),
-            // Несколько условий — «и»: «этот домен у этого приложения».
             _ => Condition::All { all: conditions },
         };
 
@@ -139,7 +116,7 @@ impl Draft {
             } else {
                 self.name.trim().to_owned()
             },
-            // Правило, созданное выключенным, выглядит как не сработавшее.
+            // Выключенное с рождения правило выглядит несработавшим.
             enabled: true,
             priority: 0,
             when,
@@ -148,17 +125,13 @@ impl Draft {
     }
 }
 
-/// Придумывает идентификатор, которого ещё нет в наборе.
-///
-/// Два правила с одним идентификатором — это набор, в котором ссылка на
-/// правило указывает на два разных, и решает спор порядок в файле.
+/// Придумывает идентификатор, которого нет в наборе.
 pub fn unique_id(rules: &[RuleConfig]) -> String {
     let taken = |id: &str| rules.iter().any(|rule| rule.id == id);
 
     (1..)
         .map(|number| format!("rule-{number}"))
         .find(|candidate| !taken(candidate))
-        // Диапазон бесконечен: `find` без совпадения здесь невозможен.
         .unwrap_or_else(|| "rule".to_owned())
 }
 
@@ -175,15 +148,12 @@ mod tests {
 
     #[test]
     fn an_empty_draft_yields_nothing() {
-        // Правило без условий совпадает со всем подряд; сохранять такое молча
-        // нельзя.
         assert!(draft().build("r1").is_none());
         assert!(draft().is_empty());
     }
 
     #[test]
     fn a_single_condition_is_not_wrapped() {
-        // Лишний уровень `all` читался бы в файле как ошибка.
         let mut draft = draft();
         draft.processes = vec!["c:/steam/steam.exe".to_owned()];
 
@@ -193,8 +163,6 @@ mod tests {
 
     #[test]
     fn several_conditions_mean_and() {
-        // «Этот домен у этого приложения», а не «этот домен или это
-        // приложение»: второе утащило бы в тоннель весь трафик приложения.
         let mut draft = draft();
         draft.processes = vec!["c:/steam/steam.exe".to_owned()];
         draft.addresses = "steamcontent.com".to_owned();
@@ -219,7 +187,6 @@ mod tests {
 
     #[test]
     fn a_nameless_rule_still_gets_a_name() {
-        // Безымянная строка в списке неотличима от соседней.
         let draft = Draft {
             name: "   ".to_owned(),
             addresses: "example.com".to_owned(),
@@ -237,7 +204,6 @@ mod tests {
 
     #[test]
     fn tunnel_keeps_no_profile() {
-        // Правило должно пережить смену активного сервера.
         assert_eq!(
             RuleAction::from(Action::Tunnel),
             RuleAction::Tunnel { profile: None }
@@ -246,7 +212,6 @@ mod tests {
 
     #[test]
     fn a_built_rule_survives_serialization() {
-        // Правило уезжает службе через канал управления и ложится в файл.
         let mut draft = draft();
         draft.addresses = "example.com 443".to_owned();
 

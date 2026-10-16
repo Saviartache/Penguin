@@ -1,26 +1,10 @@
-//! Датаграммы: своя соль на каждой посылке.
+//! Датаграммы: своя соль и свой ключ на каждую посылку (UDP без порядка и доставки).
 //!
 //! ```text
 //!  [соль] [ шифр( адрес || данные ) + метка ]
-//!   ^^^^^^
-//!   своя на каждую датаграмму, открытым текстом
 //! ```
 //!
-//! # Почему соль на каждой, а не одна на канал
-//!
-//! У UDP нет ни порядка, ни доставки. Общий сеансовый ключ со счётчиком
-//! означал бы, что потерянная датаграмма сдвигает счётчик и всё остальное
-//! перестаёт расшифровываться. Поэтому каждая посылка самостоятельна: своя
-//! соль, свой ключ, счётчик всегда нулевой.
-//!
-//! Платится за это солью в каждом пакете — тридцать два байта при
-//! `aes-256-gcm` — и выводом ключа на каждую датаграмму. Для DNS это заметно;
-//! иначе не бывает.
-//!
-//! # Откуда приходят ответы
-//!
-//! Сервер отвечает со своего адреса. Чужая датаграмма на открытом порту —
-//! обычный фон, а не поломка канала: её отбрасывают молча.
+//! Чужие и нерасшифровавшиеся датаграммы отбрасываются молча.
 
 use std::net::SocketAddr;
 
@@ -29,8 +13,8 @@ use bytes::Bytes;
 use penguin_core::address::SocketAddress;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::error::ProtocolError;
+use penguin_proto::random;
 use penguin_transport::addr::socks;
-use rand::Rng;
 use tokio::net::UdpSocket;
 
 use crate::crypto::sealed_len;
@@ -78,25 +62,18 @@ impl ProxyDatagram for ShadowsocksDatagram {
     }
 
     async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
+        let mut buffer = vec![0u8; MAX_DATAGRAM];
         loop {
-            let mut buffer = vec![0u8; MAX_DATAGRAM];
             let (len, from) = self.socket.recv_from(&mut buffer).await?;
-
-            // Чужая датаграмма — это фон открытого порта, а не ошибка канала.
             if from.ip() != self.server.ip() {
                 tracing::debug!(%from, "датаграмма не от сервера — отброшена");
                 continue;
             }
 
-            buffer.truncate(len);
-            match open(self.method, &self.master, &mut buffer) {
+            match open(self.method, &self.master, &mut buffer[..len]) {
                 Ok(found) => return Ok(found),
-                // Не расшифровалась — почти всегда чужой пакет на наш порт.
-                // Рвать из-за него канал нельзя: для UDP это то же самое, что
-                // потерянный пакет.
                 Err(err) => {
                     tracing::debug!(%from, %err, "датаграмма не разобралась — отброшена");
-                    continue;
                 }
             }
         }
@@ -111,18 +88,18 @@ pub fn seal(
     payload: &[u8],
 ) -> ShadowsocksResult<Vec<u8>> {
     let mut salt = vec![0u8; method.salt_len()];
-    rand::thread_rng().fill(&mut salt[..]);
+    random::fill(&mut salt);
 
     let key = kdf::session_key(master, &salt, method)?;
     let mut cipher = Cipher::new(method.algorithm(), &key)?;
 
-    let mut plain = Vec::with_capacity(socks::encoded_len(target) + payload.len());
-    socks::encode(target, &mut plain)?;
-    plain.extend_from_slice(payload);
+    let from = salt.len();
+    salt.reserve(sealed_len(socks::encoded_len(target) + payload.len()));
+    socks::encode(target, &mut salt)?;
+    salt.extend_from_slice(payload);
 
-    let mut out = salt;
-    out.extend_from_slice(&cipher.seal(&plain)?);
-    Ok(out)
+    cipher.seal_in_place(&mut salt, from)?;
+    Ok(salt)
 }
 
 /// Разбирает пришедшую датаграмму.

@@ -1,7 +1,4 @@
-//! Настройка utun через `ioctl`: адрес, «тот конец» и MTU.
-//!
-//! Не через `ifconfig`: адрес адаптера — то, без чего тоннель не работает
-//! вовсе, и зависеть здесь от разбора вывода чужой программы нельзя.
+//! Настройка utun через `ioctl` (не через `ifconfig`): адрес, «тот конец», MTU.
 
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -18,11 +15,7 @@ const SIOCAIFADDR: libc::c_ulong = 0x8040_691A;
 /// Задать MTU. `_IOW('i', 52, struct ifreq)`.
 const SIOCSIFMTU: libc::c_ulong = 0x8020_6934;
 
-/// Запрос «добавить адрес»: `struct in_aliasreq`.
-///
-/// Третий адрес — маска, второй — «тот конец» связи. У utun он есть всегда:
-/// интерфейс двухточечный, и адрес назначения система требует, даже когда за
-/// адаптером никого нет.
+/// `struct in_aliasreq`; utun двухточечный, адрес назначения обязателен.
 #[repr(C)]
 struct AliasRequest {
     name: [u8; NAME_LEN],
@@ -38,10 +31,7 @@ struct IfRequest {
     data: [u8; 16],
 }
 
-/// Адрес в том виде, в каком его читает ядро.
-///
-/// `sin_len` обязателен: в BSD длина лежит в самой структуре, и без неё ядро
-/// прочитает адрес не той длины.
+/// Адрес для ядра; в BSD длина `sin_len` обязательна.
 fn sockaddr(address: Ipv4Addr) -> libc::sockaddr_in {
     libc::sockaddr_in {
         #[allow(
@@ -84,8 +74,6 @@ pub(super) fn configure(
     netmask: Ipv4Addr,
     mtu: u16,
 ) -> TunResult<()> {
-    // Настройка идёт через сокет, а не через сам адаптер: так устроен
-    // интерфейс ядра, и никакого трафика через этот сокет не пойдёт.
     let control = socket(
         AddressFamily::Inet,
         SockType::Datagram,
@@ -97,8 +85,6 @@ pub(super) fn configure(
     let mut alias = AliasRequest {
         name: name_bytes(name)?,
         address: sockaddr(address),
-        // За адаптером никого нет, поэтому «тот конец» — он сам: пакеты всё
-        // равно приходят к нам.
         destination: sockaddr(address),
         netmask: sockaddr(netmask),
     };
@@ -121,6 +107,7 @@ pub(super) fn configure(
 /// Выполняет `ioctl` и переводит отказ в ошибку с причиной.
 fn ioctl(fd: &OwnedFd, request: libc::c_ulong, argument: *mut libc::c_void) -> TunResult<()> {
     #[allow(unsafe_code, reason = "настройка интерфейса через ioctl")]
+    // SAFETY: `argument` указывает на структуру, размер которой зашит в `request`.
     let code = unsafe { libc::ioctl(fd.as_raw_fd(), request, argument) };
 
     if code < 0 {
@@ -139,8 +126,6 @@ mod tests {
 
     #[test]
     fn an_address_carries_its_own_length() {
-        // В BSD длина лежит в самой структуре; ноль здесь означает адрес,
-        // который ядро прочитает не так.
         let address = sockaddr(Ipv4Addr::new(198, 18, 0, 1));
         assert_eq!(
             usize::from(address.sin_len),
@@ -151,8 +136,6 @@ mod tests {
 
     #[test]
     fn the_alias_request_is_the_size_the_kernel_expects() {
-        // Номер команды несёт в себе размер структуры: разойдясь с ядром на
-        // байт, `ioctl` вернёт `ENOTTY` без единого намёка на причину.
         assert_eq!(std::mem::size_of::<AliasRequest>(), 64);
         assert_eq!((SIOCAIFADDR >> 16) & 0x1FFF, 64);
     }

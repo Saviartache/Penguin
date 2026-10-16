@@ -1,8 +1,6 @@
 //! Направление через сервер AnyTLS.
 //!
-//! Держит пул сессий и задачу уборки. Соединений при сборке не открывает:
-//! первая сессия поднимается первым потоком, и рукопожатие TLS платится не
-//! при включении профиля, а тогда, когда в него правда пошли.
+//! Пул сессий и задача уборки; соединение поднимается первым потоком.
 
 use std::sync::Arc;
 
@@ -83,13 +81,9 @@ impl Outbound for AnyTlsOutbound {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Ровно то, что стоит в настройках: соврать здесь означает, что
-            // запросы DNS уйдут в направление, которое их молча потеряет.
             udp: self.config.udp,
-            // Здесь это правда: поток в готовой сессии стоит одного кадра.
             multiplex: true,
             port_hopping: false,
-            // Имя уезжает серверу доменом и разрешается на той стороне.
             remote_dns: true,
         }
     }
@@ -100,8 +94,6 @@ impl Outbound for AnyTlsOutbound {
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
         let mut stream = self.pool.open().await?;
 
-        // Адрес назначения — первое, что уходит в поток. Ответа на него нет:
-        // сервер либо подтвердит открытие отдельным кадром, либо промолчит.
         let mut header = Vec::new();
         socks::encode(target, &mut header).map_err(AnyTlsError::from)?;
 
@@ -131,7 +123,6 @@ impl Outbound for AnyTlsOutbound {
 /// Убирает простаивающие сессии, пока направление живо.
 async fn sweep(pool: std::sync::Weak<SessionPool>, every: std::time::Duration) {
     let mut ticker = tokio::time::interval(every);
-    // Первый тик приходит сразу; пропускаем его — убирать ещё нечего.
     ticker.tick().await;
     loop {
         ticker.tick().await;
@@ -187,8 +178,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_fresh_outbound_holds_no_connections() {
-        // Рукопожатие TLS платится тогда, когда в направление пошли, а не
-        // когда его включили: иначе профиль в списке стоил бы соединения.
         let outbound = outbound(config()).expect("собирается");
         assert!(outbound.pool.is_empty());
     }

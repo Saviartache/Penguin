@@ -1,38 +1,18 @@
 //! MASQUE `CONNECT-IP` — описание формы.
 
-use crate::forms::check;
-use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
+use crate::forms::protocol::masque::FIELDS;
+use crate::forms::protocol::spec::ProtocolSpec;
 
-/// Поля формы в том порядке, в каком они показываются.
-///
-/// Адреса интерфейса, MTU и маршрутов здесь нет: RFC 9484 отдаёт их
-/// капсулами согласования уже после подключения (`ADDRESS_ASSIGN`), а не
-/// настройкой профиля. Опознания RFC 9484 тоже не описывает — как и у
-/// `masque::SPEC`, поле `authorization` уходит заголовком как есть, и
-/// обязательным его сделать нельзя.
-static FIELDS: &[FieldSpec] = &[
-    FieldSpec::text("server", &["server"], |s| s.server_address)
-        .example(|s| s.server_address_example)
-        .required(|s| s.need_server)
-        .check(check::server_address),
-    FieldSpec::secret("authorization", &["authorization"], |s| s.authorization)
-        .example(|s| s.optional_hint),
-    FieldSpec::text("sni", &["tls", "sni"], |s| s.sni).example(|s| s.sni_example),
-    FieldSpec::flag("insecure", &["tls", "insecure"], |s| s.insecure),
-];
-
-/// Описание протокола.
-///
-/// Подпись называет режим отдельно от `masque::SPEC`: `CONNECT-IP` — другой
-/// протокол по устройству (труба для пакетов, а не для датаграмм с адресом),
-/// и общее имя «MASQUE» без уточнения обещало бы оба режима сразу.
+/// Описание протокола. Поля общие с `masque`; адреса, MTU и маршрутов нет: RFC 9484
+/// отдаёт их капсулами после подключения. Подпись называет режим: имя «MASQUE»
+/// обещало бы оба.
 pub static SPEC: ProtocolSpec = ProtocolSpec {
     id: "masque-ip",
     label: "MASQUE (CONNECT-IP)",
     fields: FIELDS,
     schemes: &[],
     from_link: None,
-    // RFC 9484 не даёт способа назначить сервер имён внутри тоннеля.
+    // RFC 9484 не назначает DNS внутри тоннеля.
     note: Some(|s| s.masque_ip_no_dns),
 };
 
@@ -42,8 +22,6 @@ mod tests {
 
     #[test]
     fn the_form_says_out_loud_that_there_is_no_dns() {
-        // Молчание здесь означало бы, что доменные имена через тоннель
-        // никогда не работают, и человек искал бы причину в сети.
         assert!(SPEC.note.is_some());
     }
 

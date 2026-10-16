@@ -1,37 +1,15 @@
-//! Safari 16.0 (macOS/iOS, сентябрь 2022, `HelloSafari_16_0` в uTLS,
-//! `u_parrots.go` на ревизии `23b1dac`).
+//! Safari 16.0 (`HelloSafari_16_0`, uTLS `u_parrots.go`, ревизия `23b1dac`).
 //!
-//! # BoringSSL под капотом, но не тот же порядок
-//!
-//! Safari, как и Chrome, построен на BoringSSL — отсюда GREASE (тот же набор
-//! ролей: шифр, кривая, оба псевдорасширения, версия) и тот же `padding` по
-//! `BoringPaddingStyle`. Но перемешивания расширений у Safari нет: список
-//! идёт в одном и том же порядке каждый раз. И набор у него короче, чем у
-//! Chrome, — ни `session_ticket`, ни ALPS, ни GREASE ECH: этих трёх
-//! расширений у `HelloSafari_16_0` попросту нет в списке uTLS.
-//!
-//! # Повторяющаяся запись в `signature_algorithms` — не опечатка этого файла
-//!
-//! `PSSWithSHA384` (`0x0805`) в списке подписей встречается дважды подряд.
-//! Это не ошибка переноса: в `u_parrots.go` она продублирована так же, и
-//! раз задача — не выдумывать байт, а повторить эталон, дубликат остаётся.
-//!
-//! # Сжатие сертификата — Zlib, а не Brotli
-//!
-//! У Chrome в этом же расширении `CertCompressionBrotli`; у Safari —
-//! `CertCompressionZlib`. Расхождение реальное, не опечатка: так записано в
-//! обоих местах uTLS.
-//!
-//! Сверка: как и для Chrome 120, независимого захвата трафика для сверки
-//! байт в байт не нашлось; список сверен только с исходником uTLS.
-
-use rand::RngCore;
+//! GREASE и padding как у Chrome, но без перемешивания, `session_ticket`, ALPS и ECH.
+//! Двойная `0x0805` в `signature_algorithms` и zlib в `compress_certificate` — как в
+//! эталоне. Сверено только с исходником uTLS.
 
 use crate::client_hello::ExtensionSlot;
 use crate::error::UtlsResult;
 use crate::extension::{fixed, generic, grease_placeholder, key_share, sni};
 use crate::grease::GreaseValues;
 use crate::key_exchange::{self, KeyExchange};
+use crate::rng::Rng;
 
 /// Шифры, точно в этом порядке. Первый — место GREASE.
 pub const CIPHER_SUITES: &[u16] = &[
@@ -58,8 +36,7 @@ pub const CIPHER_SUITES: &[u16] = &[
     0x000a, // TLS_RSA_WITH_3DES_EDE_CBC_SHA
 ];
 
-/// Единственный метод сжатия — TLS 1.3 запрещает любой, кроме этого, но поле
-/// осталось от совместимости и должно быть заполнено.
+/// Метод сжатия: только `null`.
 pub const COMPRESSION_METHODS: &[u8] = &[0];
 
 const CURVE_X25519: u16 = 29;
@@ -69,15 +46,12 @@ const CURVE_P521: u16 = 25;
 
 /// Собирает расширения и запрашивает пару ключей `X25519` для `key_share`.
 pub(crate) fn build(
-    rng: &mut impl RngCore,
+    rng: &mut impl Rng,
     host: &str,
 ) -> UtlsResult<(Vec<ExtensionSlot>, Vec<KeyExchange>)> {
     let grease = GreaseValues::from_rng(rng);
     let x25519 = key_exchange::generate_x25519();
 
-    // Порядок не перемешивается, но два GREASE-расширения всё равно якоря:
-    // это тот самый смысл, что и у Chrome — сборка не должна пытаться
-    // передвинуть их, если однажды у Safari тоже появится перемешивание.
     let fixed_slot = |bytes: Vec<u8>| ExtensionSlot {
         bytes,
         anchored: true,
@@ -108,7 +82,7 @@ pub(crate) fn build(
         )),
         fixed_slot(fixed::status_request()),
         fixed_slot(generic::u16_list_u16_len(
-            13, // signature_algorithms — с повторной записью, см. текст модуля
+            13, // signature_algorithms
             &[
                 0x0403, // ecdsa_secp256r1_sha256
                 0x0804, // rsa_pss_rsae_sha256
@@ -142,8 +116,6 @@ pub(crate) fn build(
         fixed_slot(generic::u16_list_u8_len(27, &[0x0001])), // compress_certificate: zlib
         fixed_slot(grease_placeholder(grease.extension_last, &[0])),
     ];
-    // `padding` добавляется отдельно при сборке всего `ClientHello`, как и у
-    // Chrome, — см. `crate::fingerprint::Fingerprint::has_padding`.
 
     Ok((extensions, vec![x25519]))
 }
@@ -151,11 +123,12 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::testing::StepRng;
 
     #[test]
     fn the_first_cipher_is_grease_and_the_order_never_changes() {
-        let mut first_run = rand::rngs::mock::StepRng::new(1, 1);
-        let mut second_run = rand::rngs::mock::StepRng::new(1, 1);
+        let mut first_run = StepRng::new(1, 1);
+        let mut second_run = StepRng::new(1, 1);
         assert!(crate::grease::is_grease(CIPHER_SUITES[0]));
         let (a, _) = build(&mut first_run, "example.com").expect("собирается");
         let (b, _) = build(&mut second_run, "example.com").expect("собирается");
@@ -168,7 +141,7 @@ mod tests {
 
     #[test]
     fn there_is_no_session_ticket_alps_or_ech_grease() {
-        let mut rng = rand::rngs::mock::StepRng::new(1, 1);
+        let mut rng = StepRng::new(1, 1);
         let (extensions, _) = build(&mut rng, "example.com").expect("собирается");
         for ext_type in [35u16, 17513, 0xfe0d] {
             assert!(
@@ -182,7 +155,7 @@ mod tests {
 
     #[test]
     fn certificate_compression_is_zlib_not_brotli() {
-        let mut rng = rand::rngs::mock::StepRng::new(1, 1);
+        let mut rng = StepRng::new(1, 1);
         let (extensions, _) = build(&mut rng, "example.com").expect("собирается");
         let compress = extensions
             .iter()

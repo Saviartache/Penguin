@@ -1,23 +1,9 @@
 //! Шифрование куска: ключ, счётчик, метка подлинности.
 //!
-//! # Счётчик, а не случайность
-//!
-//! Нонс здесь не бросается, а считается: двенадцать байт, число **от младшего
-//! байта к старшему**, плюс единица после каждой операции. Порядок байт — не
-//! мелочь и не вкус: при обратном порядке первые 65535 кусков совпадут с
-//! правильными, а дальше разойдутся. Выглядит это как соединение, которое
-//! работает час и потом рвётся, и ищется оно днями.
-//!
-//! Отправка и приём считают **раздельно**: это два независимых потока байт,
-//! и общий счётчик рассинхронизировал бы их на первом же ответе сервера.
-//!
-//! # Почему нельзя повторить пару «ключ, счётчик»
-//!
-//! Для AEAD это не «слабее», а «раскрыто»: два разных сообщения под одной
-//! парой выдают оба открытых текста и позволяют подделать метку. Поэтому
-//! ключ здесь всегда сеансовый — выведенный из случайной соли, — и счётчик
-//! начинается с нуля ровно один раз на соединение.
+//! Нонс — счётчик little-endian (от младшего байта), отдельный на каждое
+//! направление. Пара «ключ, нонс» не повторяется: ключ сеансовый, счётчик с нуля.
 
+use bytes::BytesMut;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey};
 
 use crate::aead::algorithm::{Algorithm, NONCE_LEN, TAG_LEN};
@@ -31,7 +17,6 @@ pub struct Cipher {
 
 impl std::fmt::Debug for Cipher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Ни ключа, ни счётчика: первый — секрет, второй по нему считается.
         f.debug_struct("Cipher").finish()
     }
 }
@@ -50,18 +35,35 @@ impl Cipher {
     /// Зашифровывает кусок и дописывает метку подлинности.
     pub fn seal(&mut self, plain: &[u8]) -> TransportResult<Vec<u8>> {
         let mut buffer = plain.to_vec();
-        let nonce = self.take_nonce();
-        self.key
-            .seal_in_place_append_tag(nonce, Aad::empty(), &mut buffer)
-            .map_err(|_| TransportError::malformed("не зашифровалось"))?;
+        self.seal_in_place(&mut buffer, 0)?;
         Ok(buffer)
     }
 
-    /// Расшифровывает кусок на месте и возвращает длину открытого текста.
-    ///
-    /// `Err` — метка не сошлась. Это не «шум на линии»: AEAD заверяет данные,
-    /// и не сошедшаяся метка означает либо неверный пароль, либо правку по
-    /// дороге. Продолжать после неё нельзя ни в каком случае.
+    /// Шифрует `buf[from..]` на месте и дописывает метку; без аллокаций.
+    pub fn seal_in_place(&mut self, buf: &mut Vec<u8>, from: usize) -> TransportResult<()> {
+        let tag = self.seal_slice(&mut buf[from..])?;
+        buf.extend_from_slice(tag.as_ref());
+        Ok(())
+    }
+
+    /// Как [`Self::seal`], но дописывает в `out` без промежуточных буферов.
+    pub fn seal_into(&mut self, plain: &[u8], out: &mut BytesMut) -> TransportResult<()> {
+        let start = out.len();
+        out.extend_from_slice(plain);
+        let tag = self.seal_slice(&mut out[start..])?;
+        out.extend_from_slice(tag.as_ref());
+        Ok(())
+    }
+
+    fn seal_slice(&mut self, data: &mut [u8]) -> TransportResult<ring::aead::Tag> {
+        let nonce = self.take_nonce();
+        self.key
+            .seal_in_place_separate_tag(nonce, Aad::empty(), data)
+            .map_err(|_| TransportError::malformed("не зашифровалось"))
+    }
+
+    /// Расшифровывает на месте, возвращает длину открытого текста.
+    /// `Err` — метка не сошлась (чужой пароль или правка по дороге): продолжать нельзя.
     pub fn open(&mut self, buffer: &mut [u8]) -> TransportResult<usize> {
         let nonce = self.take_nonce();
         let plain = self
@@ -79,10 +81,7 @@ impl Cipher {
     }
 }
 
-/// Прибавляет единицу к числу, записанному от младшего байта к старшему.
-///
-/// Свободная функция с тестом, потому что ошибка здесь не видна ни на сборке,
-/// ни на первом мегабайте.
+/// Прибавляет единицу к числу little-endian.
 fn increment(nonce: &mut [u8; NONCE_LEN]) {
     for byte in nonce.iter_mut() {
         let (value, carry) = byte.overflowing_add(1);
@@ -128,14 +127,10 @@ mod tests {
 
     #[test]
     fn the_counter_moves_and_the_order_of_the_pieces_matters() {
-        // Второй кусок под тем же ключом шифруется другим нонсом; поменять
-        // куски местами при расшифровке нельзя.
         let mut send = cipher(Algorithm::Aes128Gcm);
         let mut first = send.seal(b"one").expect("шифруется");
         let mut second = send.seal(b"two").expect("шифруется");
 
-        // Второму куску достался следующий шаг счётчика: первым его не
-        // открыть, сколько бы правильным ни был ключ.
         let mut ahead = cipher(Algorithm::Aes128Gcm);
         assert!(ahead.open(&mut second.clone()).is_err(), "порядок не важен");
 
@@ -159,8 +154,6 @@ mod tests {
 
     #[test]
     fn the_counter_counts_from_the_low_byte_up() {
-        // При обратном порядке первые 65535 кусков совпали бы с правильными,
-        // а дальше разошлись бы: соединение работает час и рвётся.
         let mut nonce = [0u8; NONCE_LEN];
         increment(&mut nonce);
         assert_eq!(nonce[0], 1, "единица легла не в младший байт");
@@ -172,8 +165,6 @@ mod tests {
 
     #[test]
     fn the_counter_wraps_without_panicking() {
-        // Столько кусков в одном соединении не бывает, но паника здесь
-        // оборвала бы тоннель, а не соединение.
         let mut nonce = [0xff; NONCE_LEN];
         increment(&mut nonce);
         assert_eq!(nonce, [0u8; NONCE_LEN]);

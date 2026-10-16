@@ -10,19 +10,14 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
-/// Чем шифруется тело. `auto` первым — умолчание протокола.
-///
-/// `zero` внизу и не спроста: единственный шифр, который форма отдельно
-/// подписывает предупреждением ([`ProtocolSpec::note`]) — он отключает не
-/// только шифрование, но и границы кусков тела.
+/// Шифр тела; `auto` — умолчание протокола. `zero` отключает и шифрование, и
+/// границы кусков, потому форма предупреждает ([`ProtocolSpec::note`]).
 const CIPHERS: &[&str] = &["auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero"];
 
-/// Чем шифруется соединение до сервера — то же различие, что у VLESS.
+/// Шифрование до сервера, как у VLESS.
 const SECURITY: &[&str] = &["tls", "none"];
 
-/// `alterId` обязан быть пустым или числом — сам протокол принимает только
-/// `0`, но сказать это тут же, не дожидаясь сохранения, дешевле для того, кто
-/// вписал туда пароль по ошибке.
+/// `alterId` — число; протокол принимает только `0`, но ошибку лучше показать до сохранения.
 fn check_alter_id(raw: &str) -> Result<(), String> {
     raw.trim()
         .parse::<u32>()
@@ -30,16 +25,12 @@ fn check_alter_id(raw: &str) -> Result<(), String> {
         .map_err(|_| crate::i18n::s().bad_alter_id.to_owned())
 }
 
-/// Поля формы в том порядке, в каком они показываются.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
         .required(|s| s.need_server)
         .check(check::server_address),
-    // Не `check::uuid`: сюда, в отличие от VLESS, годится и произвольный
-    // текст — сервер сворачивает его в шестнадцать байт сам
-    // (`penguin_vmess::crypto::id::resolve`), и отвергать его здесь значило
-    // бы отвергать то, что примет протокол.
+    // Не `check::uuid`: произвольный текст сервер сворачивает сам (`penguin_vmess::crypto::id::resolve`).
     FieldSpec::secret("id", &["id"], |s| s.vmess_id).required(|s| s.need_vmess_id),
     FieldSpec::text("alter_id", &["alter_id"], |s| s.alter_id).check(check_alter_id),
     FieldSpec::choice("cipher", &["cipher"], |s| s.method, CIPHERS),
@@ -62,25 +53,12 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     note: Some(|s| s.vmess_zero_warning),
 };
 
-/// Как ссылка ложится в поля.
+/// Как ссылка ложится в поля: `vmess://base64(json)` формата v2rayN
+/// (`add`, `port`, `id`, `aid`, `net`, `host`, `path`, `tls`, `sni`).
 ///
-/// ```text
-///  vmess://base64(json)
-/// ```
-///
-/// Формат JSON — «v2rayN»: `add`, `port`, `id`, `aid`, `net`, `type`, `host`,
-/// `path`, `tls`, `sni`. Это не URI в обычном смысле — весь адрес, порт и
-/// параметры лежат внутри base64, а не в `userinfo`/`query` — но
-/// [`crate::forms::link::split`] всё равно раскладывает ссылку на части: раз
-/// внутри base64 нет ни `@`, ни `:`, ни `?`, всё содержимое целиком попадает
-/// в [`Link::host`], и разбирать его достаточно оттуда.
-///
-/// `net`/`type`/`aid` в JSON называются иначе, чем поля этой формы:
-/// `net` — это наш `transport` (в терминах v2ray "сеть переноса"), а `aid` —
-/// `alterId`. Названо по-разному нарочно: `security` в терминах самого
-/// VMess — это шифр тела ([`CIPHERS`]), а не TLS, и одноимённое поле формы
-/// значило бы другое — держать их разными именами дешевле, чем один раз
-/// перепутать.
+/// Всё лежит внутри base64, поэтому [`crate::forms::link::split`] отдаёт его в
+/// [`Link::host`]. `net` — наш `transport`, `aid` — `alter_id`; `security` формы
+/// не равно `security` VMess (там это шифр, [`CIPHERS`]).
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let decoded =
         base64::decode(&link.host).map_err(|_| crate::i18n::s().link_not_a_link.to_owned())?;
@@ -109,7 +87,7 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if let Some(aid) = text_field(&json, "aid") {
         values.push(("alter_id", aid));
     }
-    // У v2rayN имя службы gRPC тоже лежит в `path`.
+    // Имя службы gRPC у v2rayN тоже в `path`.
     let net = json.get("net").and_then(serde_json::Value::as_str);
     let transport = carrier::transport(net.unwrap_or_default())?;
     if net.is_some() {
@@ -152,6 +130,7 @@ fn text_field(json: &serde_json::Value, key: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::forms::link;
+    use crate::forms::protocol::testing::{Values, value};
 
     fn link_for(json: &serde_json::Value) -> String {
         format!(
@@ -160,17 +139,8 @@ mod tests {
         )
     }
 
-    fn parse(json: &serde_json::Value) -> Vec<(&'static str, String)> {
-        let raw = link_for(json);
-        let link = link::split(&raw).expect("ссылка разбирается");
-        from_link(&link).expect("поля заполняются")
-    }
-
-    fn value<'a>(values: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
-        values
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, value)| value.as_str())
+    fn parse(json: &serde_json::Value) -> Values {
+        crate::forms::protocol::testing::parse(from_link, &link_for(json))
     }
 
     #[test]
@@ -220,7 +190,6 @@ mod tests {
 
     #[test]
     fn a_nonzero_alter_id_is_carried_over_and_left_to_the_protocol() {
-        // Окно не решает за протокол: пусть отвергнет он сам, с объяснением.
         let json = serde_json::json!({
             "add": "example.com", "port": 443, "id": "id", "aid": 16,
         });

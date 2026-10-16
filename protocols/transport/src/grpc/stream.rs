@@ -8,7 +8,7 @@ use std::task::{Context, Poll, ready};
 use bytes::{Buf, Bytes};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use super::frame::{Deframer, encode_hunk};
+use super::frame::{Deframer, put_hunk};
 
 /// Самый большой кусок в одном `Hunk`.
 const MAX_HUNK: usize = 16 * 1024;
@@ -23,10 +23,11 @@ pub struct GrpcStream<S> {
     /// Данные последнего `Hunk`, ещё не отданные читателю.
     leftover: Bytes,
     scratch: Box<[u8]>,
-    /// Собранный кадр, ещё не ушедший целиком.
-    pending: Bytes,
-    /// Сколько байт тела в этом кадре.
-    pending_len: usize,
+    /// Переиспользуемый буфер кадра; `frame[sent..]` ещё не ушло.
+    frame: Vec<u8>,
+    sent: usize,
+    /// Длина тела в буфере кадра.
+    body_len: usize,
 }
 
 impl<S> GrpcStream<S> {
@@ -37,20 +38,22 @@ impl<S> GrpcStream<S> {
             deframer: Deframer::default(),
             leftover: Bytes::new(),
             scratch: vec![0; READ_CHUNK].into_boxed_slice(),
-            pending: Bytes::new(),
-            pending_len: 0,
+            frame: Vec::new(),
+            sent: 0,
+            body_len: 0,
         }
     }
 }
 
 impl<S: AsyncWrite + Unpin> GrpcStream<S> {
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        while !self.pending.is_empty() {
-            let written = ready!(Pin::new(&mut self.inner).poll_write(cx, &self.pending))?;
+        while self.sent < self.frame.len() {
+            let written =
+                ready!(Pin::new(&mut self.inner).poll_write(cx, &self.frame[self.sent..]))?;
             if written == 0 {
                 return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
             }
-            self.pending.advance(written);
+            self.sent += written;
         }
         Poll::Ready(Ok(()))
     }
@@ -77,7 +80,6 @@ impl<S: AsyncRead + Unpin> AsyncRead for GrpcStream<S> {
             let mut chunk = ReadBuf::new(&mut this.scratch);
             ready!(Pin::new(&mut this.inner).poll_read(cx, &mut chunk))?;
             if chunk.filled().is_empty() {
-                // Конец тела: дальше читать нечего.
                 return Poll::Ready(Ok(()));
             }
             this.deframer.push(chunk.filled());
@@ -92,18 +94,19 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for GrpcStream<S> {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.pending.is_empty() {
+        if this.sent == this.frame.len() {
             if buf.is_empty() {
                 return Poll::Ready(Ok(0));
             }
             let chunk = &buf[..buf.len().min(MAX_HUNK)];
-            this.pending = encode_hunk(chunk);
-            this.pending_len = chunk.len();
+            this.frame.clear();
+            this.sent = 0;
+            put_hunk(chunk, &mut this.frame);
+            this.body_len = chunk.len();
         }
-        // Запись сделана, когда кадр ушёл целиком; повтор после `Pending`
-        // приходит с теми же байтами.
+        // Повтор после `Pending` приходит с теми же байтами
         ready!(this.poll_drain(cx))?;
-        Poll::Ready(Ok(this.pending_len))
+        Poll::Ready(Ok(this.body_len))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -123,6 +126,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for GrpcStream<S> {
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
+    use super::super::frame::encode_hunk;
     use super::*;
 
     #[tokio::test]

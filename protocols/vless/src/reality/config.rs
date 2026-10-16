@@ -11,41 +11,24 @@ use crate::reality::error::RealityError;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RealityConfig {
-    /// Публичный ключ сервера X25519, `base64url` без набивки — та же запись,
-    /// что печатает `xray x25519` (`Xray-core`, `infra/conf/
-    /// transport_security.go`, строка 196:
-    /// `base64.RawURLEncoding.DecodeString(c.PublicKey)`, ровно 32 байта после
-    /// разбора; независимо подтверждено `sing-box`,
-    /// `common/tls/reality_client.go`: `base64.RawURLEncoding.DecodeString(
-    /// options.Reality.PublicKey)`).
+    /// Публичный ключ сервера X25519, `base64url` без набивки, 32 байта
+    /// (`Xray-core` `infra/conf/transport_security.go`, `sing-box` `reality_client.go`).
     pub public_key: String,
 
-    /// Короткий идентификатор: 0-16 шестнадцатеричных цифр (0-8 байт),
-    /// объявленный на сервере в списке разрешённых. Короче — дополняется
-    /// нулевыми байтами справа (`Xray-core`, тот же файл, строка 205:
-    /// `config.ShortId = make([]byte, 8); hex.Decode(config.ShortId, ...)` —
-    /// `hex.Decode` в `encoding/hex` пишет ровно `len(src)/2` байт в начало
-    /// `dst` и не трогает остаток, оставляя его нулями из `make`).
+    /// 0-16 шестнадцатеричных цифр; короче — дополняется нулями справа
+    /// (`Xray-core`: `ShortId = make([]byte, 8); hex.Decode`).
     #[serde(default)]
     pub short_id: String,
 
-    /// Имя сайта, за который выдаёт себя `ClientHello`: идёт в SNI. Обычно —
-    /// домен из `serverNames` настроек сервера (сайт, который Reality
-    /// прикрывает).
+    /// Имя сайта-прикрытия для SNI (из `serverNames` сервера).
     pub server_name: String,
 
-    /// Отпечаток браузера, которым собирается `ClientHello`
-    /// (`penguin_utls::Fingerprint`) — Chrome, Firefox или Safari; версии
-    /// зафиксированы в самом крейте `penguin-utls`.
+    /// Отпечаток браузера для `ClientHello`.
     #[serde(default = "default_fingerprint")]
     pub fingerprint: Fingerprint,
 }
 
-/// Умолчание для [`RealityConfig::fingerprint`].
-///
-/// `Fingerprint` — чужой тип (`penguin-utls`), и `impl Default` для него
-/// здесь запрещён правилом сирот; отдельная функция — обычный способ дать
-/// полю умолчание, не трогая чужой крейт.
+/// Умолчание поля: `Default` для чужого типа нельзя.
 fn default_fingerprint() -> Fingerprint {
     Fingerprint::Chrome
 }

@@ -1,74 +1,48 @@
 //! Разрешение имён **внутри** пакетного тоннеля.
 //!
-//! Через направление уровня пакетов ходят пакеты, а пакету нужен адрес.
-//! Приложение же приходит с именем. Разрешить его надо тем же путём, каким
-//! пойдут данные: спросить снаружи — значит отдать провайдеру список имён,
-//! которые человек спрашивает, ровно то, от чего он тоннель и поднял.
+//! Имя разрешается тем же путём, что и данные: спросить снаружи значит отдать
+//! провайдеру список имён. Под каждый запрос берётся свой канал датаграмм, иначе
+//! ответ достался бы чужому приложению.
 //!
-//! ```text
-//!   имя ──► запрос DNS ──► тот же тоннель ──► сервер имён, который дал сервер
-//!   адрес ◄──────────────────────────────────────────────────────── ответ
-//! ```
-//!
-//! # Почему запрос уходит по своему каналу
-//!
-//! Канал датаграмм у тоннеля выдаётся на сессию, и ответы в нём приходят
-//! вперемешку с чужими только если сессию делить. Поэтому под каждый запрос
-//! берётся свой канал: иначе ответ сервера имён достался бы приложению,
-//! которое его не спрашивало.
-//!
-//! # Чего здесь нет
-//!
-//! Ни DNSSEC, ни повторов по TCP при усечённом ответе, ни отрицательного
-//! кэша. Усечённый ответ (`TC`) для запроса адреса — редкость: адреса
-//! помещаются в датаграмму. Всё это заводится тогда, когда понадобится, а не
-//! на всякий случай.
+//! Нет DNSSEC, повторов по TCP при `TC` и отрицательного кэша.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
-use hickory_proto::rr::RecordType;
+use parking_lot::RwLock;
 use penguin_core::address::{Address, SocketAddress};
-use penguin_dns::message;
+use penguin_dns::message::{self, RecordType};
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::error::ProtocolError;
 
 /// Порт сервера имён.
 const DNS_PORT: u16 = 53;
 
-/// Сколько ждать ответа от одного сервера имён.
-///
-/// Внутри тоннеля путь длиннее обычного, но не настолько: три секунды — это
-/// уже «сервер молчит», и лучше спросить следующего, чем ждать дальше.
+/// Ожидание ответа от одного сервера имён: дольше — это уже молчание.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Наименьший срок жизни записи в кэше.
-///
-/// Сервер вправе прислать `TTL 0`, и честно перепрашивать его на каждое
-/// соединение значило бы платить оборотом по тоннелю за каждую картинку на
-/// странице.
+/// Наименьший срок записи: `TTL 0` не должен давать оборот по тоннелю на каждое соединение.
 const MIN_TTL: Duration = Duration::from_secs(10);
 
-/// Наибольший срок.
-///
-/// Держать дольше нельзя: адрес за именем меняется, а переподключение
-/// профиля кэш не чистит.
+/// Наибольший срок: переподключение профиля кэш не чистит, а адрес за именем меняется.
 const MAX_TTL: Duration = Duration::from_secs(3600);
 
-/// Запомненный ответ.
-#[derive(Debug, Clone)]
+/// Предел записей кэша.
+const MAX_CACHED: usize = 1024;
+
+#[derive(Debug, Clone, Copy)]
 struct Cached {
-    addresses: Vec<IpAddr>,
+    address: IpAddr,
     until: Instant,
 }
 
 /// Кто разрешает имена внутри тоннеля.
 #[derive(Debug)]
 pub struct TunnelResolver {
-    /// Серверы имён, которые назвал сервер тоннеля.
+    /// Серверы имён, названные сервером тоннеля.
     servers: Vec<IpAddr>,
-    cache: DashMap<String, Cached>,
+    cache: RwLock<HashMap<String, Cached>>,
 }
 
 impl TunnelResolver {
@@ -76,7 +50,7 @@ impl TunnelResolver {
     pub fn new(servers: Vec<IpAddr>) -> Self {
         Self {
             servers,
-            cache: DashMap::new(),
+            cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -85,19 +59,13 @@ impl TunnelResolver {
         self.servers.is_empty()
     }
 
-    /// Готовый адрес из кэша, если он ещё не протух.
+    /// Адрес из кэша, если не протух.
     pub fn cached(&self, name: &str) -> Option<IpAddr> {
-        let entry = self.cache.get(name)?;
-        if entry.until <= Instant::now() {
-            return None;
-        }
-        entry.addresses.first().copied()
+        let entry = *self.cache.read().get(name)?;
+        (entry.until > Instant::now()).then_some(entry.address)
     }
 
     /// Спрашивает серверы имён по очереди, пока кто-нибудь не ответит.
-    ///
-    /// Канал берётся заново на каждый вызов: он же и есть та сессия, по
-    /// которой придёт ответ.
     pub async fn resolve(
         &self,
         name: &str,
@@ -107,11 +75,8 @@ impl TunnelResolver {
         if let Some(address) = self.cached(name) {
             return Ok(address);
         }
-        if self.servers.is_empty() {
-            return Err(no_servers(name));
-        }
 
-        let mut last: Option<ProtocolError> = None;
+        let mut last = None;
         for server in &self.servers {
             match self.ask(name, *server, channel, id).await {
                 Ok(address) => return Ok(address),
@@ -121,11 +86,10 @@ impl TunnelResolver {
                 }
             }
         }
-
         Err(last.unwrap_or_else(|| no_servers(name)))
     }
 
-    /// Один запрос к одному серверу.
+    /// Один запрос к одному серверу; чужие по номеру ответы пропускаются до срока.
     async fn ask(
         &self,
         name: &str,
@@ -135,28 +99,17 @@ impl TunnelResolver {
     ) -> Result<IpAddr, ProtocolError> {
         let query = message::build_query(name, RecordType::A, id)
             .map_err(|e| ProtocolError::InvalidConfig(format!("запрос DNS не собрался: {e}")))?;
-
         let target = SocketAddress::new(Address::Ip(server), DNS_PORT);
         channel.send_to(query.into(), &target).await?;
 
-        // Чужие датаграммы на этом канале взяться неоткуда — он свой на
-        // запрос, — но ответ не с тем номером означает, что кто-то отвечает
-        // не на наш вопрос. Ждём свой, пока не истечёт срок.
+        let silent =
+            || ProtocolError::Unreachable(format!("сервер имён {server} молчит про `{name}`"));
         let deadline = Instant::now() + QUERY_TIMEOUT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(ProtocolError::Unreachable(format!(
-                    "сервер имён {server} молчит про `{name}`"
-                )));
-            }
-
             let (payload, _) = tokio::time::timeout(left, channel.recv_from())
                 .await
-                .map_err(|_| {
-                    ProtocolError::Unreachable(format!("сервер имён {server} молчит про `{name}`"))
-                })??;
-
+                .map_err(|_| silent())??;
             if !answers_query(&payload, id) {
                 continue;
             }
@@ -164,7 +117,7 @@ impl TunnelResolver {
             let addresses = message::extract_addresses(&payload).map_err(|e| {
                 ProtocolError::Unreachable(format!("сервер имён не назвал адрес `{name}`: {e}"))
             })?;
-            let Some(first) = addresses.first().copied() else {
+            let Some(&address) = addresses.first() else {
                 return Err(ProtocolError::Unreachable(format!(
                     "у имени `{name}` нет адреса"
                 )));
@@ -173,32 +126,36 @@ impl TunnelResolver {
             let ttl = message::min_ttl(&payload)
                 .map_or(MIN_TTL, |ttl| Duration::from_secs(u64::from(ttl)))
                 .clamp(MIN_TTL, MAX_TTL);
-            self.cache.insert(
-                name.to_owned(),
-                Cached {
-                    addresses,
-                    until: Instant::now() + ttl,
-                },
-            );
-            return Ok(first);
+            self.remember(name, address, ttl);
+            return Ok(address);
         }
+    }
+
+    fn remember(&self, name: &str, address: IpAddr, ttl: Duration) {
+        let now = Instant::now();
+        let mut cache = self.cache.write();
+        if cache.len() >= MAX_CACHED {
+            cache.retain(|_, entry| entry.until > now);
+            if cache.len() >= MAX_CACHED {
+                cache.clear();
+            }
+        }
+        cache.insert(
+            name.to_owned(),
+            Cached {
+                address,
+                until: now + ttl,
+            },
+        );
     }
 }
 
-/// Тот ли это ответ, которого ждали.
-///
-/// Номер стоит в первых двух байтах и приходит обратно как есть. Совпадения
-/// мало для подлинности, но несовпадение — верный признак чужого ответа, и
-/// принять такой значило бы соединиться не туда.
+/// Несовпадение номера — признак чужого ответа: принять его значит соединиться не туда.
 fn answers_query(datagram: &[u8], id: u16) -> bool {
     datagram.len() >= 2 && u16::from_be_bytes([datagram[0], datagram[1]]) == id
 }
 
-/// Имён разрешать нечем.
-///
-/// Не `Unsupported`: тот несёт только постоянную строку, а имя в сообщении и
-/// есть самое полезное. `InvalidConfig` при этом не повторяется — и верно:
-/// сервера имён от повтора не появится.
+/// Не `Unsupported`: имя в тексте полезнее; `InvalidConfig` не повторяется.
 fn no_servers(name: &str) -> ProtocolError {
     ProtocolError::InvalidConfig(format!(
         "имя `{name}` разрешать нечем: тоннель не назвал ни одного сервера имён, \
@@ -255,7 +212,6 @@ mod tests {
                     payload,
                     SocketAddress::new(Address::Ip("10.0.0.53".parse().expect("адрес")), DNS_PORT),
                 )),
-                // Ответов больше нет: ведём себя как молчащая сеть.
                 None => std::future::pending().await,
             }
         }
@@ -283,8 +239,6 @@ mod tests {
             .expect("разрешилось");
 
         assert_eq!(address, "93.184.216.34".parse::<IpAddr>().expect("адрес"));
-        // Запрос ушёл серверу имён, который назвал тоннель, и на пятьдесят
-        // третий порт.
         let sent = channel.sent.lock().expect("замок");
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].port, DNS_PORT);
@@ -292,7 +246,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_answer_with_a_foreign_id_is_skipped_not_taken() {
-        // Принять чужой ответ значило бы соединиться не туда.
         let channel = Canned::new(vec![
             answer(999, "example.com", "10.10.10.10", 300),
             answer(7, "example.com", "93.184.216.34", 300),
@@ -306,7 +259,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_second_time_the_answer_comes_from_the_cache() {
-        // Иначе каждая картинка на странице стоила бы оборота по тоннелю.
         let resolver = resolver();
         let channel = Canned::new(vec![answer(7, "example.com", "93.184.216.34", 300)]);
         resolver
@@ -314,7 +266,7 @@ mod tests {
             .await
             .expect("разрешилось");
 
-        // Канал пуст: если бы резолвер спросил ещё раз, он бы завис.
+        // Канал пуст: повторный запрос завис бы.
         let address = resolver
             .resolve("example.com", &channel, 8)
             .await
@@ -325,7 +277,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_tunnel_without_name_servers_says_so_instead_of_asking_outside() {
-        // Спросить снаружи значило бы отдать имя мимо тоннеля.
         let resolver = TunnelResolver::new(Vec::new());
         assert!(resolver.is_empty());
 
@@ -366,8 +317,18 @@ mod tests {
 
     #[test]
     fn the_cache_does_not_hold_a_name_forever() {
-        // Адрес за именем меняется, а переподключение профиля кэш не чистит.
         assert!(MAX_TTL <= Duration::from_secs(3600));
         assert!(MIN_TTL > Duration::ZERO);
+    }
+
+    #[test]
+    fn the_cache_is_bounded() {
+        let resolver = resolver();
+        let address: IpAddr = "1.2.3.4".parse().expect("адрес");
+        for step in 0..(MAX_CACHED * 2) {
+            resolver.remember(&format!("host{step}.example"), address, MAX_TTL);
+        }
+        let len = resolver.cache.read().len();
+        assert!(len <= MAX_CACHED, "кэш вырос до {len}");
     }
 }

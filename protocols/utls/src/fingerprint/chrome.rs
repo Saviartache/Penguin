@@ -1,49 +1,15 @@
-//! Chrome 120 (ноябрь 2023, `HelloChrome_120` в uTLS, `u_parrots.go` на
-//! ревизии `23b1dac`).
+//! Chrome 120 (`HelloChrome_120`, uTLS `u_parrots.go`, ревизия `23b1dac`).
 //!
-//! # Почему именно 120, а не свежее
-//!
-//! С Chrome 124 набор кривых в `key_share` включает гибрид
-//! `X25519Kyber768Draft00`/`X25519MLKEM768` — постквантовый ключ поверх
-//! обычного. Чтобы отпечаток был не витриной, а рабочим байтом, `key_share`
-//! из этого крейта обязан нести настоящий ключ (см. `crate::key_exchange`):
-//! сервер, не узнавший клиента по `SessionID`, перешлёт `ClientHello`
-//! настоящему сайту, и тот попробует довершить рукопожатие тем ключом,
-//! который назван. Ни в этом крейте, ни в проекте нет ML-KEM — своя
-//! реализация была бы отдельной задачей, которую этот шаг фазы 19 явно не
-//! включает. 120 — последняя версия в списке uTLS без гибрида: отпечаток
-//! чуть более узнаваемый как «не самый свежий Chrome», но каждый байт в нём
-//! рабочий.
-//!
-//! # GREASE и перемешивание
-//!
-//! Chrome (как и весь BoringSSL) добавляет GREASE — см. `crate::grease` — и
-//! с версии 106 перемешивает расширения при каждом соединении
-//! (`ShuffleChromeTLSExtensions` в uTLS). Перемешиваются не все: оба
-//! псевдорасширения GREASE и `padding` держат свои позиции — первое перед
-//! SNI, второе перед самым концом, padding — правда в самом конце. Причина
-//! не в вежливости к серверу, а в самом алгоритме uTLS: перестановка
-//! Фишера-Йетса пропускает обмен всякий раз, когда одна из двух переставляемых
-//! позиций занята GREASE- или padding-расширением, поэтому такие позиции не
-//! трогает ни один обмен за весь проход, и это следует правильно
-//! воспроизвести, а не «примерно так же перемешать». Расширение
-//! `encrypted_client_hello` (тоже GREASE, но не через `UtlsGREASEExtension`)
-//! в число неприкасаемых не входит и перемешивается вместе с остальными —
-//! это тоже видно из типов, которые `skipShuf` в uTLS считает якорями.
-//!
-//! Сверка: JA3/JA4 в открытом виде для конкретно Chrome 120 не нашёлся —
-//! современные базы фиксируют версии начиная примерно с той, где сменился
-//! набор кривых, а старые обычно без указания точной подверсии. Список
-//! шифров, набор расширений и форма `padding` сверены только с исходником
-//! uTLS; независимого захвата трафика для сверки байт в байт нет.
-
-use rand::RngCore;
+//! 120 — последняя версия без постквантового гибрида: ML-KEM в проекте нет.
+//! Перемешиваются все расширения, кроме двух GREASE-якорей (и padding).
+//! Сверено только с исходником uTLS, не с захватом трафика.
 
 use crate::client_hello::ExtensionSlot;
 use crate::error::UtlsResult;
 use crate::extension::{ech_grease, fixed, generic, grease_placeholder, key_share, sni};
 use crate::grease::GreaseValues;
 use crate::key_exchange::{self, KeyExchange};
+use crate::rng::Rng;
 
 /// Шифры, точно в этом порядке. Первый — место GREASE.
 pub const CIPHER_SUITES: &[u16] = &[
@@ -65,8 +31,7 @@ pub const CIPHER_SUITES: &[u16] = &[
     0x0035, // TLS_RSA_WITH_AES_256_CBC_SHA
 ];
 
-/// Единственный метод сжатия — TLS 1.3 запрещает любой, кроме этого, но поле
-/// осталось от совместимости и должно быть заполнено.
+/// Метод сжатия: только `null`.
 pub const COMPRESSION_METHODS: &[u8] = &[0];
 
 const CURVE_X25519: u16 = 29;
@@ -74,17 +39,14 @@ const CURVE_P256: u16 = 23;
 const CURVE_P384: u16 = 24;
 const EXT_APPLICATION_SETTINGS: u16 = 17513;
 
-/// Длины полезной нагрузки GREASE ECH, которые предлагает `BoringGREASEECH()`
-/// — умолчание BoringSSL, которым пользуется Chrome.
+/// Длины нагрузки GREASE ECH по `BoringGREASEECH()`.
 const ECH_GREASE_PAYLOAD_LENS: &[u16] = &[128, 160, 192, 224];
 
-/// `BoringGREASEECH()` называет только один кандидат AEAD — в отличие от
-/// Firefox, у которого их два (`crate::fingerprint::firefox`).
 const ECH_GREASE_AEADS: &[u16] = &[ech_grease::AEAD_AES_128_GCM];
 
 /// Собирает расширения и запрашивает пару ключей `X25519` для `key_share`.
 pub(crate) fn build(
-    rng: &mut impl RngCore,
+    rng: &mut impl Rng,
     host: &str,
 ) -> UtlsResult<(Vec<ExtensionSlot>, Vec<KeyExchange>)> {
     let grease = GreaseValues::from_rng(rng);
@@ -159,10 +121,6 @@ pub(crate) fn build(
         )),
         anchored(grease_placeholder(grease.extension_last, &[0])),
     ];
-    // `padding` сюда не входит: он не участвует в перемешивании и добавляется
-    // последним уже при сборке всего `ClientHello` — там известна итоговая
-    // длина, от которой и зависит, нужен ли он вообще
-    // (`crate::fingerprint::Fingerprint::has_padding`).
 
     Ok((extensions, vec![x25519]))
 }
@@ -170,10 +128,11 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::testing::StepRng;
 
     #[test]
     fn the_first_cipher_and_the_first_and_last_extensions_are_grease() {
-        let mut rng = rand::rngs::mock::StepRng::new(1, 1);
+        let mut rng = StepRng::new(1, 1);
         let (extensions, keys) = build(&mut rng, "example.com").expect("собирается");
         assert!(crate::grease::is_grease(CIPHER_SUITES[0]));
         assert!(
@@ -189,7 +148,7 @@ mod tests {
 
     #[test]
     fn sixteen_extensions_in_the_middle_are_not_anchored() {
-        let mut rng = rand::rngs::mock::StepRng::new(1, 1);
+        let mut rng = StepRng::new(1, 1);
         let (extensions, _) = build(&mut rng, "example.com").expect("собирается");
         let free = extensions.iter().filter(|e| !e.anchored).count();
         assert_eq!(free, 16, "ECH GREASE тоже перемешивается — это не якорь");
@@ -199,7 +158,7 @@ mod tests {
     fn the_group_grease_value_matches_between_curves_and_key_share() {
         // Обе группы GREASE берутся из одной и той же роли (`grease.group`):
         // сервер видит одно и то же число дважды, как у настоящего Chrome.
-        let mut rng = rand::rngs::mock::StepRng::new(5, 7);
+        let mut rng = StepRng::new(5, 7);
         let (extensions, _) = build(&mut rng, "example.com").expect("собирается");
         let curves = extensions
             .iter()

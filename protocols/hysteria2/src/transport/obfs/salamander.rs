@@ -1,22 +1,9 @@
-//! Salamander: соль плюс BLAKE2b-256 и XOR.
-//!
-//! ```text
-//! ┌──────────┬──────────────────────────────┐
-//! │ соль 8 Б │ пакет QUIC ⊕ ключ            │
-//! └──────────┴──────────────────────────────┘
-//!   ключ = BLAKE2b-256(пароль ‖ соль)
-//! ```
-//!
-//! Соль новая на каждый пакет, поэтому один и тот же байт заголовка QUIC
-//! каждый раз шифруется в разное — иначе постоянный префикс выдавал бы и
-//! протокол, и сам факт обфускации.
-//!
-//! Это не шифрование и не претендует им быть: содержимое уже зашифровано
-//! самим QUIC. Задача слоя ровно одна — убрать узнаваемый вид с проводов.
+//! Salamander: `соль 8 Б ‖ пакет ⊕ ключ`, ключ = BLAKE2b-256(пароль ‖ соль).
+//! Соль новая на каждый пакет. Не шифрование: убирает узнаваемый вид QUIC.
 
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
-use rand::RngCore;
+use penguin_proto::random;
 
 use super::Obfuscator;
 
@@ -30,27 +17,34 @@ type Blake2b256 = Blake2b<U32>;
 
 /// Обфускатор Salamander.
 pub struct Salamander {
-    password: Vec<u8>,
+    // Состояние хэша уже с паролем: на пакет остаётся хэшировать только соль.
+    keyed: Blake2b256,
 }
 
 impl Salamander {
     /// Создаёт обфускатор с общим с сервером ключом.
     pub fn new(password: impl AsRef<[u8]>) -> Self {
         Self {
-            password: password.as_ref().to_vec(),
+            keyed: Blake2b256::new().chain_update(password),
         }
     }
 
     /// Ключ для конкретной соли.
     fn key(&self, salt: &[u8]) -> [u8; KEY_LEN] {
-        let mut hasher = Blake2b256::new();
-        hasher.update(&self.password);
-        hasher.update(salt);
-        hasher.finalize().into()
+        self.keyed.clone().chain_update(salt).finalize().into()
     }
 }
 
-// Пароль не должен утечь в журнал через отладочный вывод сокета.
+/// XOR с повторяющимся ключом на месте.
+fn xor_key(data: &mut [u8], key: &[u8; KEY_LEN]) {
+    for chunk in data.chunks_mut(KEY_LEN) {
+        for (byte, k) in chunk.iter_mut().zip(key) {
+            *byte ^= k;
+        }
+    }
+}
+
+// Пароль не попадает в журнал.
 impl std::fmt::Debug for Salamander {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Salamander")
@@ -71,29 +65,21 @@ impl Obfuscator for Salamander {
         }
 
         let (salt, body) = output[..total].split_at_mut(SALT_LEN);
-        rand::thread_rng().fill_bytes(salt);
-        let key = self.key(salt);
-
-        for (index, byte) in input.iter().enumerate() {
-            body[index] = byte ^ key[index % KEY_LEN];
-        }
+        random::fill(salt);
+        body.copy_from_slice(input);
+        xor_key(body, &self.key(salt));
         Some(total)
     }
 
     fn deobfuscate(&self, buf: &mut [u8]) -> Option<usize> {
         let len = buf.len().checked_sub(SALT_LEN).filter(|len| *len > 0)?;
 
-        // Соль копируется, потому что дальше буфер переписывается с начала —
-        // и она оказалась бы затёрта на первом же байте.
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&buf[..SALT_LEN]);
         let key = self.key(&salt);
 
-        // Сдвиг влево: читаем с `SALT_LEN`, пишем с нуля. Источник всегда
-        // впереди приёмника, поэтому перекрытие безопасно.
-        for index in 0..len {
-            buf[index] = buf[index + SALT_LEN] ^ key[index % KEY_LEN];
-        }
+        buf.copy_within(SALT_LEN.., 0);
+        xor_key(&mut buf[..len], &key);
         Some(len)
     }
 }
@@ -121,8 +107,6 @@ mod tests {
 
     #[test]
     fn same_packet_looks_different_every_time() {
-        // Постоянная соль сделала бы префикс QUIC узнаваемым — ровно то, от
-        // чего слой и защищает.
         let obfs = obfuscator();
         let packet = b"the same bytes each time";
         let mut first = vec![0u8; packet.len() + SALT_LEN];
@@ -143,14 +127,12 @@ mod tests {
         let len = receiver
             .deobfuscate(&mut wire[..written])
             .expect("длина известна");
-        // Мусор, но не паника: чужой пакет на открытом порту — обычное дело.
         assert_ne!(&wire[..len], packet);
     }
 
     #[test]
     fn rejects_short_input() {
         let obfs = obfuscator();
-        // Короче соли — разбирать нечего.
         let mut too_short = [0u8; SALT_LEN];
         assert_eq!(obfs.deobfuscate(&mut too_short), None);
         let mut empty: [u8; 0] = [];
@@ -166,9 +148,7 @@ mod tests {
 
     #[test]
     fn key_matches_reference_construction() {
-        // Ключ обязан считаться как BLAKE2b-256(пароль ‖ соль): сервер
-        // считает его именно так, и любое расхождение здесь означает, что
-        // соединение не поднимется вообще.
+        // Как у сервера: BLAKE2b-256(пароль ‖ соль).
         let obfs = obfuscator();
         let salt = [1u8, 2, 3, 4, 5, 6, 7, 8];
 
@@ -182,7 +162,6 @@ mod tests {
 
     #[test]
     fn xor_repeats_key_every_32_bytes() {
-        // Период XOR — длина ключа; на пакете длиннее 32 байт это заметно.
         let obfs = obfuscator();
         let packet = vec![0u8; 96];
         let mut wire = vec![0u8; packet.len() + SALT_LEN];

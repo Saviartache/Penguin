@@ -34,11 +34,10 @@ impl ProtocolFactory for ShadowsocksFactory {
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
-        // Проверка без сети: интерфейс должен показать ошибку в поле сразу,
-        // а не через минуту неудачного подключения.
         Self::parse(params)?.validate().map_err(Into::into)
     }
 
+    /// Пробного подключения нет: сервер молчит до адреса, неверный пароль виден на первом потоке.
     async fn build(
         &self,
         ctx: BuildContext,
@@ -46,12 +45,6 @@ impl ProtocolFactory for ShadowsocksFactory {
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = Self::parse(params)?;
         let outbound = ShadowsocksOutbound::new(ctx.id, config, ctx.dialer)?;
-
-        // Пробного подключения здесь нет, и это не пропуск. Проверять было бы
-        // нечего: сервер не отвечает на соединение ничем, пока ему не пришлют
-        // адрес назначения, а слать его в никуда ради проверки — значит
-        // открывать соединение, о котором никто не просил. Неверный пароль
-        // выясняется на первом же потоке и приходит как `AuthRejected`.
         Ok(Arc::new(outbound))
     }
 }
@@ -76,8 +69,6 @@ mod tests {
 
     #[test]
     fn rejects_a_missing_method() {
-        // Угадать метод нельзя: подставленный молча даёт соединение, которое
-        // открывается и ничего не передаёт.
         let params = json!({ "server": "example.com:8388", "password": "secret" });
         assert!(ShadowsocksFactory::new().validate(&params).is_err());
     }
@@ -90,7 +81,6 @@ mod tests {
 
     #[test]
     fn rejects_a_stream_cipher() {
-        // Он не заверяет данные: правку по дороге не заметит никто.
         let params = json!({
             "server": "example.com:8388",
             "method": "aes-256-cfb",
@@ -111,7 +101,6 @@ mod tests {
 
     #[test]
     fn protocol_name_is_stable() {
-        // Имя стоит в конфигурациях пользователей — менять его нельзя.
         assert_eq!(ShadowsocksFactory::new().protocol(), "shadowsocks");
     }
 }

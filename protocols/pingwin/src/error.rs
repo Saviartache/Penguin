@@ -1,13 +1,6 @@
-//! Ошибки протокола.
-//!
-//! Различие между вариантами не косметическое: по нему `supervisor` решает,
-//! повторять ли попытку (`AGENTS.md` §4.2). Главная граница — отвергнутое
-//! опознание против всего остального.
-//!
-//! Отвергнутое опознание у Pingwin выглядит не как отказ, а как обычный сайт:
-//! сервер, не узнавший клиента, отвечает статической страницей. Поэтому
-//! [`PingwinError::Rejected`] ставится по тому, что в ответе **нет** верного
-//! доказательства сервера, и повторять его бессмысленно.
+//! Ошибки протокола; по варианту `supervisor` решает, повторять ли (`AGENTS.md` §4.2).
+//! [`PingwinError::Rejected`] ставится, когда в ответе нет верного доказательства
+//! сервера (чужому он отвечает обычным сайтом).
 
 use penguin_proto::error::ProtocolError;
 use penguin_transport::h3::H3Error;
@@ -23,10 +16,7 @@ pub enum PingwinError {
     #[error("настройки pingwin: {0}")]
     Config(String),
 
-    /// Сервер не предъявил верного доказательства.
-    ///
-    /// Не тот пароль либо не тот ключ сервера. Различить их нельзя — и не
-    /// нужно: лечатся они одинаково, правкой профиля.
+    /// Сервер не предъявил верного доказательства (пароль или ключ - не различить).
     #[error("сервер не узнал клиента: не тот пароль или не тот ключ сервера")]
     Rejected,
 
@@ -51,9 +41,7 @@ pub enum PingwinError {
     #[error("датаграмма длиной {0} байт не помещается в QUIC")]
     Oversized(usize),
 
-    /// Ошибка общего транспорта: QUIC, TLS, HTTP/3, срок, запись адреса.
-    ///
-    /// Классификацию «повторять / не повторять» транспорт уже сделал.
+    /// Ошибка общего транспорта (повторяемость уже определена им).
     #[error(transparent)]
     Transport(#[from] penguin_transport::TransportError),
 
@@ -85,13 +73,11 @@ impl From<H3Error> for PingwinError {
     }
 }
 
-// Перевод в общий язык, на котором говорит остальной клиент.
 impl From<PingwinError> for ProtocolError {
     fn from(err: PingwinError) -> Self {
         match err {
             PingwinError::Config(message) => Self::InvalidConfig(message),
             PingwinError::Rejected => Self::AuthRejected,
-            // Не по протоколу — не тот сервер в профиле: повторять нечего.
             err @ (PingwinError::Malformed(_) | PingwinError::Oversized(_)) => {
                 Self::InvalidConfig(err.to_string())
             }
@@ -104,8 +90,7 @@ impl From<PingwinError> for ProtocolError {
 }
 
 impl From<PingwinError> for std::io::Error {
-    /// Ошибка внутри уже открытого потока: у `AsyncRead` язык один —
-    /// `io::Error`, и причина иначе потерялась бы по дороге к приложению.
+    /// Для `AsyncRead`: причина сохраняется текстом.
     fn from(err: PingwinError) -> Self {
         match err {
             PingwinError::Io(err) => err,

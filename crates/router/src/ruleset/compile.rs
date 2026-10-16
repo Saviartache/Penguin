@@ -1,14 +1,5 @@
-//! Сборка сопоставителей из конфигурации. Дорогая работа делается один раз, а
-//! не на каждое соединение.
-//!
-//! Здесь текст превращается в готовые структуры: регулярные выражения
-//! компилируются, подсети складываются в дерево, подстроки — в автомат
-//! Ахо — Корасик. На горячем пути остаётся только поиск.
-//!
-//! Второе назначение файла — проверка. Ошибка в правиле («не разбирается
-//! подсеть `10.0.0.0/99`») обязана прийти при сохранении настроек, а не при
-//! первом соединении: во втором случае пользователь узнает о ней из молча
-//! неработающего правила.
+//! Сборка сопоставителей из конфигурации: дорогая работа один раз, ошибки в
+//! правилах приходят при сохранении настроек, а не на первом соединении.
 
 use penguin_config::schema::rule::{Condition, Leaf, RuleAction, RuleConfig};
 use penguin_core::id::{OutboundId, RuleId};
@@ -41,9 +32,6 @@ pub fn compile_rule(config: &RuleConfig, ctx: &CompileContext) -> RouterResult<R
         RuleAction::Tunnel {
             profile: Some(profile),
         } => Decision::Tunnel(OutboundId::new(profile)),
-        // Без указания профиля — в активный. Какой он, знает движок:
-        // подставлять его здесь значило бы пересобирать правила при каждом
-        // переключении сервера.
         RuleAction::Tunnel { profile: None } => Decision::ActiveTunnel,
         RuleAction::Direct => Decision::Direct,
         RuleAction::Block => Decision::Block,
@@ -121,12 +109,7 @@ fn compile_leaf(leaf: &Leaf, ctx: &CompileContext) -> RouterResult<Box<dyn Match
         }
 
         Leaf::GeoIp(countries) => compile_geoip(countries, ctx)?,
-        Leaf::GeoSite(_) => {
-            // Наборы доменов по категориям — отдельная работа с собственным
-            // форматом базы. Молча пропускать такое правило нельзя: трафик
-            // ушёл бы не туда, а пользователь считал бы, что правило работает.
-            return Err(RouterError::Unsupported("geosite"));
-        }
+        Leaf::GeoSite(_) => return Err(RouterError::Unsupported("geosite")),
     };
     Ok(matcher)
 }
@@ -197,7 +180,6 @@ mod tests {
         }))
         .expect("собирается");
 
-        // Описание должно читаться человеком: его показывает экран проверки.
         let described = matcher.describe();
         assert!(described.contains(" и "));
         assert!(described.contains(" или "));
@@ -206,8 +188,6 @@ mod tests {
 
     #[test]
     fn reports_broken_regex_at_compile_time() {
-        // Ошибка обязана прийти при сохранении настроек, а не при первом
-        // соединении.
         let Err(err) = compile(json!({ "domain_regex": ["(unclosed"] })) else {
             panic!("сломанное выражение собралось");
         };
@@ -221,8 +201,6 @@ mod tests {
 
     #[test]
     fn refuses_unsupported_leaf_instead_of_ignoring_it() {
-        // Молча пропустить правило значило бы увести трафик не туда, оставив
-        // пользователя в уверенности, что правило работает.
         let Err(err) = compile(json!({ "geo_site": ["category-ads"] })) else {
             panic!("неподдержанное условие собралось");
         };
@@ -240,8 +218,6 @@ mod tests {
 
         let rule = compile_rule(&config, &CompileContext::default()).expect("собирается");
         assert_eq!(rule.action, Decision::ActiveTunnel);
-        // Имя по умолчанию — идентификатор: в списке правил пустая строка
-        // выглядела бы потерянной строкой.
         assert_eq!(rule.name, "r1");
     }
 

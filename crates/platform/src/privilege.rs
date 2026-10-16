@@ -1,9 +1,4 @@
-//! Проверка прав и понятное сообщение, если их нет.
-//!
-//! Самая частая причина «не работает» у VPN-клиента на Windows: TUN-адаптер,
-//! маршруты и брандмауэр требуют повышенных прав, а запущен клиент от
-//! обычного пользователя. Сказать об этом надо **до** попытки, а не после
-//! невнятной ошибки драйвера.
+//! Проверка прав: сказать «нужен администратор» до попытки, а не после ошибки драйвера.
 
 /// Что клиент может делать с текущими правами.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,12 +47,14 @@ pub fn is_elevated() -> bool {
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     let mut token = HANDLE::default();
+    // SAFETY: псевдодескриптор процесса и локальный `token`.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
         return false;
     }
 
     let mut elevation = TOKEN_ELEVATION::default();
     let mut returned = 0u32;
+    // SAFETY: буфер — `elevation` указанного размера.
     let ok = unsafe {
         GetTokenInformation(
             token,
@@ -69,8 +66,7 @@ pub fn is_elevated() -> bool {
     }
     .is_ok();
 
-    // Дескриптор закрывается в любом случае: проверка вызывается при каждом
-    // запуске тоннеля и при диагностике.
+    // SAFETY: `token` открыт выше и закрывается ровно раз.
     let _ = unsafe { CloseHandle(token) };
 
     ok && elevation.TokenIsElevated != 0
@@ -88,8 +84,6 @@ mod tests {
 
     #[test]
     fn check_does_not_panic() {
-        // Вызывается при каждом запуске и при диагностике; упасть здесь
-        // означало бы не запуститься вовсе.
         let _ = Privilege::current();
     }
 
@@ -114,8 +108,6 @@ mod tests {
 
     #[test]
     fn repeated_checks_agree() {
-        // Права в пределах процесса не меняются; расхождение означало бы
-        // утечку дескриптора или порчу памяти в самой проверке.
         let first = Privilege::current();
         for _ in 0..100 {
             assert_eq!(Privilege::current(), first);

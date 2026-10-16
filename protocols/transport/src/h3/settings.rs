@@ -32,9 +32,7 @@ pub struct Settings {
 
 /// Собирает содержимое своего кадра `SETTINGS`.
 ///
-/// `grease` — идентификатор зарезервированной настройки вида
-/// `0x1f * N + 0x21`: RFC 9114, §7.2.4.1 советует слать хотя бы одну, чтобы
-/// собеседники не разучились пропускать незнакомые.
+/// `grease` — зарезервированная настройка `0x1f * N + 0x21` (RFC 9114, §7.2.4.1).
 pub fn encode(max_field_section_size: u64, h3_datagram: bool, grease: (u64, u64)) -> Bytes {
     let mut out = Vec::new();
     varint::encode(MAX_FIELD_SECTION_SIZE, &mut out);

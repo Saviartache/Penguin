@@ -1,14 +1,5 @@
-//! Регистрация протокола `CONNECT-IP`: разбор конфигурации, согласование
-//! адреса, сборка направления.
-//!
-//! В отличие от `CONNECT-UDP`, [`PacketFactory::build`] не может отложить
-//! согласование до первого пакета — интерфейс с адресом, который обязана
-//! вернуть [`interface`], нужен раньше первого же вызова `send`/`recv`.
-//! Поэтому весь обмен — TLS или QUIC, запрос, `ADDRESS_REQUEST`/`ADDRESS_ASSIGN` —
-//! происходит прямо здесь, и `build` возвращает либо работающий тоннель,
-//! либо ошибку, объясняющую, на каком шаге он не поднялся.
-//!
-//! [`interface`]: penguin_proto::packet::PacketOutbound::interface
+//! Регистрация `CONNECT-IP`: `build` сразу согласует адрес, поскольку
+//! `PacketOutbound::interface` нужен до первого пакета.
 
 use std::sync::Arc;
 
@@ -26,7 +17,7 @@ use crate::config::MasqueConfig;
 pub struct MasqueIpFactory;
 
 impl MasqueIpFactory {
-    /// Заводит фабрику. Состояния у неё нет — она только разбирает параметры.
+    /// Заводит фабрику.
     pub fn new() -> Self {
         Self
     }
@@ -44,8 +35,6 @@ impl PacketFactory for MasqueIpFactory {
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
-        // Проверка без сети: интерфейс должен показать ошибку в поле сразу,
-        // а не через минуту неудачного согласования.
         self.parse(params)?.validate().map_err(Into::into)
     }
 
@@ -85,7 +74,6 @@ mod tests {
 
     #[test]
     fn the_protocol_name_is_stable() {
-        // Имя стоит в конфигурациях пользователей — менять его нельзя.
         assert_eq!(MasqueIpFactory.protocol(), "masque-ip");
     }
 }

@@ -1,51 +1,13 @@
-//! `VisionStream<S>` — конверт набивки и переключение в прямой режим
+//! `VisionStream<S>`: конверт набивки и переключение в прямой режим
 //! (`flow = "xtls-rprx-vision"`) поверх [`RealityStream`].
 //!
-//! # Как устроены оба направления
+//! Пока направление в конверте, каждая запись и каждый прочитанный блок несут один блок
+//! [`crate::vision::padding`]; содержимое досматривает [`VisionState::filter`]. Когда пишущая
+//! сторона видит цельные записи `application_data` внутреннего TLS и стоит `enable_xtls`, она
+//! шлёт `Direct`, и дальше обе стороны идут через `RealityStream::io_mut` без второго слоя.
 //!
-//! Пока направление внутри конверта (`is_padding`/`!done_padding`), каждый
-//! вызов [`AsyncWrite::poll_write`]/каждый разобранный блок
-//! [`AsyncRead::poll_read`] несёт один блок [`crate::vision::padding`]:
-//! необязательный UUID (только у первого блока направления), команду,
-//! длины и содержимое. Обе стороны досматривают содержимое блока
-//! [`VisionState::filter`] в поисках признаков TLS 1.3 внутри тоннеля.
-//!
-//! Как только сторона, которая ПИШЕТ, видит на своём направлении цельные
-//! записи `application_data` внутреннего TLS
-//! ([`is_complete_tls_records`](crate::vision::state::is_complete_tls_records))
-//! и в общем состоянии уже стоит `enable_xtls` (выставляется чтением
-//! `ServerHello` — обычно на встречном направлении), она посылает `Direct`
-//! вместо `End`: это последний блок в конверте, а начиная со следующего
-//! вызова обе стороны обязаны читать и писать эти байты в обход
-//! [`RecordKey::seal`](crate::reality::record::RecordKey::seal)/
-//! [`RecordKey::open`](crate::reality::record::RecordKey::open) — то есть
-//! без второго слоя шифрования, прямо через `RealityStream::io_mut`.
-//!
-//! До этого момента (и если оно вовсе не наступает — например, внутри
-//! тоннеля не TLS, а что-то другое) канал работает ровно как без Vision:
-//! только конверт набивки поверх обычного двойного шифрования.
-//!
-//! # Что сознательно не сделано
-//!
-//! - **Камуфляж заголовка VLESS** (`postRequest`, пустой блок набивки, если
-//!   первых данных приложения не набралось за 500 мс) — Xray-core вставляет
-//!   его, чтобы длина заголовка не была видна по первому пакету. Это
-//!   ортогонально работе самого Vision (сервер прекрасно принимает первый
-//!   настоящий блок в любой момент), и здесь не сделано.
-//! - **`-udp443` и разбор порта 443 у UDP.** Эта реализация поддерживает
-//!   ровно один `flow` — [`crate::frame::addons::FLOW_VISION`]; UDP у этого
-//!   клиента и так идёт отдельным потоком на каждый адрес
-//!   (`crate::datagram`), а не через мультиплексирование `v1.mux.cool`
-//!   эталона, так что понятие "порт 443 в одном потоке с остальным UDP" к
-//!   этой архитектуре не относится.
-//! - **Досмотр не продолжается после `End`.** Эталон (`proxy.go`,
-//!   `ReadMultiBuffer`) ещё несколько пакетов подряд разбирает конверт после
-//!   окончания набивки — ровно до исчерпания общего бюджета — на случай,
-//!   если `enable_xtls` появится чуть позже и *другое* направление успеет
-//!   послать `Direct`. Здесь направление, пославшее или получившее `End`,
-//!   перестаёт разбирать конверт сразу. В худшем случае это на пакет-другой
-//!   позже отключает второй слой шифрования — не теряет его: пока условие
-//!   не сработало, канал остаётся полностью зашифрованным, как и всегда.
+//! Не сделано: камуфляж заголовка (`postRequest`), `-udp443`, разбор конверта после `End`
+//! (худший случай: второй слой снимается на пакет-другой позже).
 
 use std::io;
 use std::pin::Pin;
@@ -59,76 +21,39 @@ use crate::reality::RealityStream;
 use crate::vision::padding::{self, Command};
 use crate::vision::state::{self, VisionState};
 
-/// Сколько байт вычитывать из [`RealityStream`] за раз, пока разбираем
-/// конверт: не меньше самой большой возможной прикладной записи TLS 1.3
-/// (`MAX_PLAINTEXT_RECORD`, `reality::application`) — иначе
-/// `RealityStream::poll_read` мог бы оставить недочитанный хвост записи в
-/// себе, а этот тип решил бы, что переключаться пора, пока сзади ещё лежат
-/// неразобранные расшифрованные байты.
+/// Чтение за раз при разборе конверта: не меньше записи TLS 1.3, иначе хвост записи останется в `RealityStream`.
 const SCRATCH: usize = 16 * 1024;
 
-/// Сколько сырых байт принимать за один вызов после переключения — просто
-/// разумный кусок, как и у остальных потоков этого крейта.
+/// Сколько сырых байт писать за вызов после переключения.
 const RAW_CHUNK: usize = 8 * 1024;
 
-/// Состояние записи: конверт набивки, потом (если сработало) — сырой канал.
+/// Состояние записи.
+#[derive(Default)]
 struct WriteState {
-    is_padding: bool,
+    /// Конверт закончен (`End` или `Direct`).
+    padding_done: bool,
     sent_uuid: bool,
     switched: bool,
     pending_switch: bool,
-    /// Уже собранный блок конверта (или сырые байты после переключения),
-    /// ещё не полностью ушедший в получатель.
+    /// Блок конверта, не ушедший целиком.
     pending: Vec<u8>,
     offset: usize,
-    /// Сколько байт исходного `buf` вызывающего представляет `pending` —
-    /// возвращается из `poll_write` только после того, как `pending` ушёл
-    /// целиком.
+    /// Сколько байт `buf` вызывающего представляет `pending`.
     accepted: usize,
-    raw_sink: bool,
 }
 
-impl Default for WriteState {
-    fn default() -> Self {
-        Self {
-            is_padding: true,
-            sent_uuid: false,
-            switched: false,
-            pending_switch: false,
-            pending: Vec::new(),
-            offset: 0,
-            accepted: 0,
-            raw_sink: false,
-        }
-    }
-}
-
-/// Состояние чтения: конверт набивки, потом — сырой канал.
+/// Состояние чтения.
+#[derive(Default)]
 struct ReadState {
     done_padding: bool,
     switched: bool,
     seen_first_block: bool,
-    /// Расшифрованные байты Reality, ещё не собранные в целый блок конверта.
+    /// Расшифрованные байты, не собранные в блок конверта.
     accumulate: BytesMut,
-    /// Содержимое уже разобранных блоков (или сырые байты после
-    /// переключения), ещё не отданное вызывающему.
+    /// Содержимое разобранных блоков, не отданное вызывающему.
     ready: BytesMut,
-    /// Байты, снятые с провода вместе с последней зашифрованной записью, в
-    /// момент переключения — см. [`RealityStream::take_undecrypted_read_bytes`].
+    /// Сырые байты, пришедшие с последней зашифрованной записью.
     raw_after_switch: BytesMut,
-}
-
-impl Default for ReadState {
-    fn default() -> Self {
-        Self {
-            done_padding: false,
-            switched: false,
-            seen_first_block: false,
-            accumulate: BytesMut::new(),
-            ready: BytesMut::new(),
-            raw_after_switch: BytesMut::new(),
-        }
-    }
 }
 
 /// Поток VLESS-с-Vision поверх [`RealityStream`].
@@ -150,9 +75,7 @@ impl<S> std::fmt::Debug for VisionStream<S> {
 }
 
 impl<S> VisionStream<S> {
-    /// Оборачивает поток Reality, доведённый до прикладных ключей.
-    /// `uuid` — UUID аккаунта: он же открывает первый блок конверта в обе
-    /// стороны (`TrafficState.UserUUID`, `proxy.go`).
+    /// Оборачивает поток Reality; `uuid` открывает первый блок конверта в обе стороны.
     pub(crate) fn new(reality: RealityStream<S>, uuid: [u8; 16]) -> Self {
         Self {
             reality,
@@ -201,15 +124,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VisionStream<S> {
             ) {
                 Ok(Some(block)) => {
                     this.read.seen_first_block = true;
-                    let content = this.read.accumulate
-                        [block.content_start..block.content_start + block.content_len]
-                        .to_vec();
-                    this.read.accumulate.advance(block.total_len);
-
+                    let content = &this.read.accumulate
+                        [block.content_start..block.content_start + block.content_len];
                     if this.state.packets_to_filter > 0 {
-                        this.state.filter(&content);
+                        this.state.filter(content);
                     }
-                    this.read.ready.extend_from_slice(&content);
+                    this.read.ready.extend_from_slice(content);
+                    this.read.accumulate.advance(block.total_len);
 
                     match block.command {
                         Command::Continue => {}
@@ -217,8 +138,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VisionStream<S> {
                         Command::Direct => {
                             this.read.done_padding = true;
                             this.read.switched = true;
-                            let leftover = this.reality.take_undecrypted_read_bytes();
-                            this.read.raw_after_switch.extend_from_slice(&leftover);
+                            this.read.raw_after_switch = this.reality.take_undecrypted_read_bytes();
                         }
                     }
                     continue;
@@ -237,7 +157,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for VisionStream<S> {
             match result {
                 Poll::Ready(Ok(())) if filled == 0 => {
                     if this.read.accumulate.is_empty() {
-                        // Конец потока между блоками — обычное дело.
                         return Poll::Ready(Ok(()));
                     }
                     return Poll::Ready(Err(as_io(VlessError::Disconnected(
@@ -263,12 +182,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VisionStream<S> {
         loop {
             if !this.write.pending.is_empty() {
                 let unsent = &this.write.pending[this.write.offset..];
-                let sink_result = if this.write.raw_sink {
-                    Pin::new(this.reality.io_mut()).poll_write(cx, unsent)
-                } else {
-                    Pin::new(&mut this.reality).poll_write(cx, unsent)
-                };
-                match sink_result {
+                match Pin::new(&mut this.reality).poll_write(cx, unsent) {
                     Poll::Ready(Ok(0)) => {
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::WriteZero,
@@ -299,10 +213,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VisionStream<S> {
 
             if this.write.switched {
                 let take = buf.len().min(RAW_CHUNK);
-                this.write.pending = buf[..take].to_vec();
-                this.write.accepted = take;
-                this.write.raw_sink = true;
-                continue;
+                return Pin::new(this.reality.io_mut()).poll_write(cx, &buf[..take]);
+            }
+            if this.write.padding_done && this.state.packets_to_filter == 0 {
+                return Pin::new(&mut this.reality).poll_write(cx, buf);
             }
 
             let take = buf.len().min(padding::MAX_CONTENT);
@@ -310,54 +224,42 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for VisionStream<S> {
             if this.state.packets_to_filter > 0 {
                 this.state.filter(content);
             }
-
-            if this.write.is_padding {
-                let looks_like_inner_application_data = this.state.is_tls
-                    && content.len() >= 6
-                    && content.starts_with(&state::TLS_APPLICATION_DATA_START)
-                    && state::is_complete_tls_records(content);
-
-                let (command, will_switch) = if looks_like_inner_application_data {
-                    if this.state.enable_xtls {
-                        (Command::Direct, true)
-                    } else {
-                        (Command::End, false)
-                    }
-                } else if !this.state.is_tls12_or_above && this.state.packets_to_filter <= 1 {
-                    (Command::End, false)
-                } else {
-                    (Command::Continue, false)
-                };
-
-                let long_padding = this.state.is_tls;
-                let uuid = if this.write.sent_uuid {
-                    None
-                } else {
-                    Some(&this.uuid)
-                };
-                let block = padding::pad(
-                    uuid,
-                    command,
-                    content,
-                    long_padding,
-                    padding::DEFAULT_TESTSEED,
-                    padding::random_below,
-                );
-                this.write.sent_uuid = true;
-                this.write.pending = block;
-                this.write.raw_sink = false;
-                if command != Command::Continue {
-                    this.write.is_padding = false;
-                }
-                if will_switch {
-                    this.write.pending_switch = true;
-                }
-            } else {
-                this.write.pending = content.to_vec();
-                this.write.raw_sink = false;
+            if this.write.padding_done {
+                this.write.pending.extend_from_slice(content);
+                this.write.accepted = take;
+                continue;
             }
+
+            let looks_like_inner_application_data = this.state.is_tls
+                && content.len() >= 6
+                && content.starts_with(&state::TLS_APPLICATION_DATA_START)
+                && state::is_complete_tls_records(content);
+
+            let command = if looks_like_inner_application_data {
+                if this.state.enable_xtls {
+                    Command::Direct
+                } else {
+                    Command::End
+                }
+            } else if !this.state.is_tls12_or_above && this.state.packets_to_filter <= 1 {
+                Command::End
+            } else {
+                Command::Continue
+            };
+
+            let uuid = (!this.write.sent_uuid).then_some(&this.uuid);
+            this.write.pending = padding::pad(
+                uuid,
+                command,
+                content,
+                this.state.is_tls,
+                padding::DEFAULT_TESTSEED,
+                padding::random_below,
+            );
+            this.write.sent_uuid = true;
+            this.write.padding_done = command != Command::Continue;
+            this.write.pending_switch = command == Command::Direct;
             this.write.accepted = take;
-            continue;
         }
     }
 
@@ -402,9 +304,7 @@ mod tests {
         )
     }
 
-    /// Снимает с `peer` ровно одну сброшенную Reality-запись (5-байтный
-    /// заголовок плюс тело заявленной длины) — то, что реальный сервер читал
-    /// бы с сокета, прежде чем расшифровать.
+    /// Одна Reality-запись целиком (заголовок и тело).
     async fn read_one_record(peer: &mut tokio::io::DuplexStream) -> Vec<u8> {
         let mut header = [0u8; 5];
         peer.read_exact(&mut header)
@@ -430,9 +330,6 @@ mod tests {
         client.write_all(b"hello vision").await.expect("пишется");
         client.flush().await.expect("сбрасывается");
 
-        // На проводе всё ещё обычная Reality-запись: снаружи — заголовок
-        // `application_data` внешнего TLS, а конверт Vision — только внутри
-        // расшифрованного содержимого.
         let record = read_one_record(&mut server_io).await;
         assert_eq!(record[0], CONTENT_TYPE_APPLICATION_DATA);
 
@@ -455,9 +352,6 @@ mod tests {
 
     #[tokio::test]
     async fn writes_stay_sealed_while_the_switch_condition_has_not_fired() {
-        // До срабатывания условия переключения канал обязан работать ровно
-        // как без Vision — то есть каждая запись на проводе по-прежнему
-        // Reality-запись, а не сырые байты.
         let (client_write, _server_read) = key_pair(3);
         let (_server_write, client_read) = key_pair(4);
         let (client_io, mut server_io) = duplex(8192);
@@ -485,10 +379,7 @@ mod tests {
         let reality = RealityStream::new(client_io, client_read, client_write);
         let mut client = VisionStream::new(reality, UUID);
 
-        // Шаг 1: клиент читает с "сервера" один блок конверта, чей груз —
-        // ServerHello внутреннего TLS 1.3 с шифром, который эталон
-        // принимает. Это выставляет `enable_xtls`, ровно как в жизни его
-        // выставляет встречное направление.
+        // Шаг 1: ServerHello внутреннего TLS 1.3 выставляет `enable_xtls`.
         let hello_content = server_hello_tls13([0x13, 0x01]); // TLS_AES_128_GCM_SHA256
         let block = padding::pad(
             Some(&UUID),
@@ -507,17 +398,13 @@ mod tests {
         client.read_exact(&mut got).await.expect("читается");
         assert_eq!(got, hello_content);
 
-        // Шаг 2: клиент пишет содержимое, похожее на цельные записи
-        // application_data внутреннего TLS, — единственное условие,
-        // недостающее для переключения (`enable_xtls` уже стоит).
+        // Шаг 2: цельные записи application_data внутреннего TLS.
         let mut inner_record = vec![0x17, 0x03, 0x03, 0x00, 0x05];
         inner_record.extend_from_slice(b"aaaaa");
         client.write_all(&inner_record).await.expect("пишется");
         client.flush().await.expect("сбрасывается");
 
-        // Этот блок ушёл ещё через Reality: содержит команду Direct внутри
-        // сегодняшнего шифрования, канал переключится только со следующей
-        // записи.
+        // Блок с `Direct` ещё идёт через Reality.
         let record = read_one_record(&mut server_io).await;
         assert_eq!(record[0], CONTENT_TYPE_APPLICATION_DATA);
         let mut server_reader = server_read;
@@ -527,9 +414,6 @@ mod tests {
                 &mut record[5..].to_vec(),
             )
             .expect("расшифровывается");
-        // Это первая запись, которую клиент вообще пишет на этом
-        // соединении, — конверт открывается с UUID, как и у любого первого
-        // блока направления.
         let parsed = padding::parse_block(&plaintext, true, &UUID)
             .expect("разбирается")
             .expect("данных хватает");
@@ -539,8 +423,7 @@ mod tests {
             inner_record.as_slice()
         );
 
-        // Шаг 3: следующая запись — уже сырые байты, без внешнего
-        // шифрования вовсе. Вот он, снятый второй слой.
+        // Шаг 3: сырые байты без внешнего шифрования.
         client
             .write_all(b"raw-after-switch")
             .await
@@ -585,9 +468,7 @@ mod tests {
             .seal(CONTENT_TYPE_APPLICATION_DATA, &plaintext)
             .expect("шифруется");
 
-        // Сырые байты, пришедшие сразу вслед за последней зашифрованной
-        // записью, в одном пакете, — ровно тот случай, ради которого
-        // `RealityStream::take_undecrypted_read_bytes` вообще существует.
+        // Сырые байты в одном пакете с последней зашифрованной записью.
         let mut wire = sealed;
         wire.extend_from_slice(b"raw-tail");
         server_io.write_all(&wire).await.expect("пишется");

@@ -1,9 +1,7 @@
 //! Соединение с сервером по HTTP/3: QUIC через `Dialer` и HTTP/3 (`PROTOCOL.md`, §3.2).
 //!
-//! Срок простоя QUIC спецификация считает как
-//! `2 × (connection_timeout + health_check_timeout)`, но `connection_timeout`
-//! не определяет. Здесь вместо него — проба живости общего соединения QUIC
-//! и проверка `_check` каждые несколько секунд: соединение не простаивает.
+//! Срок простоя QUIC по спецификации (`connection_timeout` не определён)
+//! заменён пробой живости QUIC и `_check`.
 
 use penguin_core::address::Address;
 use penguin_proto::dialer::Dialer;

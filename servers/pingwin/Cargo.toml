@@ -16,32 +16,27 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-# Формат провода — из крейта протокола, а не второй раз. Всё, что добавляет
-# сервер, — сокеты и правила: их в `protocols/*` быть не может.
+# Формат провода — из протокола; сервер добавляет только сокеты и правила.
 penguin-pingwin.workspace = true
 penguin-core.workspace = true
 
-# Сервер HTTP/3. У клиента HTTP/3 свой (`penguin_transport::h3`), а сервер
-# ему не нужен; здесь — независимая проверенная реализация.
+# Сервер HTTP/3 (у клиента свой).
 h3.workspace = true
 h3-quinn.workspace = true
 http.workspace = true
 quinn = { workspace = true, features = ["rustls-ring", "runtime-tokio"] }
 rustls = { workspace = true, features = ["ring", "std"] }
-rustls-pemfile.workspace = true
 
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal", "fs"] }
 bytes.workspace = true
 serde.workspace = true
 toml.workspace = true
-clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-# Проверка от края до края поднимает и клиента: ему нужен `Dialer`, а
-# чужому без опознания — обычный клиент HTTP/3.
+# Сквозной тест поднимает и клиента.
 penguin-proto.workspace = true
 penguin-transport = { workspace = true, features = ["quic"] }
 async-trait.workspace = true

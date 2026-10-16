@@ -1,15 +1,4 @@
-//! Обычный DNS поверх UDP.
-//!
-//! Виден провайдеру целиком: и имя, и ответ идут открытым текстом. Тем не
-//! менее это **обязательный** способ, и вот почему.
-//!
-//! Загрузочное разрешение имени сервера происходит до того, как тоннель
-//! поднят, — шифровать его нечем и негде. А основное разрешение в режиме
-//! `resolve` идёт уже **через тоннель**, и там открытый UDP ничего не
-//! раскрывает: наружу он выходит с той стороны.
-//!
-//! Прятать от провайдера имя самого VPN-сервера имеет смысл, и для этого есть
-//! [`super::dot`].
+//! DNS поверх UDP: открытый текст, но безопасный внутри тоннеля; мимо тоннеля есть [`super::dot`].
 
 use std::net::SocketAddr;
 
@@ -20,10 +9,7 @@ use super::Upstream;
 use crate::config::UPSTREAM_TIMEOUT;
 use crate::error::{DnsError, DnsResult};
 
-/// Наибольший ответ, который принимается по UDP.
-///
-/// 512 байт — предел из RFC 1035, но с EDNS0 ответы бывают крупнее. Четыре
-/// килобайта покрывают всё, что реально приходит.
+/// Наибольший ответ по UDP: сверх 512 байт RFC 1035 с запасом на EDNS0.
 const MAX_RESPONSE: usize = 4096;
 
 /// DNS поверх UDP.
@@ -38,9 +24,7 @@ impl UdpUpstream {
         Self { server }
     }
 
-    /// Разбирает адрес из настроек.
-    ///
-    /// Порт можно не писать: у DNS он всегда 53.
+    /// Разбирает адрес из настроек; порт по умолчанию 53.
     pub fn parse(address: &str) -> DnsResult<Self> {
         let address = address.trim();
         let with_port = if address.contains(':') {
@@ -68,27 +52,23 @@ impl Upstream for UdpUpstream {
     }
 
     async fn query(&self, request: &[u8]) -> DnsResult<Vec<u8>> {
-        // Сокет на каждый запрос: порт при этом каждый раз новый, и подделать
-        // ответ становится заметно труднее — угадывать надо и порт, и
-        // идентификатор.
-        let local: SocketAddr = if self.server.is_ipv4() {
-            "0.0.0.0:0".parse()
+        // Сокет на запрос: новый порт затрудняет подделку ответа.
+        let local = if self.server.is_ipv4() {
+            SocketAddr::from(([0, 0, 0, 0], 0))
         } else {
-            "[::]:0".parse()
-        }
-        .map_err(|_| DnsError::Config("не разбирается локальный адрес".to_owned()))?;
+            SocketAddr::from(([0u16; 8], 0))
+        };
 
         let socket = UdpSocket::bind(local).await?;
         socket.connect(self.server).await?;
         socket.send(request).await?;
 
-        let mut buffer = vec![0u8; MAX_RESPONSE];
+        let mut buffer = [0u8; MAX_RESPONSE];
         let len = tokio::time::timeout(UPSTREAM_TIMEOUT, socket.recv(&mut buffer))
             .await
             .map_err(|_| DnsError::Upstream(format!("{} не ответил", self.server)))??;
 
-        buffer.truncate(len);
-        Ok(buffer)
+        Ok(buffer[..len].to_vec())
     }
 }
 
@@ -98,8 +78,6 @@ mod tests {
 
     #[test]
     fn adds_the_default_port() {
-        // Пользователь пишет `1.1.1.1`, и заставлять его дописывать `:53`
-        // незачем.
         let upstream = UdpUpstream::parse("1.1.1.1").expect("разбирается");
         assert_eq!(upstream.server().port(), 53);
     }
@@ -124,16 +102,13 @@ mod tests {
 
     #[test]
     fn describes_itself() {
-        // Описание попадает в журнал и в диагностику: по нему видно, куда
-        // именно ушёл запрос.
         let upstream = UdpUpstream::parse("8.8.8.8").expect("разбирается");
         assert_eq!(upstream.describe(), "udp://8.8.8.8:53");
     }
 
     #[tokio::test]
     async fn silent_server_times_out_instead_of_hanging() {
-        // Адрес из отведённой под документацию подсети (RFC 5737): туда
-        // ничего не идёт и оттуда ничего не приходит.
+        // Подсеть документации (RFC 5737): ответа не будет.
         let upstream = UdpUpstream::parse("192.0.2.1").expect("разбирается");
         let started = std::time::Instant::now();
 

@@ -1,13 +1,10 @@
-//! Bounded readiness checks for synchronous service-management commands.
+//! Ограниченное по времени ожидание готовности службы.
 
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-/// Waits up to 15 seconds for a real IPC greeting, not just a running process.
-///
-/// Service-management callers run elevated; Unix IPC therefore probes the
-/// system endpoint rather than a user's foreground daemon.
+/// Ждёт до 15 с ответа по IPC (на Unix — системной конечной точки).
 pub fn wait_until_ready() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

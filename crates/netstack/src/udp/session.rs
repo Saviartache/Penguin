@@ -1,15 +1,4 @@
-//! Сессия по пятёрке с временем жизни: у UDP нет закрытия.
-//!
-//! UDP через smoltcp намеренно не идёт. Состояния у него нет, а заводить в
-//! стеке сокет на каждую пару «источник — назначение» пришлось бы сотнями:
-//! один сокет приложения шлёт куда угодно. Дешевле и честнее разобрать
-//! заголовок самим и собрать ответный пакет тоже самим — благо в UDP собирать
-//! почти нечего.
-//!
-//! ```text
-//!   пакет из TUN ──► разбор ──► сессия по пятёрке ──► наружу
-//!   ответ снаружи ──► сборка пакета ──► в TUN
-//! ```
+//! Сессия UDP по паре адресов с временем жизни (закрытия у UDP нет) и сборка датаграмм.
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -21,10 +10,7 @@ use crate::ip::checksum;
 /// Сколько сессия живёт без единой датаграммы.
 pub const SESSION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Ключ сессии: кто и куда.
-///
-/// Именно пара, а не только источник: правила маршрутизации зависят от
-/// назначения, и складывать разные назначения в одну сессию нельзя.
+/// Ключ сессии: пара, а не только источник (маршрут зависит от назначения).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionKey {
     /// Адрес приложения.
@@ -62,17 +48,11 @@ impl Session {
     }
 }
 
-/// Собирает IP-пакет с датаграммой от `from` к `to`.
-///
-/// Обе стороны собирают пакеты им: входящая — ответ приложению,
-/// исходящая — запрос наружу. Порядок аргументов здесь единственное, что
-/// их различает, — перепутать его значит отправить ответ самому себе.
+/// Собирает IP-пакет с датаграммой от `from` к `to`; `None` для разных семейств адресов.
 pub fn build_datagram(from: SocketAddr, to: SocketAddr, payload: &[u8]) -> Option<BytesMut> {
     match (from, to) {
         (SocketAddr::V4(from), SocketAddr::V4(to)) => Some(build_v4(from, to, payload)),
         (SocketAddr::V6(from), SocketAddr::V6(to)) => Some(build_v6(from, to, payload)),
-        // Разные семейства в одном пакете невыразимы; такое означает ошибку
-        // выше по стеку.
         _ => None,
     }
 }
@@ -132,8 +112,6 @@ fn build_v6(from: std::net::SocketAddrV6, to: std::net::SocketAddrV6, payload: &
     packet.put_u16(0);
     packet.put_slice(payload);
 
-    // В IPv6 сумма обязательна: своей суммы у заголовка нет, и без неё
-    // повреждение не обнаружится вовсе.
     let udp_checksum = checksum::udp_v6(*from.ip(), *to.ip(), &packet[udp_start..]);
     packet[udp_start + 6..udp_start + 8].copy_from_slice(&udp_checksum.to_be_bytes());
 
@@ -152,8 +130,6 @@ mod tests {
 
     #[test]
     fn built_packet_parses_back() {
-        // Собранный нами пакет обязан разбираться нашим же разбором:
-        // расхождение здесь означало бы, что система его молча выбросит.
         let packet = build_datagram(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"answer")
             .expect("собирается");
 
@@ -167,8 +143,6 @@ mod tests {
     fn ipv4_header_checksum_is_valid() {
         let packet =
             build_datagram(addr("8.8.8.8:53"), addr("10.0.0.2:50000"), b"x").expect("собирается");
-        // Сумма по заголовку вместе с её собственным полем сворачивается в
-        // ноль — так её и проверяет система.
         assert_eq!(checksum::finish(checksum::sum(&packet[..20])), 0);
     }
 
@@ -197,7 +171,6 @@ mod tests {
 
     #[test]
     fn mixed_families_are_refused() {
-        // Пакет, у которого отправитель IPv4, а получатель IPv6, невыразим.
         assert!(build_datagram(addr("8.8.8.8:53"), addr("[fd00::2]:50000"), b"x").is_none());
     }
 
@@ -226,8 +199,6 @@ mod tests {
 
     #[test]
     fn destination_is_part_of_the_key() {
-        // Один сокет приложения шлёт куда угодно, и решения по разным
-        // назначениям разные.
         let source = addr("10.0.0.2:50000");
         let first = SessionKey {
             source,

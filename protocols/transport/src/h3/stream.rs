@@ -1,15 +1,10 @@
-//! Поток запроса: заголовки ответа и тело как обычный поток байт.
-//!
-//! Снаружи тело — `AsyncRead`/`AsyncWrite`: кадры `DATA` снимаются при
-//! чтении и надеваются при записи. Этого хватает и туннелю `CONNECT`, и
-//! капсулам поверх него.
+//! Поток запроса: заголовки ответа и тело как `AsyncRead`/`AsyncWrite` (кадры `DATA` снимаются и надеваются).
 
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-use bytes::{Buf, Bytes};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::code::{H3_FRAME_UNEXPECTED, H3_ID_ERROR, H3_MESSAGE_ERROR, H3_REQUEST_CANCELLED};
@@ -20,7 +15,7 @@ use super::message::Response;
 use super::qpack::field;
 use super::reader::FrameReader;
 
-/// Самый большой кадр `DATA`, который собирает запись.
+/// Наибольшее тело кадра `DATA` при записи через `AsyncWrite`.
 const MAX_DATA_FRAME: usize = 16 * 1024;
 
 /// Поток запроса целиком.
@@ -40,8 +35,9 @@ impl RequestStream {
         Self {
             send: SendStream {
                 send,
-                pending: Bytes::new(),
-                pending_len: 0,
+                frame: Vec::new(),
+                sent: 0,
+                body_len: 0,
             },
             recv: RecvStream {
                 reader: FrameReader::new(recv),
@@ -106,10 +102,11 @@ impl AsyncWrite for RequestStream {
 #[derive(Debug)]
 pub struct SendStream {
     send: quinn::SendStream,
-    /// Собранный кадр, ещё не ушедший в QUIC целиком.
-    pending: Bytes,
-    /// Сколько байт тела в этом кадре.
-    pending_len: usize,
+    /// Буфер кадра, переиспользуется; `frame[sent..]` ещё не ушло в QUIC.
+    frame: Vec<u8>,
+    sent: usize,
+    /// Длина тела в буфере кадра.
+    body_len: usize,
 }
 
 impl SendStream {
@@ -120,10 +117,9 @@ impl SendStream {
 
     /// Отправляет кусок тела одним кадром `DATA`.
     pub async fn send_data(&mut self, data: &[u8]) -> H3Result<()> {
-        // Недописанный кадр от `AsyncWrite` — раньше: кадры не перемешиваются.
         poll_fn(|cx| self.poll_drain(cx)).await?;
-        let frame = frame::encode(frame::DATA, data);
-        self.send.write_all(&frame).await.map_err(write_error)
+        self.fill(data);
+        poll_fn(|cx| self.poll_drain(cx)).await
     }
 
     /// Закрывает отправку штатно.
@@ -131,12 +127,21 @@ impl SendStream {
         self.send.finish().map_err(H3Error::closed)
     }
 
+    /// Собирает кадр `DATA` в переиспользуемом буфере (прошлый кадр дописан).
+    fn fill(&mut self, data: &[u8]) {
+        self.frame.clear();
+        self.sent = 0;
+        frame::encode_header(frame::DATA, data.len() as u64, &mut self.frame);
+        self.frame.extend_from_slice(data);
+        self.body_len = data.len();
+    }
+
     /// Дописывает в QUIC остаток собранного кадра.
     fn poll_drain(&mut self, cx: &mut Context<'_>) -> Poll<H3Result<()>> {
-        while !self.pending.is_empty() {
-            let written = ready!(Pin::new(&mut self.send).poll_write(cx, &self.pending))
+        while self.sent < self.frame.len() {
+            let written = ready!(Pin::new(&mut self.send).poll_write(cx, &self.frame[self.sent..]))
                 .map_err(write_error)?;
-            self.pending.advance(written);
+            self.sent += written;
         }
         Poll::Ready(Ok(()))
     }
@@ -149,19 +154,15 @@ impl AsyncWrite for SendStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.pending.is_empty() {
+        if this.sent == this.frame.len() {
             if buf.is_empty() {
                 return Poll::Ready(Ok(0));
             }
-            let chunk = &buf[..buf.len().min(MAX_DATA_FRAME)];
-            this.pending = frame::encode(frame::DATA, chunk);
-            this.pending_len = chunk.len();
+            this.fill(&buf[..buf.len().min(MAX_DATA_FRAME)]);
         }
-        // Запись сделана, когда кадр ушёл в QUIC целиком: иначе он ждал бы
-        // `flush`, которого пишущий без него не позовёт. Повтор после
-        // `Pending` приходит с теми же байтами — как и у `quinn`.
+        // Повтор после `Pending` приходит с теми же байтами
         ready!(this.poll_drain(cx))?;
-        Poll::Ready(Ok(this.pending_len))
+        Poll::Ready(Ok(this.body_len))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -171,7 +172,6 @@ impl AsyncWrite for SendStream {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         ready!(this.poll_drain(cx))?;
-        // Повторный `shutdown` после закрытия — не ошибка.
         let _ = this.send.finish();
         Poll::Ready(Ok(()))
     }
@@ -181,13 +181,12 @@ impl AsyncWrite for SendStream {
 #[derive(Debug)]
 pub struct RecvStream {
     reader: FrameReader,
-    /// Нужен, чтобы закрыть соединение, если собеседник нарушил протокол.
+    /// Для закрытия соединения при нарушении протокола.
     quic: quinn::Connection,
     /// Предел блока полей ответа.
     limit: usize,
-    /// Читается содержимое кадра `DATA`, а не пропускается чужой кадр.
+    /// Читается тело кадра `DATA`, а не пропускается чужой кадр.
     in_data: bool,
-    /// Поток дочитан до конца.
     done: bool,
 }
 
@@ -231,13 +230,11 @@ impl RecvStream {
         }
     }
 
-    /// Разбирается с ошибкой по её роду: нарушение протокола закрывает
-    /// соединение, неверное сообщение — только поток.
+    /// Нарушение протокола закрывает соединение, неверное сообщение — только поток.
     fn fail(&mut self, err: &H3Error) {
         match err {
             H3Error::Protocol { code, reason } => close_with(&self.quic, *code, reason),
             H3Error::Message(_) => {
-                // Поток мог уже закрыться сам — тогда и останавливать нечего.
                 let _ = self.reader.stream().stop(var_int(H3_MESSAGE_ERROR));
             }
             _ => {}
@@ -252,7 +249,6 @@ impl RecvStream {
                     ready!(self.reader.poll_payload(cx, buf))?;
                     return Poll::Ready(Ok(true));
                 }
-                // Чужой кадр: в стороннюю память и дальше.
                 let mut scratch = [0u8; 1024];
                 let mut skip = ReadBuf::new(&mut scratch);
                 ready!(self.reader.poll_payload(cx, &mut skip))?;
@@ -262,7 +258,6 @@ impl RecvStream {
                 return Poll::Ready(Ok(false));
             };
             self.in_data = kind == frame::DATA;
-            // `HEADERS` после тела — завершающие поля; туннелю они ни к чему.
             if kind != frame::DATA && kind != frame::HEADERS {
                 check_request_frame(kind)?;
             }
@@ -297,9 +292,6 @@ impl AsyncRead for RecvStream {
 impl Drop for RecvStream {
     fn drop(&mut self) {
         if !self.done {
-            // Код HTTP/3 вместо нулевого кода QUIC, которым поток
-            // остановился бы сам. Поток мог закрыться раньше — тогда
-            // останавливать нечего.
             let _ = self.reader.stream().stop(var_int(H3_REQUEST_CANCELLED));
         }
     }
@@ -318,7 +310,6 @@ fn check_request_frame(kind: u64) -> H3Result<()> {
             H3_FRAME_UNEXPECTED,
             format!("кадр HTTP/2 {kind:#x}"),
         )),
-        // `MAX_PUSH_ID` клиент не слал, проталкивать сервер не вправе.
         frame::PUSH_PROMISE => Err(H3Error::protocol(
             H3_ID_ERROR,
             "PUSH_PROMISE без MAX_PUSH_ID",

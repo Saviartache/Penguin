@@ -8,8 +8,6 @@ use std::time::Duration;
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::{PortSpec, ServerEndpoint};
-// Настройки TLS общие на весь проект: одна таблица доверия, одни имена
-// полей в файле настроек.
 pub use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
@@ -105,7 +103,6 @@ impl Hysteria2Config {
         }
         Ok(match self.endpoint()?.host {
             Address::Domain(domain) => domain,
-            // Без скобок и здесь, и для IPv6: rustls ждёт сам адрес.
             Address::Ip(ip) => ip.to_string(),
         })
     }
@@ -124,8 +121,6 @@ impl Hysteria2Config {
         self.server_name()?;
 
         if endpoint.ports.is_hopping() && self.obfs.is_none() {
-            // Не ошибка, но и не то, чего пользователь ждал: без обфускации
-            // смена порта видна как есть и смысла почти не имеет.
             tracing::warn!("смена порта задана без обфускации — эффект будет невелик");
         }
         if let Some(ObfsConfig::Salamander { password }) = &self.obfs
@@ -137,8 +132,7 @@ impl Hysteria2Config {
     }
 }
 
-// Пароль не должен попасть в журнал ни целиком, ни частями: строка «первые
-// четыре символа» — это уже утечка, если паролей у пользователя два-три.
+// Пароль не попадает в журнал ни целиком, ни частями.
 impl std::fmt::Debug for Hysteria2Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Hysteria2Config")
@@ -257,10 +251,7 @@ impl Default for QuicConfig {
         Self {
             max_idle_timeout_secs: 30,
             keep_alive_secs: 10,
-            // Умолчания эталонного клиента: 8 МБ на поток и 20 МБ на
-            // соединение. Окно должно вмещать произведение полосы на задержку,
-            // иначе скорость упрётся в него, а не в канал: 100 Мбит/с при
-            // 200 мс — это уже 2.5 МБ в полёте.
+            // Умолчания эталона: 8 МБ на поток, 20 МБ на соединение.
             stream_receive_window: 8 * 1024 * 1024,
             conn_receive_window: 20 * 1024 * 1024,
         }
@@ -311,7 +302,6 @@ mod tests {
     #[test]
     fn sni_overrides_host() {
         let mut config = config("1.2.3.4:443");
-        // Без `sni` в TLS идёт сам адрес: rustls тогда не шлёт SNI вовсе.
         assert_eq!(config.server_name().expect("имя"), "1.2.3.4");
         config.tls.sni = Some("example.com".to_owned());
         assert_eq!(config.server_name().expect("имя"), "example.com");
@@ -319,14 +309,11 @@ mod tests {
 
     #[test]
     fn an_ip_server_needs_no_sni() {
-        // Ссылку `hy2://пароль@203.0.113.5:1984/?insecure=1` раздают как есть,
-        // и отказ до подключения означал бы, что рабочий сервер не проверить.
         assert_eq!(
             config("203.0.113.5:1984").server_name().expect("имя"),
             "203.0.113.5"
         );
         config("203.0.113.5:1984").validate().expect("настройки");
-        // IPv6 — без скобок: rustls ждёт сам адрес.
         assert_eq!(
             config("[2001:db8::1]:443").server_name().expect("имя"),
             "2001:db8::1"
@@ -377,8 +364,6 @@ mod tests {
 
     #[test]
     fn accepts_official_client_field_names() {
-        // Конфигурацию приносят от провайдера как есть — она обязана
-        // разобраться без перевода имён полей.
         let raw = serde_json::json!({
             "server": "example.com:443",
             "auth": "hunter2",

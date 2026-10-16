@@ -1,26 +1,8 @@
-//! Base64: разбор и сборка. Чистая логика без единой зависимости.
+//! Base64 без зависимостей; нужен и протоколам (ключи), и окну (ссылки `vmess://`, `ss://`).
 //!
-//! Нужен по обе стороны стрелки зависимостей, и это причина, по которой он
-//! лежит здесь, а не в крейте протокола. Ключ Shadowsocks 2022 и ключи
-//! WireGuard задаются base64 — их разбирает протокол; ссылки `vmess://`,
-//! `ss://` и `ssr://` — это base64 целиком, и их разбирает окно. Общее у окна
-//! и протокола ровно одно — `core`.
-//!
-//! # Строгость
-//!
-//! Разбор намеренно мягкий, и каждое послабление здесь названо:
-//!
-//! - **Оба алфавита сразу.** `+/` и `-_` принимаются вперемешку. Разделять их
-//!   на два разбирателя значило бы заставить каждого зовущего гадать, какой
-//!   алфавит у пришедшей ссылки, — а он в ней не указан.
-//! - **Дополнение `=` необязательно.** В ссылках его опускают чаще, чем
-//!   ставят.
-//! - **Лишние биты в последнем символе не проверяются.** Строгий разбор
-//!   отверг бы строку, которую принимают все остальные клиенты, — то есть
-//!   человек увидел бы «неверный ключ» там, где ключ верный.
-//!
-//! Не прощается то, что означает настоящую ошибку: посторонний символ, `=`
-//! посреди строки и длина, при которой последний символ неполон.
+//! Разбор мягкий: принимает оба алфавита (`+/` и `-_`), необязательное `=` и
+//! ненулевые лишние биты в последнем символе. Посторонний символ, `=` посреди
+//! строки и оборванный символ — ошибка.
 
 use crate::error::{CoreError, CoreResult};
 
@@ -31,31 +13,20 @@ const STANDARD: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// Кодирует байты обычным алфавитом с дополнением.
-///
-/// Такой вид ждут заголовки HTTP — в частности `proxy-authorization`.
 pub fn encode(bytes: &[u8]) -> String {
     encode_with(bytes, STANDARD, true)
 }
 
 /// Кодирует байты алфавитом для URL, без дополнения.
-///
-/// Такой вид стоит в ссылках-приглашениях: `=` в конце пришлось бы
-/// экранировать, и половина клиентов этого не делает.
 pub fn encode_url(bytes: &[u8]) -> String {
     encode_with(bytes, URL_SAFE, false)
 }
 
-/// Разбирает base64 в байты.
-///
-/// Принимает оба алфавита и строку как с дополнением, так и без него. Пробелы
-/// по краям отбрасываются: ключ, скопированный из файла, приходит с переводом
-/// строки, и это не ошибка человека.
+/// Разбирает base64 в байты; пробелы по краям отбрасываются.
 pub fn decode(text: &str) -> CoreResult<Vec<u8>> {
     let text = text.trim();
     let bytes = text.as_bytes();
 
-    // Дополнение отбрасывается сразу: дальше оно только мешает, а его
-    // правильность проверяется по длине оставшегося.
     let body = bytes.iter().position(|&b| b == b'=').unwrap_or(bytes.len());
     let (payload, padding) = bytes.split_at(body);
 
@@ -86,12 +57,7 @@ pub fn decode(text: &str) -> CoreResult<Vec<u8>> {
     Ok(out)
 }
 
-/// Разбирает base64 и проверяет, что байт получилось ровно столько, сколько
-/// ждали.
-///
-/// Отдельная функция, потому что зовут её из `validate`, а там нужен текст,
-/// который можно показать в поле формы: «ключ длиной 24 байта вместо 32» —
-/// это ответ, а «неверный ключ» — нет.
+/// Разбирает base64 и проверяет длину; ошибка называет `what` и обе длины.
 pub fn decode_exact(text: &str, expected: usize, what: &'static str) -> CoreResult<Vec<u8>> {
     let bytes = decode(text)?;
     if bytes.len() != expected {
@@ -103,10 +69,8 @@ pub fn decode_exact(text: &str, expected: usize, what: &'static str) -> CoreResu
     Ok(bytes)
 }
 
-/// Общий сборщик ошибки разбора.
+/// Ошибка разбора; сама строка не попадает в сообщение: это почти всегда ключ (§5.2).
 fn malformed(text: &str, reason: &str) -> CoreError {
-    // Сама строка в сообщение не попадает: base64 в этом проекте — это почти
-    // всегда ключ, а ключи в журнал не уходят (AGENTS.md §5.2).
     CoreError::InvalidEncoding {
         format: "base64",
         reason: format!("{reason} (длина {})", text.len()),
@@ -125,7 +89,7 @@ fn value_of(symbol: u8) -> Option<u8> {
     }
 }
 
-/// Сборка: общая для обоих алфавитов.
+/// Сборка для обоих алфавитов.
 fn encode_with(bytes: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
 
@@ -134,11 +98,9 @@ fn encode_with(bytes: &[u8], alphabet: &[u8; 64], pad: bool) -> String {
             [a] => u32::from(*a) << 16,
             [a, b] => (u32::from(*a) << 16) | (u32::from(*b) << 8),
             [a, b, c] => (u32::from(*a) << 16) | (u32::from(*b) << 8) | u32::from(*c),
-            // `chunks(3)` не выдаёт ни пустых кусков, ни кусков длиннее трёх.
             _ => continue,
         };
 
-        // Символов ровно на столько, сколько байт: 1 -> 2, 2 -> 3, 3 -> 4.
         let symbols = chunk.len() + 1;
         for index in 0..symbols {
             let shift = 18 - index * 6;
@@ -185,15 +147,12 @@ mod tests {
 
     #[test]
     fn padding_is_optional() {
-        // Ссылки-приглашения приходят и так, и так, и обе записи означают
-        // одно и то же.
         assert_eq!(decode("Zm9vYmE").unwrap(), b"fooba");
         assert_eq!(decode("Zm9vYmE=").unwrap(), b"fooba");
     }
 
     #[test]
     fn both_alphabets_are_accepted() {
-        // 0xFB 0xEF 0xBE даёт `++++` в обычном алфавите и `----` в URL-овом.
         let bytes = [0xFB, 0xEF, 0xBE];
         assert_eq!(encode(&bytes), "++++");
         assert_eq!(encode_url(&bytes), "----");
@@ -209,7 +168,6 @@ mod tests {
 
     #[test]
     fn surrounding_whitespace_is_not_a_mistake() {
-        // Ключ, скопированный из файла, приходит с переводом строки.
         assert_eq!(decode("  Zm9vYmFy\n").unwrap(), b"foobar");
     }
 
@@ -226,8 +184,6 @@ mod tests {
 
     #[test]
     fn a_dangling_symbol_is_rejected() {
-        // Один символ — это шесть бит: байта из них не выйдет, и молча
-        // отдать пустой ответ значит принять испорченный ключ.
         assert!(decode("Z").is_err());
         assert!(decode("Zm9vZ").is_err());
     }
@@ -239,9 +195,6 @@ mod tests {
 
     #[test]
     fn trailing_bits_are_forgiven() {
-        // `Zm9vYmE` и `Zm9vYmF` дают одни и те же пять байт: последний символ
-        // несёт биты, которые никуда не идут. Все клиенты такое принимают, и
-        // отвергать значило бы сказать «неверный ключ» о верном ключе.
         assert_eq!(decode("Zm9vYmE").unwrap(), decode("Zm9vYmF").unwrap());
     }
 
@@ -259,8 +212,6 @@ mod tests {
 
     #[test]
     fn a_broken_key_never_shows_up_in_the_message() {
-        // Base64 в этом проекте — почти всегда ключ, а ключи в журнал не
-        // уходят (AGENTS.md §5.2).
         let err = decode("секретный!ключ").unwrap_err();
         assert!(!err.to_string().contains("ключ"), "{err}");
     }

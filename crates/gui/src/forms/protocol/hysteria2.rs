@@ -1,8 +1,5 @@
-//! Hysteria 2 — описание формы.
-//!
-//! Имена полей совпадают с конфигурацией официального клиента: пользователь
-//! приносит настройки от провайдера и переносит их по одному, не гадая, что
-//! чему соответствует.
+//! Hysteria 2 — описание формы. Имена полей совпадают с конфигурацией
+//! официального клиента.
 
 use crate::forms::check;
 use crate::forms::link::Link;
@@ -11,11 +8,6 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
-/// Поля формы в том порядке, в каком они показываются.
-///
-/// Порядок не случаен: адрес и пароль — то, без чего профиль не соберётся;
-/// полоса — то, ради чего протокол и выбирают; TLS с обфускацией нужны
-/// меньшинству и стоят внизу.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -23,7 +15,7 @@ static FIELDS: &[FieldSpec] = &[
         .check(check::server_address),
     FieldSpec::secret("password", &["password"], |s| s.password)
         .required(|s| s.need_password)
-        // `auth` — имя того же поля в конфигурации от провайдера.
+        // `auth` — имя поля в конфигурации провайдера.
         .also(&[&["auth"]]),
     FieldSpec::text("down", &["bandwidth", "down"], |s| s.bandwidth_down)
         .example(|s| s.bandwidth_down_example),
@@ -32,8 +24,7 @@ static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("sni", &["tls", "sni"], |s| s.sni).example(|s| s.sni_example),
     FieldSpec::secret("obfs", &["obfs", "password"], |s| s.obfs)
         .example(|s| s.obfs_example)
-        // Тип обфускации не спрашивают: Salamander — единственный, какой есть.
-        // Без него пароль обфускации не значит ничего.
+        // Salamander — единственный тип, без него пароль не значит ничего.
         .with(&[(&["obfs", "type"], "salamander")]),
     FieldSpec::flag("insecure", &["tls", "insecure"], |s| s.insecure),
 ];
@@ -50,14 +41,8 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
 
 /// Как ссылка ложится в поля.
 ///
-/// **Двоеточие в userinfo — часть пароля, а не разделитель.** У Hysteria 2
-/// userinfo целиком и есть строка проверки подлинности: в
-/// `hy2://source:s3cret@…` пароль — `source:s3cret`, а не пользователь
-/// `source` с паролем `s3cret`. Разделить их значило бы молча отдать серверу
-/// половину пароля.
-///
-/// `alpn` в ссылке встречается, но в настройках его нет: Hysteria 2 ходит
-/// только по `h3`, и хранить единственное возможное значение незачем.
+/// Двоеточие в userinfo — часть пароля: в `hy2://source:s3cret@…` пароль
+/// `source:s3cret`. `alpn` пропускается: Hysteria 2 ходит только по `h3`.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let password = link.userinfo();
     if password.is_empty() {
@@ -74,7 +59,6 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if let Some(obfs) = link.query.get("obfs-password") {
         values.push(("obfs", obfs));
     }
-    // `insecure` и `allowInsecure` встречаются оба; достаточно одного.
     if link.query.flag("insecure") || link.query.flag("allowinsecure") {
         values.push(("insecure", "1".to_owned()));
     }

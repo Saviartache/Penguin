@@ -40,8 +40,7 @@ members = [
     "servers/pingwin",
 ]
 
-# У кита свои `rustfmt.toml` и свои пороги clippy: в нашем workspace он
-# проверялся бы нашими.
+# У кита свои `rustfmt.toml` и пороги clippy.
 exclude = ["vendor/rust-ui-kit"]
 
 [workspace.package]
@@ -65,10 +64,7 @@ penguin-netstack = { path = "crates/netstack" }
 penguin-inbound  = { path = "crates/inbound" }
 penguin-dns      = { path = "crates/dns" }
 penguin-platform = { path = "crates/platform" }
-# `default-features = false` здесь несёт весь смысл списков фич у демона и
-# клиента. Без него движок приходит к ним со своими умолчаниями — а в них
-# все протоколы сразу, и `--no-default-features` перестаёт значить что-либо:
-# собирается тот же бинарник до байта. Мерено, а не предположено.
+# Без этого умолчания движка возвращают все протоколы демону и клиенту.
 penguin-engine   = { path = "crates/engine", default-features = false }
 penguin-ipc      = { path = "crates/ipc" }
 penguin-daemon   = { path = "crates/daemon" }
@@ -106,19 +102,13 @@ quinn = { version = "0.11", default-features = false }
 quinn-proto = { version = "0.11", default-features = false }
 rustls = { version = "0.23", default-features = false }
 rustls-platform-verifier = "0.5"
-rustls-pemfile = "2"
-# Уже в дереве: его тянет `rustls` с фичей `ring`. Протоколам он даёт
-# AES-GCM, ChaCha20-Poly1305, HKDF, HMAC и X25519 — то есть почти всю
-# криптографию плана, не добавляя к сборке ничего нового.
+# Уже в дереве через `rustls`: AEAD, HKDF, HMAC, X25519.
 ring = "0.17"
 tokio-rustls = { version = "0.26", default-features = false }
 http = "1"
-# Только ради `naive`: CONNECT поверх HTTP/2. Остальным протоколам он не
-# нужен — HTTP/2 в проекте есть только затем, чтобы NaiveProxy маскировался
-# под обычный веб-трафик.
+# HTTP/2-маскировка NaiveProxy и TrustTunnel.
 h2 = "0.4"
-# HTTP/3 у клиента свой (`penguin_transport::h3`). `h3` — только сервер в
-# тестах: независимая реализация, о которую проверяется своя.
+# Только сервер и тесты: клиентский HTTP/3 свой (`penguin_transport::h3`).
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 smoltcp = { version = "0.12", default-features = false }
@@ -133,64 +123,34 @@ bytes = "1"
 ipnet = "2"
 aho-corasick = "1"
 regex = "1"
-globset = "0.4"
 maxminddb = "0.24"
 
 # --- криптография ---
-#
-# Вся семья RustCrypto держится на одном поколении `digest 0.11` (`cipher 0.5`,
-# `aead 0.6`). Смешивать поколения нельзя не из аккуратности: типажи `Digest`,
-# `Mac` и `KeyInit` у 0.10 и 0.11 разные, `Hmac<Md5>` через границу поколений
-# не собирается, и каждая половина тянет в дерево свою копию `digest`,
-# `block-buffer`, `crypto-common` и `generic-array`.
+# RustCrypto — одно поколение `digest 0.11`: типажи 0.10 и 0.11 несовместимы.
 blake2 = "0.11"
-# Только ради Shadowsocks 2022: ключи и подключи там выводятся BLAKE3 в режиме
-# `derive_key`, и другой функции вывода у метода нет. В `ring` его нет.
+# BLAKE3 `derive_key` у Shadowsocks 2022.
 blake3 = { version = "1", default-features = false }
 sha2 = "0.11"
-# Только ради VMess: маскировка длины кадра тела — это XOF Shake128,
-# которого нет ни у `ring`, ни у остальной уже подключённой криптографии.
-# Зафиксировано на `0.11`: в `0.12` `Shake128`/`Shake128Reader` из крейта
-# убраны (сверено с исходником `sha3` на crates.io), а именно они здесь и
-# нужны.
+# Shake128 у VMess; в `0.12` его убрали.
 sha3 = { version = "=0.11", default-features = false }
-# Только ради `EVP_BytesToKey` — вывода ключа из пароля у Shadowsocks. Своей
-# стойкости он не даёт и придуман не для этого; заменить его нельзя, потому
-# что так делает сервер.
+# `EVP_BytesToKey` у Shadowsocks и VMess — так делает сервер.
 md-5 = "0.11"
-rand = "0.8"
-# Уже в дереве через `quinn-proto`; общая случайность — `penguin_proto::random`.
+# Уже в дереве через `quinn-proto`; обёртка — `penguin_proto::random`.
 getrandom = "0.4"
-# Только ради WireGuard: постоянный приватный ключ участвует в каждом
-# рукопожатии за весь сеанс, а `ring::agreement` потребляет его при первом же
-# использовании. `static_secrets` даёт многоразовый секрет — он же нужен и для
-# одноразового ключа рукопожатия, который в одном сеансе Noise IK участвует в
-# двух разных вычислениях Диффи-Хеллмана.
+# Многоразовый X25519-секрет для Noise IK у WireGuard; `ring` его потребляет.
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "getrandom"] }
-# Голый блочный AES: заголовок сессии у Shadowsocks 2022 и опознаватель
-# VMess шифруются одним блоком без режима сцепления, а `ring` даёт только
-# AEAD.
+# Голый блок AES у Shadowsocks 2022 и VMess.
 aes = "0.9"
-# XChaCha20-Poly1305: нонс 24 байта, вдвое длиннее того, что умеет общий
-# `aead` (у `ring` XChaCha20 нет вовсе). Нужен датаграммам Shadowsocks 2022 и
-# WireGuard.
+# XChaCha20-Poly1305: в `ring` нет.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
-
-# --- DNS ---
-hickory-proto = { version = "0.24", default-features = false }
 
 # --- служебное ---
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 parking_lot = "0.12"
-dashmap = "6"
 arc-swap = "1"
-clap = { version = "4", features = ["derive"] }
-interprocess = { version = "2", features = ["tokio"] }
-widestring = "1"
 
 # --- платформа ---
 windows = "0.58"
@@ -201,7 +161,7 @@ nix = { version = "0.31", default-features = false }
 libc = "0.2"
 
 [workspace.lints.rust]
-unsafe_code = "warn"          # разрешено только в `platform`/`process`/`tun`
+unsafe_code = "warn"          # разрешено только в `platform`/`process`/`tun` и канале Windows у `ipc`
 missing_docs = "warn"
 unreachable_pub = "warn"
 
@@ -211,7 +171,7 @@ unwrap_used = "warn"
 expect_used = "warn"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"

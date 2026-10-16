@@ -1,16 +1,6 @@
-//! Локальный SOCKS5 поверх выбранного профиля — без TUN и без прав
-//! администратора.
+//! Локальный SOCKS5/HTTP-прокси поверх профиля: вся цепочка клиента, кроме TUN.
 //!
-//! Самая полезная команда на этапе отладки и вполне рабочий режим сам по себе.
-//! Она поднимает всю цепочку клиента, кроме перехвата трафика:
-//!
-//! ```text
-//!   приложение ──► SOCKS5 ──► маршрутизатор ──► протокол ──► сервер
-//! ```
-//!
-//! Всё, чего здесь нет, — это TUN. Значит, нет ни драйвера, ни маршрутов, ни
-//! брандмауэра, ни требования прав. Если через эту команду трафик ходит, а
-//! через тоннель нет — проблема заведомо не в протоколе.
+//! Если через прокси трафик ходит, а через тоннель нет — проблема не в протоколе.
 
 use std::sync::Arc;
 
@@ -45,10 +35,7 @@ pub enum Kind {
 pub async fn run(config: &RootConfig, args: &SocksArgs, kind: Kind) -> Result<()> {
     let profile = pick_profile(config, args.profile.as_deref())?;
 
-    // Разрешатель загрузочный, а не системный. «TUN не поднят, значит система
-    // ответит честно» — рассуждение неверное: подмена DNS от прошлого запуска
-    // переживает и тоннель, и сам клиент, и системный резолвер отвечает на имя
-    // сервера подставным адресом (см. [`penguin_dns::bootstrap`]).
+    // Загрузочный резолвер: системный может отвечать подменой прошлого запуска (`penguin_dns::bootstrap`).
     let dialer = Arc::new(SystemDialer::new(penguin_dns::bootstrap::resolver_for(
         &config.dns,
     )));
@@ -66,8 +53,6 @@ pub async fn run(config: &RootConfig, args: &SocksArgs, kind: Kind) -> Result<()
 
     let active = OutboundId::from(profile.id.clone());
     let router = if args.no_rules {
-        // Отделяет протокол от маршрутизации: если так трафик ходит, а с
-        // правилами нет — дело в правилах.
         println!("Правила выключены: весь трафик идёт в тоннель.");
         Arc::new(Router::passthrough(TunnelMode::Full, active.clone()))
     } else {
@@ -77,9 +62,7 @@ pub async fn run(config: &RootConfig, args: &SocksArgs, kind: Kind) -> Result<()
         )
     };
 
-    // Владелец соединения ищется, только если правила по процессам вообще
-    // есть: чтение таблицы соединений стоит системного вызова на каждое новое
-    // соединение.
+    // Владельца ищем только при правилах по процессам: это системный вызов на соединение.
     let processes: Arc<dyn penguin_process::resolver::FlowOwnerResolver> =
         if config.routing.resolve_process && !args.no_rules {
             Arc::from(penguin_process::resolver::system_resolver())
@@ -135,8 +118,7 @@ pub async fn run(config: &RootConfig, args: &SocksArgs, kind: Kind) -> Result<()
     cancel.cancel();
     let _ = serving.await;
 
-    // Закрывать соединение обязательно: без прощального пакета сервер
-    // продержит сессию до истечения тайм-аута.
+    // Без прощального пакета сервер держит сессию до тайм-аута.
     let _ = outbound.close().await;
 
     let traffic = metrics.total();
@@ -219,8 +201,6 @@ mod tests {
 
     #[test]
     fn picks_the_first_profile_when_none_is_active() {
-        // Клиент с единственным профилем не должен требовать выбирать его
-        // руками.
         let config = config_with(&["home"]);
         assert_eq!(
             pick_profile(&config, None).expect("есть").id.as_str(),
@@ -256,7 +236,6 @@ mod tests {
         });
 
         assert!(credentials_for(&config, Kind::Socks5).is_some());
-        // У HTTP-прокси свои настройки; чужой пароль ему не достаётся.
         assert!(credentials_for(&config, Kind::Http).is_none());
     }
 }

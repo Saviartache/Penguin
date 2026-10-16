@@ -1,4 +1,4 @@
-//! Elevated setup, completed before a service can be registered or started.
+//! Подготовка с повышенными правами до регистрации и запуска службы.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -15,12 +15,9 @@ mod unix;
 const MAX_CONFIG_SIZE: u64 = 4 * 1024 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// Prepares machine directories and optionally imports the pre-elevation config.
-///
-/// Requires elevated privileges. Existing machine settings are never replaced.
-/// On Unix an explicit import must belong to the explicitly supplied controller.
-/// Without a source, only Windows migrates the current user's settings.
-/// Returns whether controller authorization changed, requiring a listener restart.
+/// Готовит машинные каталоги и импортирует настройки; нужны права. Имеющиеся
+/// настройки не заменяются. Возвращает `true`, если сменился доступ контроллера
+/// (нужен перезапуск слушателя).
 pub fn prepare_service(controller_uid: Option<u32>, import_config: Option<&Path>) -> Result<bool> {
     ensure!(
         penguin_platform::privilege::is_elevated(),
@@ -43,7 +40,7 @@ pub fn prepare_service(controller_uid: Option<u32>, import_config: Option<&Path>
     Ok(false)
 }
 
-// The expected directory owner is injectable only for unprivileged temp tests.
+// `owner` подменяется только в тестах без прав
 fn prepare_config(
     paths: &Paths,
     controller_uid: Option<u32>,
@@ -72,8 +69,7 @@ fn prepare_config(
         return Ok(());
     };
     let raw = read_import(source, controller_uid)?;
-    // Parser and validation errors can contain passwords or arbitrary input.
-    // Deliberately discard their sources, not merely add an anyhow context.
+    // Ошибки могут содержать пароли: источник отбрасываем
     let config = ConfigStore::parse(&raw, source)
         .and_then(migrate::migrate)
         .and_then(|config| {
@@ -134,8 +130,7 @@ fn persist_new(target: &Path, body: &[u8]) -> Result<()> {
         let result = (|| -> Result<()> {
             file.write_all(body)?;
             file.sync_all()?;
-            // A hard link publishes a complete file atomically without replacing
-            // settings that another elevated installer may have just created.
+            // Жёсткая ссылка публикует файл атомарно, не затирая чужой
             let linked = std::fs::hard_link(&temp, target);
             if linked
                 .as_ref()

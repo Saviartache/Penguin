@@ -1,13 +1,6 @@
 //! Ошибки транспорта.
 //!
-//! Своё перечисление, а не общий [`ProtocolError`], по той же причине, по
-//! которой оно есть у каждого протокола: транспорт различает вещи, которых
-//! общий язык не знает, — «сервер ответил не по gRPC» и «сервер не
-//! ответил вовсе» выглядят выше по стеку одинаково, а лечатся по-разному.
-//!
-//! Обратно в общий язык оно переводится здесь же, и перевод закрепляет
-//! обещание про повторные попытки (`AGENTS.md` §4.2): всё, что само собой не
-//! изменится, попадает в невосстановимые варианты.
+//! Перевод в [`ProtocolError`] задаёт повторяемость (`AGENTS.md` §4.2).
 
 use penguin_proto::error::ProtocolError;
 use thiserror::Error;
@@ -26,25 +19,15 @@ pub enum TransportError {
     #[error("адрес не помещается в запрос: {0}")]
     Address(String),
 
-    /// Собеседник ответил не по протоколу.
-    ///
-    /// Чаще всего это значит, что на том конце не то, что настроено: обычный
-    /// сайт вместо прокси, чужой разговор вместо HTTP/3.
+    /// Собеседник ответил не по протоколу (на порту не тот сервер).
     #[error("ответ не по протоколу: {0}")]
     Malformed(String),
 
-    /// Рукопожатие не уложилось в срок.
-    ///
-    /// Отдельный вариант, а не `Io(TimedOut)`: молчащий сервер — это повод
-    /// повторить попытку, и `supervisor` должен это видеть.
+    /// Рукопожатие не уложилось в срок (повторяемо).
     #[error("{0} не уложилось в срок")]
     Timeout(&'static str),
 
-    /// Метка подлинности не сошлась.
-    ///
-    /// Для AEAD это не «шум на линии»: метка заверяет данные, и не сошедшаяся
-    /// означает либо неверный пароль, либо правку по дороге. Различить их
-    /// нельзя, и продолжать нельзя ни в том, ни в другом случае.
+    /// Метка AEAD не сошлась: неверный пароль или правка по дороге.
     #[error("метка подлинности не сошлась: неверный пароль или правка по дороге")]
     Rejected,
 
@@ -84,8 +67,6 @@ impl From<TransportError> for ProtocolError {
         match err {
             TransportError::Config(message) => Self::InvalidConfig(message),
             TransportError::Address(message) => Self::InvalidConfig(message),
-            // Не по протоколу — это ошибка настроек, а не сети: пока в поле
-            // стоит адрес не того сервера, повторять нечего.
             err @ TransportError::Malformed(_) => Self::InvalidConfig(err.to_string()),
             err @ TransportError::Timeout(_) => Self::Disconnected(err.to_string()),
             TransportError::Rejected => Self::AuthRejected,
@@ -101,7 +82,6 @@ mod tests {
 
     #[test]
     fn a_silent_server_is_retried() {
-        // Молчащий сервер — это сеть, а не настройки: повторять обязательно.
         let err: ProtocolError = TransportError::Timeout("рукопожатие TLS").into();
         assert!(err.is_retryable());
         assert!(err.to_string().contains("рукопожатие TLS"));
@@ -109,7 +89,6 @@ mod tests {
 
     #[test]
     fn the_wrong_kind_of_server_is_not_retried() {
-        // На порту сидит не то, что настроено. Само оно не поменяется.
         let err: ProtocolError = TransportError::malformed("HTTP/1.1 200 вместо 101").into();
         assert!(!err.is_retryable());
     }

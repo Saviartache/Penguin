@@ -1,8 +1,6 @@
 //! Направление через сервер Shadowsocks.
 //!
-//! Состояния между вызовами не держит: у каждого потока своя соль и свой
-//! сеансовый ключ. Собрано заранее ровно то, что дорого считать заново, —
-//! главный ключ из пароля.
+//! Состояния между вызовами нет: соль и сеансовый ключ свои на поток, главный ключ готов заранее.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -16,10 +14,10 @@ use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::outbound::Outbound;
+use penguin_proto::random;
 use penguin_proto::stream::ProxyStream;
 use penguin_transport::addr::socks;
 use penguin_transport::deadline;
-use rand::Rng;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::config::ShadowsocksConfig;
@@ -41,9 +39,7 @@ pub struct ShadowsocksOutbound {
     host: Address,
     /// Порт сервера.
     port: u16,
-    /// Ключевой материал направления: главный ключ AEAD (из пароля) или PSK
-    /// 2022 (из base64) — оба лежат здесь одинаково, различает их только
-    /// метод. Готовится один раз при сборке, а не на каждый поток.
+    /// Главный ключ AEAD или PSK 2022; различает их метод.
     key: Vec<u8>,
     dialer: Arc<dyn Dialer>,
 }
@@ -58,10 +54,7 @@ impl std::fmt::Debug for ShadowsocksOutbound {
 }
 
 impl ShadowsocksOutbound {
-    /// Собирает направление.
-    ///
-    /// Соединения при этом не открывается: у Shadowsocks его и не бывает
-    /// постоянного.
+    /// Собирает направление, соединений не открывая.
     pub fn new(
         id: OutboundId,
         config: ShadowsocksConfig,
@@ -70,8 +63,6 @@ impl ShadowsocksOutbound {
         config.validate()?;
         let (host, port) = config.endpoint()?;
 
-        // `validate` уже проверила и то, и другое: здесь остаётся получить
-        // байты, а не решить, годятся ли они.
         let key = match config.method {
             ShadowsocksMethod::Aead(method) => kdf::master_key(&config.password, method),
             ShadowsocksMethod::Aead2022(method) => penguin_core::base64::decode_exact(
@@ -105,13 +96,9 @@ impl Outbound for ShadowsocksOutbound {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Ровно то, что стоит в настройках: соврать здесь означает, что
-            // DNS-запросы уйдут в направление, которое их молча потеряет.
             udp: self.config.udp,
-            // Своя соль и свой ключ на каждый поток.
             multiplex: false,
             port_hopping: false,
-            // Имя уезжает серверу доменом и разрешается на той стороне.
             remote_dns: true,
         }
     }
@@ -137,9 +124,6 @@ impl Outbound for ShadowsocksOutbound {
             return Err(ShadowsocksError::UdpDisabled.into());
         }
 
-        // Адрес сервера нужен числовым: датаграммы шлются сокетом, а он имён
-        // не знает. Разрешает имя `Dialer` — мимо тоннеля, как и всё
-        // остальное.
         let server = first_address(&*self.dialer, &self.host, self.port).await?;
         let local = SocketAddr::new(
             if server.is_ipv6() {
@@ -175,18 +159,14 @@ async fn connect_tcp_aead<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     master: &[u8],
     target: &SocketAddress,
 ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
-    // Соль бросается на каждое соединение: она и есть то, что делает
-    // сеансовый ключ разным. Повтор пары «ключ, счётчик» для AEAD означает
-    // раскрытые данные, а не «слабее».
     let mut salt = vec![0u8; method.salt_len()];
-    rand::thread_rng().fill(&mut salt[..]);
+    random::fill(&mut salt);
 
     let key = kdf::session_key(master, &salt, method).map_err(ProtocolError::from)?;
     let mut send = Cipher::new(method.algorithm(), &key).map_err(ProtocolError::from)?;
 
-    // Адрес назначения — первый кусок внутри шифра. Он и соль уходят одной
-    // записью: два пакета там, где протокол шлёт один, видны по дороге.
-    let mut header = Vec::new();
+    // Соль и адрес — одной записью
+    let mut header = Vec::with_capacity(socks::encoded_len(target));
     socks::encode(target, &mut header).map_err(ShadowsocksError::from)?;
     let mut first = salt;
     first.extend_from_slice(&seal_chunk(&mut send, &header).map_err(ProtocolError::from)?);
@@ -217,7 +197,7 @@ async fn connect_tcp_2022<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     let salt_len = method.salt_len();
 
     let mut salt = vec![0u8; salt_len];
-    rand::thread_rng().fill(&mut salt[..]);
+    random::fill(&mut salt);
 
     let session_key = kdf2022::derive(psk, &salt, algorithm.key_len());
     let mut send = Cipher::new(algorithm, &session_key).map_err(ProtocolError::from)?;
@@ -246,11 +226,7 @@ async fn connect_tcp_2022<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     )))
 }
 
-/// Первый адрес сервера, какой удалось получить.
-///
-/// Перебирать их, как это делает [`connect::dial`], здесь нечем: у UDP нет
-/// «не удалось подключиться», по которому можно было бы понять, что адрес не
-/// тот. Берётся первый — тот же, к которому подключился бы TCP.
+/// Первый адрес сервера: у UDP нет сигнала «не подключилось», перебирать нечем.
 async fn first_address(
     dialer: &dyn Dialer,
     host: &Address,

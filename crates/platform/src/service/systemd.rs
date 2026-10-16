@@ -1,21 +1,16 @@
-//! Serialization of Penguin-owned systemd units, without OS calls.
+//! Описание юнита systemd и разбор его состояния; без обращений к ОС.
 
 use std::path::PathBuf;
 
 use super::ServiceStatus;
 use crate::error::{PlatformError, PlatformResult};
 
-/// Где лежит копия, которую запускает systemd.
-///
-/// Постоянное место, принадлежащее `root`, а не тот путь, где оказался
-/// запущенный файл. Юнит, указывающий в каталог сборки или на съёмный
-/// носитель, systemd примет — и откажет при следующей загрузке, когда там
-/// уже ничего нет. `/usr/local/lib` — место для того, что поставили не
-/// пакетным менеджером и что человек не зовёт руками (FHS 3.0, §4.5).
+/// Постоянный каталог копии во владении `root` (FHS 3.0, §4.5): юнит с путём в каталог сборки
+/// systemd примет, а при следующей загрузке откажет.
 pub(super) const HELPER_DIR: &str = "/usr/local/lib/penguin";
 pub(super) const HELPER_PATH: &str = "/usr/local/lib/penguin/penguin";
 
-/// Описание службы. Путь в нём постоянный, поэтому экранировать нечего.
+/// Описание службы; путь постоянный, экранировать нечего.
 pub(super) const UNIT_TEXT: &str = "[Unit]\n\
      Description=Penguin VPN\n\
      After=network.target\n\
@@ -29,6 +24,7 @@ pub(super) const UNIT_TEXT: &str = "[Unit]\n\
      [Install]\n\
      WantedBy=multi-user.target\n";
 
+/// Путь программы из юнита; `None` — не наша подпись запуска (допускаются и старые юниты без кавычек).
 pub(super) fn executable_from(unit: &str) -> Option<PathBuf> {
     let mut commands = unit
         .lines()
@@ -49,7 +45,6 @@ pub(super) fn executable_from(unit: &str) -> Option<PathBuf> {
     } else {
         first
     };
-    // Only accept the launch signature we own, including old unquoted units.
     if !path.starts_with('/') || word(&mut command)? != "--service" || !command.trim().is_empty() {
         return None;
     }
@@ -93,12 +88,13 @@ fn unescape(ch: char) -> Option<char> {
     }
 }
 
+/// Юнита нет и процесс не работает (удаление файла юнита работающий процесс не останавливает).
 pub(super) fn absent(report: &str) -> bool {
-    // Removing a unit file and reloading does not stop its running process.
     report.lines().any(|line| line == "LoadState=not-found")
         && report.lines().any(|line| line == "ActiveState=inactive")
 }
 
+/// Состояние службы из `systemctl show`.
 pub(super) fn state_from(report: &str) -> PlatformResult<ServiceStatus> {
     let state = report
         .lines()
@@ -108,7 +104,7 @@ pub(super) fn state_from(report: &str) -> PlatformResult<ServiceStatus> {
         Some("activating" | "deactivating") => Ok(ServiceStatus::Transitioning),
         Some("inactive" | "failed" | "maintenance") => Ok(ServiceStatus::Stopped),
         _ => Err(PlatformError::Service(
-            "systemctl returned no recognized ActiveState".into(),
+            "systemctl не вернул известный ActiveState".into(),
         )),
     }
 }
@@ -126,8 +122,6 @@ mod tests {
             Some(Path::new(HELPER_PATH))
         );
         assert!(HELPER_PATH.starts_with(HELPER_DIR));
-        // `Restart=always` подняло бы службу обратно после того, как окно
-        // погасило её по просьбе человека: она выходит с нулевым кодом.
         assert!(UNIT_TEXT.contains("Restart=on-failure\nRestartSec=5"));
         assert!(UNIT_TEXT.contains("WantedBy=multi-user.target"));
     }

@@ -1,9 +1,5 @@
 //! Направление уровня пакетов, надетое на трейт [`Outbound`].
 //!
-//! Последнее звено моста. Ниже него — [`crate::packet::PacketDevice`] и
-//! исходящий стек, выше — весь остальной движок, который про пакеты ничего не
-//! знает и знать не должен.
-//!
 //! ```text
 //!   конвейер ──► Outbound ──► PacketTunnel ──► netstack::outgoing
 //!                                                    │
@@ -12,31 +8,20 @@
 //!                                             PacketOutbound (WireGuard)
 //! ```
 //!
-//! Ради этого звена ни `router`, ни `pipeline`, ни `gui` не меняются ни одной
-//! строкой: для них WireGuard — такое же направление, как Trojan.
-//!
-//! # Имена разрешаются внутри тоннеля
-//!
-//! [`Outbound::connect_tcp`] обещает, что `target` может быть доменом и
-//! разрешать его — дело той стороны. У пакетного тоннеля «та сторона» — это
-//! сеть внутри него, и имя спрашивается у сервера имён **внутри тоннеля**
-//! ([`crate::packet_dns`]): спросить снаружи значит отдать провайдеру список
-//! имён, которые человек спрашивает, — ровно то, от чего он и ставил клиент.
-//!
-//! Серверы имён берутся из [`PacketInterface::dns`]: у WireGuard они в
-//! настройках. Пустой список означает, что
-//! доменное имя честно отвергается с объяснением, а не разрешается тайком
-//! мимо тоннеля.
+//! Имена разрешаются внутри тоннеля ([`crate::packet_dns`]) серверами из
+//! [`PacketInterface::dns`]; пустой список — домен честно отвергается, а не
+//! разрешается мимо тоннеля.
 //!
 //! [`PacketInterface::dns`]: penguin_proto::packet::PacketInterface::dns
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use dashmap::DashMap;
+use parking_lot::RwLock;
 use penguin_core::address::{Address, SocketAddress};
 use penguin_core::id::OutboundId;
 use penguin_netstack::Datagram;
@@ -57,37 +42,30 @@ use crate::packet_dns::TunnelResolver;
 /// Сколько датаграмм держать в очереди одной сессии.
 const SESSION_QUEUE: usize = 128;
 
-/// Кому какая сессия принадлежит.
-type Sessions = Arc<DashMap<SocketAddr, mpsc::Sender<(Bytes, SocketAddr)>>>;
+type Answer = (Bytes, SocketAddr);
+
+/// Кому какая сессия принадлежит (замок не держится через `.await`).
+type Sessions = Arc<RwLock<HashMap<SocketAddr, mpsc::Sender<Answer>>>>;
 
 /// Пакетное направление, выглядящее для движка обычным.
 pub struct PacketTunnel {
     inner: Arc<Inner>,
 }
 
-/// Всё, что нужно и самому направлению, и каждому его каналу.
-///
-/// Отдельной структурой ради одного: каналу датаграмм тоже приходится
-/// разрешать имена, а для этого надо уметь открыть **ещё один** канал.
-/// Спросить сервер имён по своему же каналу значило бы отдать ответ
-/// приложению, которое его не спрашивало.
+/// Общее для направления и его каналов: каналу датаграмм тоже нужно
+/// разрешать имена, открывая отдельный канал.
 struct Inner {
     outbound: Arc<dyn PacketOutbound>,
     connector: Connector,
     udp_send: mpsc::Sender<Datagram>,
     sessions: Sessions,
-    /// Чем метится следующая сессия UDP.
     next_tag: AtomicU16,
-    /// Кто разрешает имена внутри тоннеля.
     resolver: TunnelResolver,
     cancel: CancellationToken,
 }
 
 impl PacketTunnel {
-    /// Поднимает исходящий стек поверх направления.
-    ///
-    /// Отмена своя, а не общая: закрытие профиля обязано останавливать стек
-    /// этого направления и только его.
+    /// Поднимает исходящий стек; отмена своя — закрытие профиля гасит только его.
     pub fn new(outbound: Arc<dyn PacketOutbound>) -> Self {
         let device = PacketDevice::new(Arc::clone(&outbound));
         let config = device.stack_config();
@@ -95,7 +73,7 @@ impl PacketTunnel {
         let cancel = CancellationToken::new();
         let handles = outgoing::spawn(Box::new(device), config, cancel.clone());
 
-        let sessions: Sessions = Arc::new(DashMap::new());
+        let sessions: Sessions = Sessions::default();
         tokio::spawn(demultiplex(
             handles.udp_recv,
             Arc::clone(&sessions),
@@ -115,31 +93,21 @@ impl PacketTunnel {
         }
     }
 
-    /// Настройки стека, с которыми он поднят, — для журнала и тестов.
+    /// Настройки стека — для журнала и тестов.
     pub fn stack_config(&self) -> StackConfig {
         PacketDevice::new(Arc::clone(&self.inner.outbound)).stack_config()
     }
 }
 
 impl Inner {
-    /// Метка, под которой стек будет узнавать сессию.
-    ///
-    /// Адрес выдуманный и на провод не попадает никогда: стек возит его туда и
-    /// обратно нетронутым, чтобы вернуть ответ хозяину
-    /// (`netstack::outgoing::nat`). Занятая метка пропускается — иначе две
-    /// сессии получали бы чужие ответы.
+    /// Свободная метка сессии: выдуманный адрес, на провод не попадает.
     fn take_tag(&self) -> Option<SocketAddr> {
-        for _ in 0..u16::MAX {
+        let sessions = self.sessions.read();
+        (0..u16::MAX).find_map(|_| {
             let port = self.next_tag.fetch_add(1, Ordering::Relaxed);
-            if port == 0 {
-                continue;
-            }
             let tag = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
-            if !self.sessions.contains_key(&tag) {
-                return Some(tag);
-            }
-        }
-        None
+            (port != 0 && !sessions.contains_key(&tag)).then_some(tag)
+        })
     }
 
     /// Заводит канал датаграмм со своей меткой.
@@ -148,7 +116,7 @@ impl Inner {
             ProtocolError::Unreachable("свободных сессий UDP в тоннеле не осталось".to_owned())
         })?;
         let (incoming, answers) = mpsc::channel(SESSION_QUEUE);
-        self.sessions.insert(tag, incoming);
+        self.sessions.write().insert(tag, incoming);
 
         Ok(TunnelDatagram {
             tag,
@@ -157,10 +125,7 @@ impl Inner {
         })
     }
 
-    /// Адрес назначения в виде, который понимает тоннель.
-    ///
-    /// Имя спрашивается у сервера имён внутри тоннеля по своему, отдельному
-    /// каналу — см. [`crate::packet_dns`].
+    /// Адрес назначения; имя спрашивается внутри тоннеля по отдельному каналу.
     async fn address_of(
         self: &Arc<Self>,
         target: &SocketAddress,
@@ -168,16 +133,13 @@ impl Inner {
         match &target.host {
             Address::Ip(ip) => Ok(SocketAddr::new(*ip, target.port)),
             Address::Domain(name) => {
-                // Готовый ответ не стоит открытого канала: страница тянет
-                // десятки соединений к одному и тому же имени.
                 if let Some(address) = self.resolver.cached(name) {
                     return Ok(SocketAddr::new(address, target.port));
                 }
-
                 let channel = self.open_channel()?;
                 let address = self
                     .resolver
-                    .resolve(name, &channel, rand::random())
+                    .resolve(name, &channel, penguin_dns::message::random_id())
                     .await?;
                 Ok(SocketAddr::new(address, target.port))
             }
@@ -205,13 +167,9 @@ impl Outbound for PacketTunnel {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Датаграммы у тоннеля есть: они и так пакеты.
             udp: true,
-            // Имя разрешает не та сторона, а мы сами — запросом внутрь
-            // тоннеля. См. шапку модуля.
+            // Имя разрешаем сами, запросом внутрь тоннеля.
             remote_dns: false,
-            // Соединения живут в одном тоннеле, и рукопожатие на каждое не
-            // тратится — это и есть мультиплексирование.
             multiplex: true,
             ..Capabilities::default()
         }
@@ -241,11 +199,7 @@ impl Outbound for PacketTunnel {
     }
 }
 
-/// Разводит ответы по сессиям.
-///
-/// Очередь ответов у стека одна на весь тоннель, а канал движку выдаётся на
-/// каждую сессию приложения. Метка, которую стек возит нетронутой, — это и
-/// есть то, по чему они различаются.
+/// Разводит ответы единой очереди стека по сессиям (по метке).
 async fn demultiplex(
     mut answers: mpsc::Receiver<Datagram>,
     sessions: Sessions,
@@ -259,16 +213,12 @@ async fn demultiplex(
         };
         let Some(datagram) = datagram else { break };
 
-        let Some(session) = sessions.get(&datagram.source) else {
-            // Сессия закрылась, пока ответ шёл. Обычное дело для UDP.
-            continue;
-        };
-        // Не блокируя: медленная сессия не должна останавливать остальные, а
-        // потеря датаграммы для UDP — обычный исход.
-        if session
-            .try_send((datagram.payload, datagram.destination))
-            .is_err()
-        {
+        // `try_send`: медленная сессия не тормозит остальные.
+        let sent = sessions
+            .read()
+            .get(&datagram.source)
+            .map(|session| session.try_send((datagram.payload, datagram.destination)));
+        if matches!(sent, Some(Err(_))) {
             tracing::trace!("очередь сессии UDP переполнена, ответ отброшен");
         }
     }
@@ -276,9 +226,8 @@ async fn demultiplex(
 
 /// Датаграммный канал одной сессии приложения.
 struct TunnelDatagram {
-    /// Метка сессии: по ней приходит ответ.
     tag: SocketAddr,
-    answers: Mutex<mpsc::Receiver<(Bytes, SocketAddr)>>,
+    answers: Mutex<mpsc::Receiver<Answer>>,
     inner: Arc<Inner>,
 }
 
@@ -306,8 +255,10 @@ impl ProxyDatagram for TunnelDatagram {
     }
 
     async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
-        let mut answers = self.answers.lock().await;
-        let (payload, from) = answers
+        let (payload, from) = self
+            .answers
+            .lock()
+            .await
             .recv()
             .await
             .ok_or_else(|| ProtocolError::Disconnected("тоннель остановлен".to_owned()))?;
@@ -318,24 +269,19 @@ impl ProxyDatagram for TunnelDatagram {
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        // Метка обязана освободиться: иначе она занята навсегда, а сессий
-        // всего шестьдесят пять тысяч.
-        self.inner.sessions.remove(&self.tag);
+        self.inner.sessions.write().remove(&self.tag);
         Ok(())
     }
 }
 
 impl Drop for TunnelDatagram {
-    /// Сессию закрывают не всегда: конвейер роняет канал по таймауту тишины.
+    /// Конвейер роняет канал по таймауту тишины, не закрывая.
     fn drop(&mut self) {
-        self.inner.sessions.remove(&self.tag);
+        self.inner.sessions.write().remove(&self.tag);
     }
 }
 
-/// Отказ стека на языке протокола.
-///
-/// Различие не косметическое: по нему `supervisor` решает, повторять ли
-/// попытку. Молчание и отказ повторить стоит, отсутствие адреса — нет.
+/// Отказ стека на языке протокола: по варианту `supervisor` решает о повторе.
 fn translate(error: ConnectError) -> ProtocolError {
     match error {
         ConnectError::Refused(address) => {
@@ -344,8 +290,6 @@ fn translate(error: ConnectError) -> ProtocolError {
         ConnectError::TimedOut(address) => {
             ProtocolError::Connect(format!("нет ответа от {address}"))
         }
-        // Не сеть: с этим интерфейсом туда не дойти вовсе, и следующая попытка
-        // кончится тем же.
         ConnectError::NoAddress(address) => ProtocolError::InvalidConfig(format!(
             "у интерфейса тоннеля нет адреса, с которого идти на {address}"
         )),
@@ -369,7 +313,6 @@ mod tests {
     /// Направление, которое никуда не ходит.
     struct Silent {
         sent: Mutex<Vec<Vec<u8>>>,
-        /// Серверы имён, которые «выдал сервер».
         dns: Vec<std::net::IpAddr>,
     }
 
@@ -381,7 +324,6 @@ mod tests {
             })
         }
 
-        /// То же самое, но с сервером имён внутри тоннеля.
         fn with_dns() -> Arc<Self> {
             Arc::new(Self {
                 sent: Mutex::new(Vec::new()),
@@ -415,15 +357,13 @@ mod tests {
         }
 
         async fn recv(&self) -> Result<Bytes, ProtocolError> {
-            // Никогда не отвечает: так выглядит сервер, до которого не дошло.
+            // Сервер, до которого не дошло.
             std::future::pending().await
         }
     }
 
     #[tokio::test]
     async fn the_tunnel_looks_like_an_ordinary_direction() {
-        // Ради этого мост и писался: для конвейера WireGuard такое же
-        // направление, как Trojan.
         let tunnel = PacketTunnel::new(Silent::new());
         assert_eq!(tunnel.protocol(), "wireguard");
         assert_eq!(tunnel.id(), OutboundId::new("проверка"));
@@ -446,12 +386,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_domain_is_refused_with_an_explanation_not_resolved_outside() {
-        // Разрешить имя снаружи значило бы отдать провайдеру список имён,
-        // которые человек спрашивает, — ровно то, от чего ставили клиент.
         let tunnel = PacketTunnel::new(Silent::new());
         let target: SocketAddress = "example.com:443".parse().expect("адрес");
 
-        // `unwrap_err` здесь не годится: у `dyn ProxyStream` нет `Debug`.
+        // У `dyn ProxyStream` нет `Debug`, `unwrap_err` не годится.
         let error = tunnel
             .connect_tcp(&target)
             .await
@@ -463,8 +401,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_name_servers_the_interface_gave_reach_the_resolver() {
-        // Пустой список означает «имён не разрешить», непустой — «спросить
-        // вот у этих». Потерять его по дороге значит потерять имена целиком.
         let with = PacketTunnel::new(Silent::with_dns());
         assert!(!with.inner.resolver.is_empty());
 
@@ -474,9 +410,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_name_query_goes_into_the_tunnel_and_not_around_it() {
-        // Проверяется главное: запрос имени уходит пакетом в само
-        // направление. Ответа не будет — сервера имён за ним нет, — но
-        // сам факт запроса и есть то, ради чего всё писалось.
+        // Ответа не будет; важен сам факт запроса в направление.
         let outbound = Silent::with_dns();
         let tunnel = PacketTunnel::new(Arc::clone(&outbound) as Arc<dyn PacketOutbound>);
         let target: SocketAddress = "example.com:443".parse().expect("адрес");
@@ -493,33 +427,30 @@ mod tests {
 
     #[tokio::test]
     async fn every_udp_session_gets_its_own_tag() {
-        // Одна метка на две сессии означает, что ответ придёт не тому.
         let tunnel = PacketTunnel::new(Silent::new());
         let first = tunnel.bind_udp().await.expect("канал");
         let second = tunnel.bind_udp().await.expect("канал");
 
-        assert_eq!(tunnel.inner.sessions.len(), 2);
+        assert_eq!(tunnel.inner.sessions.read().len(), 2);
         drop(first);
         drop(second);
     }
 
     #[tokio::test]
     async fn a_closed_session_frees_its_tag() {
-        // Меток всего шестьдесят пять тысяч, и занятая навсегда — утечка.
         let tunnel = PacketTunnel::new(Silent::new());
         let channel = tunnel.bind_udp().await.expect("канал");
-        assert_eq!(tunnel.inner.sessions.len(), 1);
+        assert_eq!(tunnel.inner.sessions.read().len(), 1);
 
         channel.close().await.expect("закрылся");
-        assert!(tunnel.inner.sessions.is_empty());
+        assert!(tunnel.inner.sessions.read().is_empty());
     }
 
     #[tokio::test]
     async fn a_dropped_session_frees_its_tag_too() {
-        // Конвейер роняет канал по таймауту тишины, не закрывая его.
         let tunnel = PacketTunnel::new(Silent::new());
         drop(tunnel.bind_udp().await.expect("канал"));
-        assert!(tunnel.inner.sessions.is_empty());
+        assert!(tunnel.inner.sessions.read().is_empty());
     }
 
     #[tokio::test]
@@ -534,7 +465,7 @@ mod tests {
             .await
             .expect("ушла");
 
-        // Стеку нужен оборот цикла, чтобы собрать пакет и отдать его наружу.
+        // Стеку нужен оборот цикла, чтобы собрать пакет.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let sent = outbound.sent.lock().expect("замок");
         assert!(
@@ -558,13 +489,11 @@ mod tests {
 
     #[tokio::test]
     async fn packets_reach_the_direction_when_a_connection_is_attempted() {
-        // Проверяется, что стек действительно поднят на этом направлении:
-        // попытка соединения обязана вылиться в пакет, ушедший в тоннель.
         let outbound = Silent::new();
         let tunnel = PacketTunnel::new(Arc::clone(&outbound) as Arc<dyn PacketOutbound>);
         let target: SocketAddress = "93.184.216.34:443".parse().expect("адрес");
 
-        // Ответа не будет никогда — ждём только первого пакета.
+        // Ответа не будет — ждём только первого пакета.
         let attempt = tokio::spawn(async move { tunnel.connect_tcp(&target).await });
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -577,7 +506,6 @@ mod tests {
 
     #[test]
     fn silence_is_retried_and_a_wrong_interface_is_not() {
-        // По этому различию `supervisor` решает, повторять ли попытку.
         let address = "93.184.216.34:443".parse().expect("адрес");
 
         assert!(translate(ConnectError::TimedOut(address)).is_retryable());

@@ -1,21 +1,9 @@
 //! Поток приложения внутри сессии.
 //!
-//! Снаружи это обычный [`ProxyStream`](penguin_proto::stream::ProxyStream):
-//! читают из очереди, которую наполняет задача чтения сессии, пишут кадрами
-//! `cmdPSH`.
-//!
-//! # Отчего запись выглядит так
-//!
-//! Писать в сессию можно только под её замком, а замок асинхронный —
-//! `poll_write` же синхронный. Поэтому кадр собирается сразу, а отправка
-//! живёт отложенной задачей внутри потока: пока она не кончилась, поток
-//! доводит именно её и новых байт не берёт.
-//!
-//! # Закрытие
-//!
-//! `poll_shutdown` **не** закрывает поток: `cmdFIN` у AnyTLS закрывает его
-//! целиком, в обе стороны, и сервер удалил бы поток раньше, чем ответил.
-//! Закрывается он в `Drop` — тогда, когда ответ уже никому не нужен.
+//! Читает из очереди сессии, пишет кадрами `cmdPSH`: замок сессии асинхронный,
+//! поэтому отправка живёт отложенным будущим, и пока оно не кончилось, новых
+//! байт поток не берёт. `poll_shutdown` не закрывает поток (`cmdFIN` закрывает
+//! обе стороны) — это делает `Drop`.
 
 use std::future::Future;
 use std::io;
@@ -30,8 +18,8 @@ use tokio::sync::mpsc;
 use crate::frame;
 use crate::session::{Msg, Session};
 
-/// Отложенная отправка кадра.
-type Sending = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
+/// Отложенная отправка кадра; возвращает буфер для повторного использования.
+type Sending = Pin<Box<dyn Future<Output = (io::Result<()>, Vec<u8>)> + Send>>;
 
 /// Поток AnyTLS.
 pub struct AnyTlsStream {
@@ -45,6 +33,8 @@ pub struct AnyTlsStream {
     finished: bool,
     /// Кадр, который сейчас отправляется, и сколько байт он унёс.
     sending: Option<(Sending, usize)>,
+    /// Буфер данных кадра между записями.
+    spare: Vec<u8>,
 }
 
 impl std::fmt::Debug for AnyTlsStream {
@@ -66,6 +56,7 @@ impl AnyTlsStream {
             leftover: Bytes::new(),
             finished: false,
             sending: None,
+            spare: Vec::new(),
         }
     }
 
@@ -81,8 +72,9 @@ impl AnyTlsStream {
         };
         let len = *len;
         match sending.as_mut().poll(cx) {
-            Poll::Ready(done) => {
+            Poll::Ready((done, data)) => {
                 self.sending = None;
+                self.spare = data;
                 Poll::Ready(done.map(|()| len))
             }
             Poll::Pending => Poll::Pending,
@@ -123,9 +115,6 @@ impl AsyncRead for AnyTlsStream {
                     this.finished = true;
                     return Poll::Ready(Err(io::Error::other(reason)));
                 }
-                // Очередь закрылась без прощания: либо поток сняли, либо
-                // умерла вся сессия. Первое — конец, второе — обрыв, и
-                // путать их значит показывать обрыв успехом.
                 Poll::Ready(None) => {
                     this.finished = true;
                     return Poll::Ready(match this.session.death() {
@@ -147,8 +136,6 @@ impl AsyncWrite for AnyTlsStream {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
 
-        // Начатую отправку надо довести: байты для неё уже скопированы, и
-        // бросить её значит потерять их посреди потока.
         if this.sending.is_some() {
             return this.poll_sending(cx);
         }
@@ -160,15 +147,18 @@ impl AsyncWrite for AnyTlsStream {
         }
 
         let take = buf.len().min(frame::MAX_PAYLOAD);
-        let data = buf[..take].to_vec();
+        let mut data = std::mem::take(&mut this.spare);
+        data.clear();
+        data.extend_from_slice(&buf[..take]);
         let session = Arc::clone(&this.session);
         let id = this.id;
         this.sending = Some((
             Box::pin(async move {
-                session
+                let done = session
                     .write_frame(frame::CMD_PSH, id, &data)
                     .await
-                    .map_err(io::Error::from)
+                    .map_err(io::Error::from);
+                (done, data)
             }),
             take,
         ));
@@ -176,14 +166,10 @@ impl AsyncWrite for AnyTlsStream {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Каждая запись уходит из сессии со сбросом — иначе схема дополнения
-        // не значила бы ничего. Сбрасывать нечего, кроме начатой отправки.
         self.get_mut().poll_sending(cx).map_ok(|_| ())
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // `cmdFIN` здесь не шлётся нарочно: он закрывает поток в обе стороны,
-        // и ответ сервера пришёл бы уже некуда (см. документ модуля).
         self.get_mut().poll_sending(cx).map_ok(|_| ())
     }
 }
@@ -249,8 +235,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_from_the_server_comes_out_as_an_error() {
-        // Иначе «сервер не смог соединиться» выглядело бы пустым ответом, и
-        // браузер показал бы пустую страницу вместо ошибки.
         let (sender, mut stream) = detached();
         sender
             .send(Msg::Failed("connection refused".into()))

@@ -15,48 +15,25 @@ workspace = true
 penguin-core.workspace = true
 penguin-config.workspace = true
 penguin-ipc.workspace = true
-# Автозапуск интерфейса — запись в ветку текущего пользователя: делает её
-# сам интерфейс, демону она не нужна и прав на неё у него нет.
+# Автозапуск окна пишет в ветку пользователя; у службы прав на неё нет.
 penguin-platform.workspace = true
-# Кит подключён submodule'ом в vendor/rust-ui-kit; пакет `rust-ui-kit`,
-# библиотека `uikit` — оба имени заданы китом и не меняются.
-#
-# `tray` — значок в лотке: в умолчания кита фича не входит, потому что тянет
-# `tray-icon`, а на Linux ещё и `gtk`. Клиенту она нужна: окно, спрятанное в
-# лоток, — это то, чем программа остаётся после входа в систему. Собирать её на
-# Linux нужно с `libgtk-3-dev`; appindicator грузится уже на запуске.
+# Пакет `rust-ui-kit`, библиотека `uikit`. `tray` на Linux требует libgtk-3-dev.
 uikit = { workspace = true, features = ["tray"] }
-# `iced` берётся напрямую только для того, что кит не переэкспортирует
-# (билдер `iced::application`, `Task`, `Subscription`). Версия — общая с китом.
-# В workspace `iced` подключён с `default-features = false` (так его просит
-# кит), поэтому набор умолчаний приходится перечислить руками. Здесь он повторён
-# целиком, **кроме `tiny-skia`**: это программный рендерер, и стоит фичам одного
-# крейта в графе его включить, как унификация фич Cargo вернёт его в бинарник
-# рядом с `wgpu`. Он рисует окно частями по «повреждённым» областям и оставляет
-# на экране прошлый кадр прямоугольниками вокруг того, что изменилось, — те
-# самые тени и затемнения, которые видно при движении курсора. Поэтому набор
-# фич у всех потребителей кита один и тот же: умолчания `iced` без `tiny-skia`.
-#
-# `crisp`, `web-colors`, `linux-theme-detection`, `x11`, `wayland` — из
-# умолчаний; без `x11`/`wayland` на Linux нет оконного бэкенда и окно не
-# открывается. `tokio` — исполнитель футур, `image` — виджет `Thumbnail` кита,
-# `advanced` — re-export модулей `iced_core`. `fira-sans` намеренно не включён:
-# он подменяет шрифт по умолчанию своим, а системный (Segoe UI на Windows) для
-# окна программы уместнее.
+# Без `tiny-skia`: в графе он оставляет прошлый кадр прямоугольниками. `crisp` и
+# `web-colors` меняют рендер, `image` нужна `window::icon::from_file_data`,
+# `tokio` — исполнитель (на пуле `tokio::time` паникует). `advanced` и
+# `thread-pool` приносит кит.
 iced = { workspace = true, features = [
     "wgpu",
     "crisp",
     "web-colors",
-    "thread-pool",
-    "linux-theme-detection",
     "x11",
     "wayland",
     "tokio",
     "image",
-    "advanced",
 ] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 serde_json.workspace = true
 tracing.workspace = true
-# Разбор подсетей в правилах: `10.0.0.0/8` проверяется до сохранения.
+# Разбор подсетей в правилах до сохранения.
 ipnet.workspace = true

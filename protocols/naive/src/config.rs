@@ -1,8 +1,6 @@
 //! Параметры: адрес сервера, имя и пароль, TLS.
 //!
-//! TLS здесь не флаг — он обязателен всегда. Смысл протокола в том, что снаружи соединение неотличимо от
-//! обычного HTTPS до веб-сервера; разговор в открытую эту маскировку снимает
-//! целиком, и включать такой режим незачем.
+//! TLS обязателен всегда: маскировка под HTTPS.
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
@@ -12,8 +10,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{NaiveError, NaiveResult};
 
 /// Настройки подключения к серверу NaiveProxy.
-///
-/// `Debug` реализован вручную ниже — производный вывел бы пароль в журнал.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NaiveConfig {
@@ -24,9 +20,7 @@ pub struct NaiveConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
 
-    /// Пароль.
-    ///
-    /// В `Debug` не попадает: вывод пишется вручную ниже.
+    /// Пароль (в `Debug` скрыт).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 
@@ -43,8 +37,6 @@ impl NaiveConfig {
             .parse()
             .map_err(|e| NaiveError::config(format!("адрес сервера `{raw}`: {e}")))?;
 
-        // Диапазон портов — это смена порта на ходу, а у CONNECT поверх
-        // HTTP/2 и HTTP/3 её нет: сервер здесь один и слушает один порт.
         if endpoint.ports.is_hopping() {
             return Err(NaiveError::config(
                 "naive не умеет смену порта: укажите один порт",
@@ -59,10 +51,7 @@ impl NaiveConfig {
         Some((username, self.password.as_deref().unwrap_or_default()))
     }
 
-    /// Имя, которое подставляется в TLS.
-    ///
-    /// Явно заданное `sni` сильнее: сервер за подменённым адресом всё равно
-    /// ждёт своё имя, и без этого сертификат не сойдётся.
+    /// Имя для TLS; явно заданное `sni` сильнее адреса.
     pub fn server_name(&self) -> NaiveResult<String> {
         if let Some(sni) = &self.tls.sni
             && !sni.is_empty()
@@ -71,7 +60,6 @@ impl NaiveConfig {
         }
         Ok(match self.endpoint()?.0 {
             Address::Domain(domain) => domain,
-            // Без скобок и для IPv6: rustls ждёт сам адрес.
             Address::Ip(ip) => ip.to_string(),
         })
     }
@@ -93,8 +81,6 @@ impl NaiveConfig {
     }
 }
 
-// Пароль не должен попасть в журнал ни целиком, ни частями: строка «первые
-// четыре символа» — это уже утечка, если паролей у пользователя два-три.
 impl std::fmt::Debug for NaiveConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NaiveConfig")
@@ -131,7 +117,6 @@ mod tests {
 
     #[test]
     fn refuses_a_port_range() {
-        // У CONNECT поверх HTTP/2 и HTTP/3 нет смены порта — сервер один.
         assert!(config("example.com:20000-30000").endpoint().is_err());
     }
 

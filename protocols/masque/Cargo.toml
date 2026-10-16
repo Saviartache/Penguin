@@ -12,21 +12,19 @@ description = "MASQUE: CONNECT-UDP поверх HTTP/3 (RFC 9298)"
 workspace = true
 
 [dependencies]
-# Протокол зависит только от контракта, общих типов и общего транспорта.
 penguin-core.workspace = true
 penguin-proto.workspace = true
-# `quic` — HTTP/3 с датаграммами и соединение QUIC через `Dialer`.
+# HTTP/3 с датаграммами.
 penguin-transport = { workspace = true, features = ["quic"] }
 
-# Проверка адреса прокси как `:authority`.
+# Проверка `:authority`.
 http.workspace = true
 
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 async-trait.workspace = true
 bytes.workspace = true
 serde.workspace = true
-# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
-# разбирает их только этот крейт.
+# Параметры приходят от `penguin-config` непрозрачным JSON.
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

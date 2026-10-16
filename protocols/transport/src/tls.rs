@@ -1,31 +1,8 @@
-//! TLS: SNI, ALPN, проверка сертификата, закрепление отпечатка, режим без
-//! проверки.
+//! TLS: SNI, ALPN, проверка сертификата, закрепление отпечатка, режим без проверки.
 //!
-//! Пять способов решить, свой ли сервер на том конце, — по убыванию доверия:
-//!
-//! | Настройка | Как проверяется | Когда уместно |
-//! |---|---|---|
-//! | ничего | хранилищем сертификатов системы | обычный сервер с настоящим сертификатом |
-//! | `ca` | своим корневым сертификатом | своя инфраструктура |
-//! | `pin_sha256` | отпечатком листового сертификата | самоподписанный сертификат |
-//! | `pin_chain_sha256` | отпечатком всей цепочки | то же, но так считает Juicity |
-//! | `insecure` | никак | отладка, и только |
-//!
-//! `insecure` снимает единственную защиту от подмены сервера: с ним любой,
-//! кто перехватил трафик, становится «сервером» — и читает всё, что в него
-//! уходит. Он остаётся в настройках, потому что без него не отладить свой
-//! сервер, — но интерфейс обязан говорить о нём вслух (`AGENTS.md` §5.3), а
-//! журнал предупреждает при каждом подключении.
-//!
-//! Закрепление отпечатка — разумная середина: цепочка не строится, но сервер
-//! обязан предъявить ровно тот сертификат, что назван в настройках.
-//!
-//! # Почему это здесь
-//!
-//! Половине протоколов дерева нужен ровно этот набор полей и ровно эта
-//! таблица доверия. Написанная в каждом крейте заново, она означала бы, что
-//! `insecure` в одном протоколе выключает проверку целиком, а в другом —
-//! только цепочку.
+//! Проверка по убыванию доверия: системное хранилище, `ca`, `pin_sha256`
+//! (лист), `pin_chain_sha256` (вся цепочка, как у Juicity), `insecure` (только
+//! отладка; интерфейс обязан о нём предупреждать, `AGENTS.md` §5.3).
 
 use std::sync::Arc;
 
@@ -33,6 +10,7 @@ use penguin_core::address::Address;
 use ring::digest;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, IpAddr as PkiIpAddr, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use rustls_platform_verifier::BuilderVerifierExt;
@@ -49,12 +27,7 @@ pub const ALPN_H2: &[u8] = b"h2";
 /// HTTP/3 в ALPN. Его объявляют Hysteria 2 и остальные поверх QUIC.
 pub const ALPN_H3: &[u8] = b"h3";
 
-/// Настройки TLS, общие для всех протоколов, которые им пользуются.
-///
-/// Встраивается в конфигурацию протокола через `#[serde(flatten)]` или
-/// отдельным полем `tls` — как протоколу привычнее; набор полей от этого не
-/// меняется, и одинаковые имена в файле настроек — это тоже часть договора с
-/// человеком, который его правит.
+/// Настройки TLS, общие для протоколов (`#[serde(flatten)]` или поле `tls`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -62,18 +35,11 @@ pub struct TlsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sni: Option<String>,
 
-    /// Список ALPN. Пусто — берётся тот, что протокол считает своим.
-    ///
-    /// Трогать его почти никогда не нужно, и это тот случай, когда пустое
-    /// значение содержательно: у каждого протокола есть ALPN, под который он
-    /// маскируется, и подставлять его должен протокол, а не человек.
+    /// Список ALPN. Пусто — ALPN протокола по умолчанию.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alpn: Vec<String>,
 
-    /// Не проверять сертификат.
-    ///
-    /// Снимает единственную защиту от подмены сервера. Держится отдельным
-    /// полем именно затем, чтобы интерфейс мог сказать об этом вслух.
+    /// Не проверять сертификат: снимает защиту от подмены сервера.
     #[serde(default)]
     pub insecure: bool,
 
@@ -81,17 +47,8 @@ pub struct TlsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "pinSHA256")]
     pub pin_sha256: Option<String>,
 
-    /// Отпечаток SHA-256 всей цепочки сертификатов.
-    ///
-    /// Не то же, что [`TlsConfig::pin_sha256`]: там отпечаток одного листового
-    /// сертификата, здесь — свёртка по всей цепочке, какой её прислал сервер.
-    /// Считается так: отпечаток первого сертификата, потом для каждого
-    /// следующего `SHA-256(предыдущая свёртка + отпечаток следующего)`.
-    ///
-    /// Способ придуман Juicity, и других его пользователей нет. Поле лежит
-    /// здесь, а не у него, потому что таблица доверия в проекте одна: способ,
-    /// заведённый в крейте протокола, означал бы, что `insecure` в одном
-    /// месте выключает проверку целиком, а в другом — только цепочку.
+    /// Свёртка SHA-256 всей цепочки: отпечаток первого, далее
+    /// `SHA-256(свёртка + отпечаток следующего)` (способ Juicity).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -106,9 +63,6 @@ pub struct TlsConfig {
 
 impl TlsConfig {
     /// Проверяет то, что видно без сети.
-    ///
-    /// Зовётся из `validate` протокола: ошибку в поле форма обязана показать
-    /// сразу, а не через минуту неудачного подключения.
     pub fn validate(&self) -> TransportResult<()> {
         if let Some(pin) = &self.pin_sha256 {
             parse_fingerprint(pin)?;
@@ -139,11 +93,7 @@ impl TlsConfig {
     }
 }
 
-/// Готовый к работе клиент TLS: настройки собраны, имя сервера разобрано.
-///
-/// Собирается один раз при подъёме направления, а не на каждый поток:
-/// разбор PEM и построение хранилища корней стоят заметно дороже самого
-/// рукопожатия.
+/// Готовый клиент TLS; собирается один раз на направление (разбор PEM дорог).
 #[derive(Clone)]
 pub struct TlsClient {
     connector: tokio_rustls::TlsConnector,
@@ -159,12 +109,7 @@ impl std::fmt::Debug for TlsClient {
 }
 
 impl TlsClient {
-    /// Собирает клиента под конкретный сервер.
-    ///
-    /// `default_alpn` — то, что протокол объявляет, когда в настройках ALPN не
-    /// задан. Пустой список означает «не объявлять ALPN вовсе»; так делают
-    /// протоколы, которым он не нужен, но пустым его лучше не оставлять:
-    /// клиент без ALPN отличается от браузера первым же пакетом.
+    /// Собирает клиента; `default_alpn` — ALPN, если в настройках не задан.
     pub fn new(tls: &TlsConfig, host: &Address, default_alpn: &[&[u8]]) -> TransportResult<Self> {
         let config = client_config(tls, default_alpn)?;
         Ok(Self {
@@ -178,17 +123,12 @@ impl TlsClient {
         &self.name
     }
 
-    /// Оборачивает соединение в TLS.
-    ///
-    /// Срок здесь обязателен: сервер, принявший соединение и замолчавший на
-    /// рукопожатии, иначе держал бы поток приложения вечно.
+    /// Оборачивает соединение в TLS со сроком на рукопожатие.
     pub async fn connect<S>(&self, io: S) -> TransportResult<tokio_rustls::client::TlsStream<S>>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
         deadline::handshake("рукопожатие TLS", async {
-            // Ошибка сокета переводится сразу: срок обязан говорить на том же
-            // языке, что и всё остальное здесь.
             self.connector
                 .connect(self.name.clone(), io)
                 .await
@@ -203,9 +143,7 @@ pub fn client_config(
     tls: &TlsConfig,
     default_alpn: &[&[u8]],
 ) -> TransportResult<rustls::ClientConfig> {
-    // Провайдер задаётся явно, а не берётся из глобального умолчания
-    // процесса: умолчание может выставить кто угодно из соседних крейтов, и
-    // отлаживать такое потом невозможно.
+    // Явный провайдер, не глобальное умолчание процесса
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
     let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
@@ -259,11 +197,7 @@ pub fn client_config(
 
 /// Имя, которое уйдёт в SNI.
 ///
-/// Порядок такой: явный `sni`, потом домен сервера, потом его адрес. Последний
-/// случай — сервер, заданный числовым адресом без SNI: имени взять неоткуда, и
-/// сертификат придётся проверять по адресу. Работает это только с
-/// сертификатом, выписанным на адрес, — редкость, — поэтому в журнал уходит
-/// предупреждение: иначе ошибка проверки выглядит необъяснимой.
+/// Порядок: `sni`, домен сервера, адрес (с предупреждением: сертификат на адрес редок).
 pub fn server_name(tls: &TlsConfig, host: &Address) -> TransportResult<ServerName<'static>> {
     if let Some(sni) = tls.sni.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         return ServerName::try_from(sni.to_owned())
@@ -288,10 +222,7 @@ pub fn server_name(tls: &TlsConfig, host: &Address) -> TransportResult<ServerNam
 
 /// Разбирает отпечаток: `AB:CD:...`, сплошной ряд или base64.
 ///
-/// Двоеточия принимаются, потому что именно так отпечаток выводят `openssl` и
-/// браузеры, — а человек его оттуда и копирует. Base64 принимается потому, что
-/// в этом виде отпечаток цепочки печатает Juicity, и требовать от человека
-/// перевода в другую запись значит требовать сделать это без ошибки.
+/// Hex с двоеточиями (`openssl`, браузеры) или base64 (так печатает Juicity).
 fn parse_fingerprint(raw: &str) -> TransportResult<[u8; 32]> {
     if let Some(bytes) = from_hex(raw) {
         return Ok(bytes);
@@ -310,9 +241,7 @@ fn parse_fingerprint(raw: &str) -> TransportResult<[u8; 32]> {
 
 /// Отпечаток шестнадцатеричным рядом. `None` — запись не эта.
 ///
-/// Разделители выбрасываются все, включая `-`: в шестнадцатеричной записи его
-/// ставят вместо двоеточия. В base64 он значащий, поэтому та разбирается из
-/// исходной строки, а не из очищенной.
+/// Разделители `:`, пробел, `-` отбрасываются; base64 разбирается из исходной строки.
 fn from_hex(raw: &str) -> Option<[u8; 32]> {
     let cleaned: String = raw
         .chars()
@@ -335,8 +264,7 @@ fn load_roots(path: &str) -> TransportResult<Vec<CertificateDer<'static>>> {
     let pem = std::fs::read(path).map_err(|e| {
         TransportError::config(format!("не читается корневой сертификат `{path}`: {e}"))
     })?;
-    let mut cursor = std::io::Cursor::new(pem);
-    let roots: Result<Vec<_>, _> = rustls_pemfile::certs(&mut cursor).collect();
+    let roots: Result<Vec<_>, _> = CertificateDer::pem_slice_iter(&pem).collect();
     let roots = roots
         .map_err(|e| TransportError::config(format!("`{path}` не разбирается как PEM: {e}")))?;
 
@@ -348,11 +276,7 @@ fn load_roots(path: &str) -> TransportResult<Vec<CertificateDer<'static>>> {
     Ok(roots)
 }
 
-/// Проверка отпечатком листового сертификата.
-///
-/// Цепочка не строится: смысл закрепления как раз в том, что удостоверяющий
-/// центр не нужен. Подпись рукопожатия при этом проверяется как обычно —
-/// иначе предъявить чужой сертификат смог бы кто угодно, не владея ключом.
+/// Проверка отпечатком листа; цепочка не строится, подпись рукопожатия проверяется.
 #[derive(Debug)]
 struct PinnedCertificate {
     expected: [u8; 32],
@@ -375,8 +299,6 @@ impl ServerCertVerifier for PinnedCertificate {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         let actual = digest::digest(&digest::SHA256, end_entity.as_ref());
-        // Сравнение обычное, а не постоянного времени: отпечаток — не секрет,
-        // он лежит в конфигурации открытым текстом.
         if actual.as_ref() == self.expected {
             Ok(ServerCertVerified::assertion())
         } else {
@@ -424,11 +346,6 @@ impl ServerCertVerifier for PinnedCertificate {
 }
 
 /// Проверка отпечатком всей цепочки, как её считает Juicity.
-///
-/// От [`PinnedCertificate`] отличается тем, что закрепляет не один сертификат,
-/// а весь ряд, который прислал сервер: замена любого промежуточного меняет
-/// свёртку. Дороже для того, кто перевыпускает сертификаты, и строже к тому,
-/// кто их подменяет.
 #[derive(Debug)]
 struct PinnedChain {
     expected: [u8; 32],
@@ -441,9 +358,7 @@ impl PinnedChain {
     }
 }
 
-/// Свёртка цепочки: отпечаток первого, дальше отпечаток пары со следующим.
-///
-/// `None` — цепочка пуста. Считать такую нечем, и принимать её тем более.
+/// Свёртка цепочки; `None` — цепочка пуста.
 fn chain_hash<'a>(chain: impl Iterator<Item = &'a [u8]>) -> Option<[u8; 32]> {
     let mut folded: Option<[u8; 32]> = None;
     for cert in chain {
@@ -480,8 +395,6 @@ impl ServerCertVerifier for PinnedChain {
             rustls::Error::General("сервер не прислал ни одного сертификата".into())
         })?;
 
-        // Сравнение обычное, а не постоянного времени: отпечаток — не секрет,
-        // он лежит в конфигурации открытым текстом.
         if actual == self.expected {
             Ok(ServerCertVerified::assertion())
         } else {
@@ -602,8 +515,6 @@ mod tests {
 
     #[test]
     fn the_protocol_picks_the_alpn_when_the_config_is_silent() {
-        // ALPN — часть маскировки: сервер, объявивший не то, виден первым же
-        // пакетом рукопожатия. Значит, умолчание задаёт протокол, а не человек.
         let config = client_config(&TlsConfig::default(), &[ALPN_H3]).expect("собирается");
         assert_eq!(config.alpn_protocols, vec![b"h3".to_vec()]);
     }
@@ -660,8 +571,6 @@ mod tests {
 
     #[test]
     fn a_numeric_server_without_sni_still_works() {
-        // Не ошибка: сертификат, выписанный на адрес, бывает. Предупреждение
-        // в журнале есть, отказа нет.
         let host = Address::Ip("203.0.113.5".parse().unwrap());
         let name = server_name(&TlsConfig::default(), &host).expect("разбирается");
         assert!(matches!(name, ServerName::IpAddress(_)));
@@ -686,14 +595,11 @@ mod tests {
     fn rejects_malformed_fingerprint() {
         assert!(parse_fingerprint("слишком коротко").is_err());
         assert!(parse_fingerprint(&"z".repeat(64)).is_err());
-        // 63 цифры — на одну меньше, чем нужно.
         assert!(parse_fingerprint(&"a".repeat(63)).is_err());
     }
 
     #[test]
     fn a_fingerprint_in_base64_is_understood_too() {
-        // В этой записи отпечаток цепочки печатает Juicity: требовать от
-        // человека перевода в другую значит требовать сделать это без ошибки.
         let bytes = [0x9a_u8; 32];
         let hex_form = "9a".repeat(32);
         for encoded in [
@@ -710,8 +616,6 @@ mod tests {
 
     #[test]
     fn a_chain_of_one_hashes_like_a_single_certificate() {
-        // Свёртка начинается с отпечатка первого сертификата: цепочка из
-        // одного и лист совпадают, и это не совпадение, а определение.
         let cert = b"cert";
         let folded = chain_hash(std::iter::once(cert.as_slice())).expect("считается");
         let plain: [u8; 32] = ring::digest::digest(&ring::digest::SHA256, cert)
@@ -723,8 +627,6 @@ mod tests {
 
     #[test]
     fn the_order_of_the_chain_is_part_of_the_fingerprint() {
-        // Свёртка складывается по порядку: цепочка, переставленная местами, —
-        // это другая цепочка, и принять её значит не проверить ничего.
         let first = b"one".as_slice();
         let second = b"two".as_slice();
         let straight = chain_hash([first, second].into_iter()).expect("считается");
@@ -743,7 +645,6 @@ mod tests {
 
     #[test]
     fn two_fingerprints_at_once_are_refused() {
-        // Проверен будет один, и угадывать какой человеку не с чего.
         let tls = TlsConfig {
             pin_sha256: Some("ab".repeat(32)),
             pin_chain_sha256: Some("cd".repeat(32)),
@@ -764,9 +665,6 @@ mod tests {
 
     #[test]
     fn a_promise_of_safety_that_is_not_kept_is_refused() {
-        // `insecure` отменяет проверку целиком, включая отпечаток. Настройка,
-        // где стоят оба, обещает защиту, которой нет, — и молчать об этом
-        // хуже, чем отказать.
         let tls = TlsConfig {
             insecure: true,
             pin_sha256: Some("ab".repeat(32)),
@@ -777,8 +675,6 @@ mod tests {
 
     #[test]
     fn an_empty_sni_is_a_mistake_not_a_default() {
-        // Пустая строка в поле означает, что человек его открыл и не заполнил;
-        // молча подставить домен значит скрыть это от него.
         let tls = TlsConfig {
             sni: Some("   ".to_owned()),
             ..TlsConfig::default()

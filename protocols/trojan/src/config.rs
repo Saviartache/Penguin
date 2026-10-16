@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{TrojanError, TrojanResult};
 
 /// Настройки подключения к серверу Trojan.
-///
-/// `Debug` реализован вручную ниже — производный вывел бы пароль в журнал.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrojanConfig {
@@ -36,9 +34,7 @@ pub struct TrojanConfig {
 
     /// `:authority` для них же.
     ///
-    /// Отдельно от адреса: у сервера за общим входом это имя решает, кому
-    /// достанется соединение, и совпадать с адресом оно не обязано. Не задан —
-    /// берётся имя из TLS.
+    /// Отдельно от адреса; не задан — имя из TLS.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
 
@@ -60,8 +56,6 @@ impl TrojanConfig {
             .parse()
             .map_err(|e| TrojanError::config(format!("адрес сервера `{raw}`: {e}")))?;
 
-        // Диапазон портов — это смена порта на ходу, и у Trojan её нет:
-        // соединение TLS открывается на каждый поток заново.
         if endpoint.ports.is_hopping() {
             return Err(TrojanError::config(
                 "Trojan не умеет смену порта: укажите один порт",
@@ -75,10 +69,7 @@ impl TrojanConfig {
         self.path.as_deref().map_or("", str::trim)
     }
 
-    /// `:authority` запросов `grpc` и `xhttp`.
-    ///
-    /// Порядок: явный `host`, потом имя из TLS, потом адрес сервера — как у
-    /// Xray. Пустым он не бывает.
+    /// `:authority` для `grpc` и `xhttp`: явный `host`, имя из TLS, адрес сервера (как у Xray).
     pub fn host(&self) -> TrojanResult<String> {
         if let Some(host) = self
             .host
@@ -122,8 +113,7 @@ impl TrojanConfig {
     }
 }
 
-// Пароль не должен попасть в журнал ни целиком, ни частями: строка «первые
-// четыре символа» — это уже утечка, если паролей у пользователя два-три.
+// Пароль в журнал не попадает ни целиком, ни частями (AGENTS §5.2)
 impl std::fmt::Debug for TrojanConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrojanConfig")
@@ -167,8 +157,6 @@ mod tests {
 
     #[test]
     fn a_password_is_required() {
-        // Сервер отличает своих только по нему, и профиль без пароля — это
-        // профиль, который молча уйдёт на чужой сайт.
         let config = TrojanConfig {
             password: String::new(),
             ..config()
@@ -187,7 +175,6 @@ mod tests {
 
     #[test]
     fn http_settings_belong_to_http_transports() {
-        // Путь, который никуда не уйдёт, — это настройка, которая молчит.
         let config = TrojanConfig {
             path: Some("svc".to_owned()),
             ..config()
@@ -205,8 +192,6 @@ mod tests {
 
     #[test]
     fn websocket_is_gone() {
-        // HTTP/1.1 не ходит никто: старый профиль с `ws` — ошибка, а не
-        // молчаливый откат на голый поток.
         let params = json!({ "server": "a.io:443", "password": "x", "transport": "ws" });
         assert!(serde_json::from_value::<TrojanConfig>(params).is_err());
     }

@@ -15,8 +15,7 @@ pub fn status(engine: &Arc<Engine>) -> Response {
     Response::Status(Box::new(StatusReport {
         state: engine.state(),
         traffic,
-        // Мгновенная скорость приходит событиями: считать её здесь означало бы
-        // делить на время, прошедшее с непонятно какого момента.
+        // Скорость приходит событиями
         rate: penguin_core::stats::Throughput::default(),
         connections: metrics.live_connections(),
         rules: engine.router().rule_count(),
@@ -40,23 +39,14 @@ pub async fn connect(engine: &Arc<Engine>, profile: Option<ProfileId>) -> Respon
 pub async fn disconnect(engine: &Arc<Engine>) -> Response {
     match engine.disconnect().await {
         Ok(()) => Response::Ok,
-        // Неудачный откат — самое серьёзное, что может случиться: в системе
-        // остались маршруты или правила брандмауэра, и сеть у пользователя
-        // может не работать. Такое обязано дойти до него как требующее
-        // внимания.
+        // Неудачный откат оставляет маршруты и правила: пользователь должен узнать
         Err(err) => Response::error(err, true),
     }
 }
 
 /// Опускает тоннель и останавливает службу.
 ///
-/// Порядок именно такой: сначала тоннель, потом отмена. Отменить первым
-/// значило бы отдать ответ окну раньше, чем сняты TUN-адаптер и маршруты, —
-/// окно закрылось бы, а сеть у пользователя ещё несколько секунд ходила бы
-/// через нас.
-///
-/// Ответ до остановки успевает уйти: канал управления дописывает его тому,
-/// кто спросил, и только потом закрывает соединение.
+/// Сначала тоннель, потом отмена: ответ окну уходит после снятия TUN и маршрутов.
 pub async fn shutdown(engine: &Arc<Engine>, cancel: &CancellationToken) -> Response {
     let response = disconnect(engine).await;
     cancel.cancel();
@@ -89,7 +79,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_lowers_the_tunnel_before_it_stops_the_service() {
-        // Отмена раньше отката означала бы закрытое окно и живой TUN.
+        // Отмена раньше отката оставила бы живой TUN
         let cancel = CancellationToken::new();
         assert!(!shutdown(&engine(), &cancel).await.is_error());
         assert!(cancel.is_cancelled());

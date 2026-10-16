@@ -1,17 +1,5 @@
-//! Три отпечатка браузера и общая сборка `ClientHello` вокруг них.
-//!
-//! ```text
-//!  chrome    Chrome 120, BoringSSL: GREASE, перемешивание, padding
-//!  firefox   Firefox 120, NSS: ни GREASE, ни перемешивания, ни padding
-//!  safari    Safari 16.0, BoringSSL: GREASE и padding есть, перемешивания нет
-//! ```
-//!
-//! Каждый модуль отдаёт список шифров, список расширений (уже закодированных
-//! в байты, см. [`crate::extension`]) и пары ключей для `key_share` —
-//! настоящие, а не для вида (см. [`crate::key_exchange`]). Собирает их в одно
-//! сообщение `client_hello::assemble` (внутренняя сборка, не публичный API),
-//! зная только два флага на отпечаток: перемешивать ли порядок и добавлять
-//! ли `padding`.
+//! Отпечатки браузера: chrome (GREASE, перемешивание, padding), firefox (ничего
+//! из этого), safari (GREASE и padding, без перемешивания).
 
 pub mod chrome;
 pub mod firefox;
@@ -20,23 +8,15 @@ pub mod safari;
 use std::str::FromStr;
 
 use penguin_core::address::Address;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::client_hello;
 use crate::error::{UtlsError, UtlsResult};
 use crate::key_exchange::KeyExchange;
 use crate::record;
+use crate::rng::{Rng, SystemRng};
 
-/// Отпечаток браузера, по которому собирается `ClientHello`.
-///
-/// Версии зафиксированы намеренно (`AGENTS.md`, задача фазы 19): отпечаток
-/// Chrome 120 и отпечаток Chrome 131 — разные наборы байт, и «просто chrome»
-/// не значит ничего. Подробности и сверка — в документе каждого модуля.
-///
-/// `Serialize`/`Deserialize` даны сразу, а не только `FromStr`: отпечаток —
-/// поле настроек не только у Reality (`penguin-vless`), а у любого протокола,
-/// которому однажды понадобится этот крейт (см. `lib.rs`).
+/// Отпечаток браузера; версии зафиксированы намеренно.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Fingerprint {
@@ -49,36 +29,27 @@ pub enum Fingerprint {
 }
 
 impl Fingerprint {
-    /// Перемешивает ли отпечаток порядок расширений на каждом соединении.
     fn shuffles_extensions(self) -> bool {
         matches!(self, Self::Chrome)
     }
 
-    /// Добавляет ли отпечаток `padding` по правилу BoringSSL.
     fn uses_padding(self) -> bool {
         matches!(self, Self::Chrome | Self::Safari)
     }
 
-    /// Собирает `ClientHello` со случайным содержимым GREASE, `key_share` и
-    /// клиентского случайного значения.
-    ///
-    /// `session_id` не выдумывается здесь: он приходит снаружи целиком —
-    /// местом для настоящей случайности (обычный клиент) или для
-    /// зашифрованных данных опознания Reality (следующий шаг фазы 19).
-    /// Смотрите [`crate::random_session_id`] для первого случая.
+    /// Собирает `ClientHello`; `session_id` приходит снаружи (см. [`crate::random_session_id`]).
     pub fn build(
         self,
         server_name: &Address,
         session_id: [u8; 32],
     ) -> UtlsResult<(ClientHello, Vec<KeyExchange>)> {
-        self.build_with_rng(&mut rand::thread_rng(), server_name, session_id)
+        self.build_with_rng(&mut SystemRng, server_name, session_id)
     }
 
-    /// То же самое, но с генератором случайности, который можно
-    /// зафиксировать в тесте.
+    /// То же, но с заданным генератором (для тестов).
     pub fn build_with_rng(
         self,
-        rng: &mut impl RngCore,
+        rng: &mut impl Rng,
         server_name: &Address,
         session_id: [u8; 32],
     ) -> UtlsResult<(ClientHello, Vec<KeyExchange>)> {
@@ -169,11 +140,6 @@ pub struct ClientHello {
 
 impl std::fmt::Debug for ClientHello {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `session_id` у Reality несёт зашифрованные данные опознания — не
-        // секрет в строгом смысле (шифрует его сам Reality, не этот крейт),
-        // но и печатать байты, которые выглядят как ключ, незачем (AGENTS.md
-        // §5.2 — на этот случай лучше перестраховаться, чем разбираться
-        // постфактум, что именно утекло в журнал).
         f.debug_struct("ClientHello")
             .field("handshake_len", &self.handshake.len())
             .finish_non_exhaustive()
@@ -181,31 +147,11 @@ impl std::fmt::Debug for ClientHello {
 }
 
 impl ClientHello {
-    /// Смещение `SessionID` в [`Self::handshake_bytes`]: 4 байта заголовка
-    /// рукопожатия (тип и трёхбайтная длина, см. [`crate::record`]) + 2 байта
-    /// `legacy_version` + 32 байта `random` + 1 байт длины `SessionID` = 39.
-    ///
-    /// Не зависит ни от отпечатка, ни от перемешивания расширений: `random` и
-    /// то, что перед ним, — фиксированная по длине голова сообщения, а
-    /// расширения идут дальше, за шифрами и методами сжатия. У uTLS то же
-    /// самое названо явным числом с тем же комментарием: `hello.Raw[39:]
-    /// // the fixed location of \`Session ID\`` (`Xray-core`,
-    /// `transport/internet/reality/reality.go`, ревизия `cd4ce97`, строка 157
-    /// в функции `UClient`).
+    /// Смещение `SessionID` в сообщении: 4 заголовок + 2 версия + 32 random + 1 длина.
+    /// Эталон: Xray-core `transport/internet/reality/reality.go`, `hello.Raw[39:]`.
     pub const SESSION_ID_OFFSET: usize = 39;
 
-    /// Заменяет `SessionID` в уже собранном сообщении на зашифрованные данные
-    /// опознания Reality.
-    ///
-    /// Существует только ради Reality: обычный клиент получает готовый
-    /// `SessionID` через [`Fingerprint::build`] и вызывать это незачем.
-    /// Reality не может сделать наоборот (передать готовые байты в `build`
-    /// сразу) — шифрование данных опознания использует в качестве
-    /// дополнительных данных (AAD) весь `ClientHello` целиком, а он неизвестен
-    /// до сборки. Поэтому порядок такой: собрать `ClientHello` с нулевым
-    /// `SessionID`, зашифровать данные опознания с этим `ClientHello` в
-    /// качестве AAD, подменить нули результатом — длина не меняется, и
-    /// `padding`, посчитанный на первом шаге, остаётся верным.
+    /// Подменяет `SessionID` готовыми данными Reality (они шифруются с AAD = весь hello).
     pub fn patch_session_id(&mut self, session_id: [u8; 32]) {
         let start = Self::SESSION_ID_OFFSET;
         self.handshake[start..start + 32].copy_from_slice(&session_id);

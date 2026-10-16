@@ -1,9 +1,4 @@
-//! Приём соединений QUIC.
-//!
-//! ```text
-//!  accept ──► QUIC + TLS ──► HTTP/3 ──┬── опознание ──► CONNECT ──► relay
-//!                                     └── чужой     ──► cover
-//! ```
+//! Приём соединений QUIC: опознанный идёт в relay, чужой - в cover.
 
 use std::sync::Arc;
 

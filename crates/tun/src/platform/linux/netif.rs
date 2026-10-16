@@ -1,8 +1,4 @@
-//! Настройка интерфейса через `ioctl`: адрес, маска, MTU, поднятие.
-//!
-//! Не через `ip`: адрес адаптера — то, без чего тоннель не работает вовсе, и
-//! зависеть здесь от разбора вывода чужой программы (которой к тому же может
-//! не быть в системе) нельзя.
+//! Настройка интерфейса через `ioctl` (не через `ip`): адрес, маска, MTU, подъём.
 
 use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -14,11 +10,7 @@ use crate::error::{TunError, TunResult};
 /// Длина имени интерфейса вместе с завершающим нулём.
 const NAME_LEN: usize = 16;
 
-/// Запрос к интерфейсу: имя и одно поле по смыслу команды.
-///
-/// Разложен байтами, а не объединением: объединение потребовало бы `unsafe`
-/// на каждое чтение поля, а нужно нам всего три раскладки — адрес, число и
-/// флаги.
+/// Запрос к интерфейсу: имя и одно поле по смыслу команды (байтами, без `union`).
 #[repr(C, align(8))]
 #[derive(Clone, Copy)]
 pub(super) struct IfReq {
@@ -27,10 +19,7 @@ pub(super) struct IfReq {
 }
 
 impl IfReq {
-    /// Пустой запрос к интерфейсу с таким именем.
-    ///
-    /// Имя длиннее пятнадцати байт система не примет; обрезать его молча
-    /// нельзя — обрезанное имя означает настройку **чужого** интерфейса.
+    /// Пустой запрос; длинное имя отвергается, а не обрезается (иначе правится чужой интерфейс).
     pub(super) fn new(name: &str) -> TunResult<Self> {
         let bytes = name.as_bytes();
         if bytes.len() >= NAME_LEN {
@@ -73,8 +62,6 @@ impl IfReq {
 
     /// Кладёт в поле данных адрес IPv4 в виде `sockaddr_in`.
     pub(super) fn with_address(mut self, address: Ipv4Addr) -> Self {
-        // Раскладка `sockaddr_in`: семейство, порт, адрес. Порт остаётся
-        // нулевым — у интерфейса его нет.
         #[allow(
             clippy::cast_possible_truncation,
             reason = "семейство адресов не выходит за пределы u16"
@@ -86,10 +73,7 @@ impl IfReq {
     }
 }
 
-/// Команды, которыми настраивается интерфейс.
-///
-/// Числа заданы в `<linux/sockios.h>` и не меняются: на них держится двоичная
-/// совместимость ядра с программами, собранными десятилетия назад.
+/// Команды `ioctl` из `<linux/sockios.h>`.
 pub(super) mod request {
     /// Создать или занять адаптер `tun`. `_IOW('T', 202, int)`.
     pub(in super::super) const TUNSETIFF: libc::c_ulong = 0x4004_54CA;
@@ -108,6 +92,7 @@ pub(super) mod request {
 /// Выполняет `ioctl` над запросом к интерфейсу.
 pub(super) fn ioctl(fd: &OwnedFd, request: libc::c_ulong, argument: &mut IfReq) -> TunResult<()> {
     #[allow(unsafe_code, reason = "настройка интерфейса через ioctl")]
+    // SAFETY: `argument` — изменяемый `IfReq` в формате `ifreq`.
     let code = unsafe { libc::ioctl(fd.as_raw_fd(), request, std::ptr::from_mut(argument)) };
 
     if code < 0 {
@@ -127,8 +112,6 @@ pub(super) fn configure(
     netmask: Ipv4Addr,
     mtu: u16,
 ) -> TunResult<()> {
-    // Настройка интерфейса идёт через сокет, а не через сам адаптер: так
-    // устроен интерфейс ядра, и никакого трафика через этот сокет не пойдёт.
     let control = socket(
         AddressFamily::Inet,
         SockType::Datagram,
@@ -153,9 +136,7 @@ pub(super) fn configure(
         &mut IfReq::new(name)?.with_number(i32::from(mtu)),
     )?;
 
-    // Флаги дописываются к уже стоящим, а не заменяют их: у адаптера есть
-    // собственные (`IFF_POINTOPOINT`, `IFF_NOARP`), и стереть их значит
-    // получить интерфейс, который система обслуживает не так.
+    // Дописываем к уже стоящим флагам (`IFF_POINTOPOINT`, `IFF_NOARP`).
     let mut flags = IfReq::new(name)?;
     ioctl(&control, request::SIOCGIFFLAGS, &mut flags)?;
 
@@ -185,7 +166,6 @@ mod tests {
 
     #[test]
     fn an_overlong_name_is_refused() {
-        // Молча обрезанное имя означает настройку чужого интерфейса.
         assert!(IfReq::new("этоименослишкомдлинное").is_err());
     }
 
@@ -197,8 +177,6 @@ mod tests {
 
     #[test]
     fn an_address_lands_where_the_kernel_reads_it() {
-        // Раскладка `sockaddr_in`: семейство в первых двух байтах, адрес — с
-        // четвёртого. Сдвиг здесь означает адаптер с чужим адресом.
         let request = IfReq::new("tun0")
             .expect("имя")
             .with_address(Ipv4Addr::new(198, 18, 0, 1));

@@ -14,23 +14,19 @@ workspace = true
 [dependencies]
 penguin-core.workspace = true
 penguin-config.workspace = true
-# `Handler` вызывается через `dyn`; без `async_trait` асинхронный метод
-# трейта не выражается в объекте.
+# `Handler` вызывается через `dyn`.
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt", "io-util", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "io-util", "net", "sync", "time", "macros"] }
 tokio-util.workspace = true
-interprocess.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_Pipes"] }
-# Дескриптор безопасности канала задаётся строкой SDDL в UTF-16.
-widestring.workspace = true
+# SDDL канала разбирается через `Win32_Security_Authorization`.
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization"] }
 
 [target.'cfg(unix)'.dependencies]
-# `fs` — ради `chown`: каталог канала управления отдаётся группе
-# администраторов, иначе окно под пользователем до службы не дотянется.
+# `fs` — chown каталога канала.
 nix = { workspace = true, features = ["user", "socket", "fs"] }

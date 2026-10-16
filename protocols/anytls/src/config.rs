@@ -7,25 +7,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AnyTlsError, AnyTlsResult};
 
-/// Как клиент представляется серверу, если в настройках не сказано иначе.
-///
-/// Поле уходит серверу вместе с настройками сессии и по смыслу — тот же
-/// `User-Agent`: сервер собирает по нему статистику совместимости. Эталон
-/// просит писать правду, и мы пишем правду. Поле в настройках есть затем,
-/// чтобы правду можно было не писать: некоторые продавцы доступа по нему
-/// ограничивают, а увидеть его может только сам сервер.
+/// Как клиент представляется серверу по умолчанию (аналог `User-Agent`).
 pub const CLIENT_NAME: &str = concat!("penguin/", env!("CARGO_PKG_VERSION"));
 
-/// Наименьший разумный срок для сроков сессий, в секундах.
-///
-/// Меньше — это не настройка, а способ закрывать сессию раньше, чем по ней
-/// успеет пройти запрос. Эталон такие значения молча заменяет на умолчание;
-/// молча подменять настройку человека мы не будем — скажем.
+/// Наименьший срок сессии, с; меньшие значения отвергаются (эталон молча подменяет).
 pub const MIN_SECS: u64 = 5;
 
 /// Настройки подключения к серверу AnyTLS.
-///
-/// `Debug` реализован вручную ниже — производный вывел бы пароль в журнал.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnyTlsConfig {
@@ -39,9 +27,7 @@ pub struct AnyTlsConfig {
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// Как представляться серверу. Не задано — [`CLIENT_NAME`].
-    ///
-    /// Пустая строка — законное значение: она означает «не представляться».
+    /// Как представляться серверу; не задано — [`CLIENT_NAME`], пусто — не представляться.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
 
@@ -53,11 +39,7 @@ pub struct AnyTlsConfig {
     #[serde(default = "half_a_minute")]
     pub idle_timeout_secs: u64,
 
-    /// Сколько простаивающих сессий держать про запас.
-    ///
-    /// Готовая сессия избавляет следующее соединение от рукопожатия TLS. Ноль
-    /// — не держать ни одной: соединения будут дороже, зато к серверу не идёт
-    /// поток, по которому нечего возить.
+    /// Сколько простаивающих сессий держать про запас (ноль — ни одной).
     #[serde(default)]
     pub min_idle_sessions: usize,
 
@@ -99,8 +81,6 @@ impl AnyTlsConfig {
             .parse()
             .map_err(|e| AnyTlsError::config(format!("адрес сервера `{raw}`: {e}")))?;
 
-        // Диапазон портов — это смена порта на ходу, и у AnyTLS её нет:
-        // сессия живёт в одном соединении TLS.
         if endpoint.ports.is_hopping() {
             return Err(AnyTlsError::config(
                 "AnyTLS не умеет смену порта: укажите один порт",
@@ -114,12 +94,7 @@ impl AnyTlsConfig {
         self.client.as_deref().unwrap_or(CLIENT_NAME)
     }
 
-    /// Что объявлять в ALPN, если человек не задал своё.
-    ///
-    /// Ничего. У Trojan ALPN — часть маскировки, потому что тот притворяется
-    /// сайтом; сервер AnyTLS ни за кого себя не выдаёт, ALPN не требует, и
-    /// объявление, которого он не ждёт, оборвало бы рукопожатие. Эталон
-    /// молчит здесь ровно так же.
+    /// ALPN по умолчанию: пусто, объявление оборвало бы рукопожатие (как у эталона).
     pub fn default_alpn(&self) -> &'static [&'static [u8]] {
         &[]
     }
@@ -159,7 +134,6 @@ impl AnyTlsConfig {
     }
 }
 
-// Пароль не должен попасть в журнал ни целиком, ни частями.
 impl std::fmt::Debug for AnyTlsConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnyTlsConfig")
@@ -222,8 +196,6 @@ mod tests {
 
     #[test]
     fn a_deadline_too_short_to_be_useful_is_refused() {
-        // Эталон такое молча заменяет на умолчание. Молчать нельзя: человек
-        // поставил число и вправе знать, что оно не действует.
         let short_timeout = AnyTlsConfig {
             idle_timeout_secs: 1,
             ..config()
@@ -242,7 +214,6 @@ mod tests {
         assert_eq!(config().client_name(), CLIENT_NAME);
         assert!(CLIENT_NAME.starts_with("penguin/"));
 
-        // Пустая строка — это «не представляться», а не «взять умолчание».
         let config = AnyTlsConfig {
             client: Some(String::new()),
             ..config()
@@ -252,8 +223,6 @@ mod tests {
 
     #[test]
     fn nothing_is_announced_in_alpn() {
-        // Сервер AnyTLS ни за кого себя не выдаёт и ALPN не ждёт: объявление
-        // оборвало бы рукопожатие.
         assert!(config().default_alpn().is_empty());
     }
 
@@ -271,7 +240,6 @@ mod tests {
 
     #[test]
     fn an_unknown_field_is_refused() {
-        // Опечатка в имени поля не должна молча превращаться в умолчание.
         let params = json!({ "server": "a.io:443", "password": "x", "passwort": "y" });
         assert!(serde_json::from_value::<AnyTlsConfig>(params).is_err());
     }

@@ -81,8 +81,6 @@ pub async fn authenticate(
         .await
         .map_err(|e| Hysteria2Error::Auth(format!("запрос не отправлен: {e}")))?;
 
-    // Тела у запроса нет, но поток закрыть надо: пока он открыт, сервер ждёт
-    // продолжения и ответа не шлёт.
     stream
         .finish()
         .map_err(|e| Hysteria2Error::Auth(format!("не удалось закрыть поток запроса: {e}")))?;
@@ -94,9 +92,6 @@ pub async fn authenticate(
 
     let status = response.status();
     if status != STATUS_AUTH_OK {
-        // Сюда попадает и настоящий веб-сервер, случайно оказавшийся по
-        // этому адресу, и наш сервер с неверным паролем. Для пользователя
-        // разница невелика — в обоих случаях повторять бессмысленно.
         return Err(Hysteria2Error::AuthRejected { status });
     }
 
@@ -155,8 +150,6 @@ mod tests {
 
     #[test]
     fn success_code_is_233_not_200() {
-        // 200 вернёт любой веб-сервер; принять его за свой — значит слить
-        // трафик неизвестно куда.
         assert_eq!(STATUS_AUTH_OK, 233);
         assert_ne!(STATUS_AUTH_OK, 200);
     }
@@ -183,7 +176,6 @@ mod tests {
         assert_eq!(get(":scheme"), Some("https"));
         assert_eq!(get(":authority"), Some(AUTH_HOST));
         assert_eq!(get(":path"), Some("/auth"));
-        // В HTTP/3 имена полей строчные (RFC 9114, §4.2).
         assert_eq!(get("hysteria-auth"), Some("hunter2"));
         assert_eq!(get("hysteria-cc-rx"), Some("12500000"));
 

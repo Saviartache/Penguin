@@ -1,120 +1,85 @@
 //! Аргументы: кем программе быть в этот раз.
 //!
-//! Файл один, ролей три, и выбирает роль он сам:
-//!
 //! | Запуск | Роль |
 //! |---|---|
 //! | двойной щелчок, `penguin` | окно |
-//! | `penguin --tray` | окно, свёрнутое в значок лотка |
+//! | `penguin --tray` | окно, свёрнутое в лоток |
 //! | `penguin doctor`, `penguin socks`, … | терминал |
 //! | `penguin service …` | управление службой |
 //! | `penguin --service` | служба, запущенная диспетчером |
 //! | `penguin --foreground` | служба на переднем плане, для отладки |
 //!
-//! Роль по умолчанию — окно, и это не мелочь: программу запускают двойным
-//! щелчком, а не из терминала, и «без аргументов» для неё должно означать
-//! «покажи окно», а не «напечатай справку».
+//! Без аргументов — окно: программу запускают двойным щелчком, а не из терминала.
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use penguin_cli::args::{self as client, ArgsError, Lexer, Parsed, Token};
 
-/// Penguin: VPN-клиент с раздельным тоннелированием.
-#[derive(Debug, Parser)]
-#[command(name = "penguin", version, about, long_about = None)]
+use crate::help;
+
+/// Разобранная командная строка.
+#[derive(Debug, Default)]
 pub struct Cli {
-    /// Каталог с настройками. По умолчанию — общий, а до установки службы
-    /// каталог пользователя.
-    #[arg(long, global = true, value_name = "ПУТЬ")]
+    /// Каталог с настройками.
     pub config_dir: Option<PathBuf>,
-
-    /// Desktop identity approved by the elevated service helper (Unix only).
-    #[arg(long, global = true, hide = true)]
+    /// Пользователь рабочего стола, одобренный помощником службы (только Unix).
     pub controller_uid: Option<u32>,
-
-    /// Pre-elevation configuration source; only imported on first installation.
-    #[arg(long, global = true, hide = true)]
+    /// Прежние настройки; импортируются только при первой установке.
     pub import_config: Option<PathBuf>,
-
-    /// Подробный вывод в журнал.
-    #[arg(short, long, global = true)]
+    /// Подробный журнал.
     pub verbose: bool,
-
-    /// Вывод в JSON — для скриптов.
-    #[arg(long, global = true)]
+    /// Вывод в JSON.
     pub json: bool,
-
     /// Запущено диспетчером служб.
-    ///
-    /// Флаг ставит система при установке службы; вручную его писать не нужно и
-    /// бессмысленно — вне диспетчера запуск с ним не удастся.
-    #[arg(long, hide = true)]
     pub service: bool,
-
-    /// Держать службу на переднем плане — так её запускают при отладке.
-    #[arg(long, hide = true)]
+    /// Служба на переднем плане.
     pub foreground: bool,
-
-    /// Открыть окно свёрнутым в значок лотка.
-    ///
-    /// С этим флагом программу запускает автозапуск: человек включал его,
-    /// чтобы клиент был под рукой, а не чтобы окно вставало поверх рабочего
-    /// стола при каждом входе в систему.
-    #[arg(long)]
+    /// Окно, свёрнутое в лоток.
     pub tray: bool,
-
-    /// Что делать. Без команды — открыть окно.
-    #[command(subcommand)]
+    /// Команда; без неё — окно.
     pub command: Option<Command>,
 }
 
 /// Команды программы.
-#[derive(Debug, Subcommand)]
+#[derive(Debug)]
 pub enum Command {
-    /// Команды терминала: проверка, локальный прокси, правила, профили.
-    ///
-    /// Плоско, а не отдельной группой: `penguin doctor` короче и привычнее,
-    /// чем `penguin cli doctor`, а никакой другой `doctor` в программе нет.
-    #[command(flatten)]
-    Client(penguin_cli::args::Command),
-
+    /// Команды терминала: плоско, `penguin doctor`, а не `penguin cli doctor`.
+    Client(client::Command),
     /// Служба: установка, запуск, состояние.
-    #[command(subcommand)]
     Service(ServiceCommand),
 }
 
 /// Что сделать со службой.
-#[derive(Debug, Subcommand, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceCommand {
-    /// Поставить службу и запустить её — одной командой.
-    ///
-    /// То, что нужно окну: оно не знает и не хочет знать, установлена служба
-    /// или только остановлена, — ему нужно, чтобы она работала. Повторный
-    /// вызов ничего не ломает.
+    /// Поставить и запустить.
     Ensure,
-    /// Поставить службу.
+    /// Поставить.
     Install,
-    /// Убрать службу.
+    /// Убрать.
     Uninstall,
-    /// Перезапустить службу.
-    ///
-    /// Нужна после замены файла: служба держит в памяти тот образ, с которым
-    /// её запустили, и новый код не действует, пока она не поднялась заново.
+    /// Перезапустить.
     Restart,
-    /// Запустить службу.
+    /// Запустить.
     Start,
-    /// Остановить службу.
+    /// Остановить.
     Stop,
-    /// Показать состояние службы и диагностику.
+    /// Показать состояние.
     Status,
 }
 
+const SERVICE_COMMANDS: [(&str, ServiceCommand, &str); 7] = [
+    ("ensure", ServiceCommand::Ensure, help::ENSURE),
+    ("install", ServiceCommand::Install, help::INSTALL),
+    ("uninstall", ServiceCommand::Uninstall, help::UNINSTALL),
+    ("restart", ServiceCommand::Restart, help::RESTART),
+    ("start", ServiceCommand::Start, help::START),
+    ("stop", ServiceCommand::Stop, help::STOP),
+    ("status", ServiceCommand::Status, help::STATUS),
+];
+
 impl Cli {
     /// Нужны ли этому запуску права администратора.
-    ///
-    /// Свободная функция с тестом: список ролей, требующих прав, — это то, что
-    /// решает, показывать ли запрос UAC. Ошибиться в нём означает либо
-    /// спрашивать права там, где они не нужны, либо не спросить там, где нужны.
     pub fn needs_elevation(&self) -> bool {
         matches!(
             self.command,
@@ -129,46 +94,123 @@ impl Cli {
         )
     }
 
-    /// Печатает ли этот запуск что-то в терминал.
-    ///
-    /// От этого зависит, подключаться ли к консоли родителя: программа собрана
-    /// как оконная, и без подключения её вывод не виден нигде.
+    /// Печатает ли запуск в терминал; окно и служба — нет.
     pub fn writes_to_console(&self) -> bool {
-        // Окно и служба не печатают: у первого консоли нет, у второй — тем
-        // более. Всё остальное — печатает.
         self.command.is_some() || self.foreground
     }
 }
 
+/// Разбирает аргументы процесса.
+pub fn from_env() -> Result<Parsed<Cli>, ArgsError> {
+    let args = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.into_string().map_err(|_| ArgsError::NotUnicode))
+        .collect::<Result<Vec<_>, _>>()?;
+    parse(args)
+}
+
+/// Разбирает аргументы без имени программы. Общие флаги допустимы где угодно.
+pub fn parse(args: Vec<String>) -> Result<Parsed<Cli>, ArgsError> {
+    let mut cli = Cli::default();
+    let mut lx = Lexer::new(args);
+    let mut rest = Vec::new();
+    while let Some(token) = lx.next_token()? {
+        match token {
+            Token::Flag(flag) => match flag.as_str() {
+                "--config-dir" => cli.config_dir = Some(lx.value(&flag)?.into()),
+                "--controller-uid" => cli.controller_uid = Some(lx.parsed(&flag)?),
+                "--import-config" => cli.import_config = Some(lx.value(&flag)?.into()),
+                "-v" | "--verbose" => cli.verbose = true,
+                "--json" => cli.json = true,
+                "--service" => cli.service = true,
+                "--foreground" => cli.foreground = true,
+                "--tray" => cli.tray = true,
+                _ => rest.push(lx.passthrough(&flag)),
+            },
+            Token::Word(word) => rest.push(word),
+        }
+    }
+    Ok(command(rest)?.map(|command| {
+        cli.command = command;
+        cli
+    }))
+}
+
+fn command(mut rest: Vec<String>) -> Result<Parsed<Option<Command>>, ArgsError> {
+    let Some(first) = rest.first().map(String::as_str) else {
+        return Ok(Parsed::Run(None));
+    };
+    match first {
+        "-h" | "--help" => Ok(Parsed::Print(help::TOP)),
+        "-V" | "--version" => Ok(Parsed::Print(help::VERSION)),
+        "help" if rest.len() == 1 => Ok(Parsed::Print(help::TOP)),
+        "help" => {
+            rest.remove(0);
+            rest.push("--help".to_owned());
+            command(rest)
+        }
+        "service" => {
+            rest.remove(0);
+            Ok(service(rest)?.map(|command| Some(Command::Service(command))))
+        }
+        name if client::NAMES.contains(&name) => {
+            Ok(client::parse(rest)?.map(|command| Some(Command::Client(command))))
+        }
+        flag if flag.starts_with('-') => Err(ArgsError::UnknownOption(flag.to_owned())),
+        name => Err(ArgsError::UnknownCommand(name.to_owned())),
+    }
+}
+
+fn service(rest: Vec<String>) -> Result<Parsed<ServiceCommand>, ArgsError> {
+    let mut lx = Lexer::new(rest);
+    let name = match lx.next_token()? {
+        Some(Token::Word(name)) => name,
+        Some(Token::Flag(flag)) if matches!(flag.as_str(), "-h" | "--help") => {
+            return Ok(Parsed::Print(help::SERVICE));
+        }
+        Some(Token::Flag(flag)) => return Err(ArgsError::UnknownOption(flag)),
+        None => return Err(ArgsError::MissingCommand("service")),
+    };
+    let Some(&(_, command, text)) = SERVICE_COMMANDS.iter().find(|(known, ..)| *known == name)
+    else {
+        return Err(ArgsError::UnknownCommand(name));
+    };
+    client::leaf(lx, text, command)
+}
+
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
-    use penguin_cli::args::{Command as ClientCommand, RulesCommand};
-
     use super::*;
 
-    #[test]
-    fn the_command_tree_is_valid() {
-        // `debug_assert` внутри clap ловит противоречия в объявлении: два
-        // одинаковых коротких флага, обязательный аргумент после
-        // необязательного и тому подобное.
-        Cli::command().debug_assert();
+    fn cli(args: &[&str]) -> Cli {
+        match parse(args.iter().skip(1).map(|arg| (*arg).to_owned()).collect()) {
+            Ok(Parsed::Run(cli)) => cli,
+            other => panic!("не запуск: {other:?}"),
+        }
+    }
+
+    fn printed(args: &[&str]) -> &'static str {
+        match parse(args.iter().map(|arg| (*arg).to_owned()).collect()) {
+            Ok(Parsed::Print(text)) => text,
+            other => panic!("не справка: {other:?}"),
+        }
+    }
+
+    fn error(args: &[&str]) -> ArgsError {
+        parse(args.iter().map(|arg| (*arg).to_owned()).collect()).expect_err("ошибка")
     }
 
     #[test]
     fn no_arguments_means_the_window() {
-        // Программу запускают двойным щелчком: «без аргументов» обязано
-        // означать «покажи окно», а не «напечатай справку».
-        let cli = Cli::try_parse_from(["penguin"]).expect("разбирается");
+        // Программу запускают двойным щелчком.
+        let cli = cli(&["penguin"]);
         assert!(cli.command.is_none());
         assert!(!cli.service);
     }
 
     #[test]
     fn the_tray_flag_still_means_the_window() {
-        // Флаг ставит автозапуск, и роль от него меняться не должна: это то же
-        // окно, только спрятанное.
-        let cli = Cli::try_parse_from(["penguin", "--tray"]).expect("разбирается");
+        let cli = cli(&["penguin", "--tray"]);
         assert!(cli.tray);
         assert!(cli.command.is_none());
         assert!(!cli.needs_elevation());
@@ -177,39 +219,35 @@ mod tests {
 
     #[test]
     fn terminal_commands_stay_flat() {
-        // `penguin doctor`, а не `penguin cli doctor`.
-        let cli = Cli::try_parse_from(["penguin", "doctor"]).expect("разбирается");
+        let cli = cli(&["penguin", "doctor"]);
         assert!(matches!(
             cli.command,
-            Some(Command::Client(ClientCommand::Doctor))
+            Some(Command::Client(client::Command::Doctor))
         ));
     }
 
     #[test]
     fn socks_keeps_its_loopback_default() {
-        let cli = Cli::try_parse_from(["penguin", "socks"]).expect("разбирается");
-        let Some(Command::Client(ClientCommand::Socks(args))) = cli.command else {
+        let cli = cli(&["penguin", "socks"]);
+        let Some(Command::Client(client::Command::Socks(args))) = cli.command else {
             panic!("не та команда")
         };
-        // Только петля: прокси, открытый наружу, — открытый прокси для всей
-        // сети.
+        // Прокси, открытый наружу, — открытый прокси для всей сети.
         assert!(args.listen.ip().is_loopback());
         assert_eq!(args.listen.port(), 1080);
     }
 
     #[test]
     fn explain_takes_a_process_and_a_destination() {
-        let cli = Cli::try_parse_from([
+        let cli = cli(&[
             "penguin",
             "rules",
             "explain",
             "example.com:443",
             "--process",
             "chrome.exe",
-        ])
-        .expect("разбирается");
-
-        let Some(Command::Client(ClientCommand::Rules(RulesCommand::Explain {
+        ]);
+        let Some(Command::Client(client::Command::Rules(client::RulesCommand::Explain {
             destination,
             process,
             udp,
@@ -223,23 +261,62 @@ mod tests {
     }
 
     #[test]
-    fn global_flags_work_after_the_subcommand() {
-        // Пользователь пишет флаг там, где вспомнил о нём.
-        let cli = Cli::try_parse_from(["penguin", "doctor", "--json"]).expect("разбирается");
+    fn global_flags_work_anywhere() {
+        assert!(cli(&["penguin", "doctor", "--json"]).json);
+        let cli = cli(&["penguin", "--config-dir=/a b", "rules", "list", "-v"]);
+        assert_eq!(cli.config_dir, Some(PathBuf::from("/a b")));
+        assert!(cli.verbose);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Client(client::Command::Rules(
+                client::RulesCommand::List
+            )))
+        ));
+    }
+
+    #[test]
+    fn client_flags_with_inline_values_reach_the_command() {
+        let cli = cli(&["penguin", "socks", "--listen=127.0.0.1:9", "--json"]);
+        let Some(Command::Client(client::Command::Socks(args))) = cli.command else {
+            panic!("не та команда")
+        };
+        assert_eq!(args.listen.port(), 9);
         assert!(cli.json);
     }
 
     #[test]
     fn the_service_dispatcher_flag_is_recognised() {
-        let cli = Cli::try_parse_from(["penguin", "--service"]).expect("разбирается");
+        let cli = cli(&["penguin", "--service"]);
         assert!(cli.service);
         assert!(cli.command.is_none());
     }
 
     #[test]
+    fn service_options_are_read() {
+        let cli = cli(&[
+            "penguin",
+            "service",
+            "ensure",
+            "--controller-uid",
+            "501",
+            "--import-config",
+            "/x/y",
+        ]);
+        assert_eq!(cli.controller_uid, Some(501));
+        assert_eq!(cli.import_config, Some(PathBuf::from("/x/y")));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Service(ServiceCommand::Ensure))
+        ));
+        assert!(matches!(
+            error(&["--controller-uid", "x"]),
+            ArgsError::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
     fn only_service_commands_ask_for_rights() {
-        // Спросить права там, где они не нужны, — лишний запрос UAC на ровном
-        // месте; не спросить там, где нужны, — команда, падающая с отказом.
+        // Лишний запрос UAC раздражает, а пропущенный — роняет команду отказом.
         for args in [
             vec!["penguin", "service", "ensure"],
             vec!["penguin", "service", "install"],
@@ -248,8 +325,10 @@ mod tests {
             vec!["penguin", "service", "uninstall"],
             vec!["penguin", "service", "restart"],
         ] {
-            let cli = Cli::try_parse_from(&args).expect("разбирается");
-            assert!(cli.needs_elevation(), "{args:?} обязана просить права");
+            assert!(
+                cli(&args).needs_elevation(),
+                "{args:?} обязана просить права"
+            );
         }
 
         for args in [
@@ -258,34 +337,51 @@ mod tests {
             vec!["penguin", "socks"],
             vec!["penguin", "service", "status"],
         ] {
-            let cli = Cli::try_parse_from(&args).expect("разбирается");
-            assert!(!cli.needs_elevation(), "{args:?} права не нужны");
+            assert!(!cli(&args).needs_elevation(), "{args:?} права не нужны");
         }
     }
 
     #[test]
     fn only_terminal_roles_print() {
-        // Программа собрана как оконная: без подключения к консоли родителя её
-        // вывод не виден нигде.
-        assert!(
-            !Cli::try_parse_from(["penguin"])
-                .expect("р")
-                .writes_to_console()
+        // Без подключения к консоли родителя вывод оконной программы не виден.
+        assert!(!cli(&["penguin"]).writes_to_console());
+        assert!(!cli(&["penguin", "--service"]).writes_to_console());
+        assert!(cli(&["penguin", "doctor"]).writes_to_console());
+        assert!(cli(&["penguin", "--foreground"]).writes_to_console());
+    }
+
+    #[test]
+    fn help_and_version() {
+        assert_eq!(printed(&["--help"]), help::TOP);
+        assert_eq!(printed(&["-h"]), help::TOP);
+        assert_eq!(printed(&["help"]), help::TOP);
+        assert_eq!(printed(&["-V"]), help::VERSION);
+        assert_eq!(printed(&["--version"]), help::VERSION);
+        assert_eq!(printed(&["service", "--help"]), help::SERVICE);
+        assert_eq!(printed(&["service", "ensure", "-h"]), help::ENSURE);
+        assert_eq!(printed(&["help", "service", "stop"]), help::STOP);
+        assert!(printed(&["doctor", "--help"]).contains("penguin doctor"));
+    }
+
+    #[test]
+    fn mistakes_are_reported() {
+        assert_eq!(error(&["bogus"]), ArgsError::UnknownCommand("bogus".into()));
+        assert_eq!(
+            error(&["--bogus"]),
+            ArgsError::UnknownOption("--bogus".into())
         );
-        assert!(
-            !Cli::try_parse_from(["penguin", "--service"])
-                .expect("р")
-                .writes_to_console()
+        assert_eq!(error(&["service"]), ArgsError::MissingCommand("service"));
+        assert_eq!(
+            error(&["service", "bogus"]),
+            ArgsError::UnknownCommand("bogus".into())
         );
-        assert!(
-            Cli::try_parse_from(["penguin", "doctor"])
-                .expect("р")
-                .writes_to_console()
+        assert_eq!(
+            error(&["service", "stop", "now"]),
+            ArgsError::Unexpected("now".into())
         );
-        assert!(
-            Cli::try_parse_from(["penguin", "--foreground"])
-                .expect("р")
-                .writes_to_console()
+        assert_eq!(
+            error(&["--config-dir"]),
+            ArgsError::MissingValue("--config-dir".into())
         );
     }
 }

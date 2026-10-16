@@ -1,45 +1,19 @@
-//! Расшифровка одной записи рукопожатия TLS 1.3 — RFC 8446 §5.
+//! Запись TLS 1.3 (RFC 8446 §5): AEAD с нонсом `IV xor seq` и AAD из 5-байтного заголовка.
 //!
-//! ```text
-//! TLSCiphertext
-//! ├─ тип записи (1)      = 0x17 (application_data — TLS 1.3 маскирует
-//! │                        реальный тип содержимого им целиком, §5.1)
-//! ├─ версия записи (2)   = 0x0303 (не значима, как в ClientHello)
-//! ├─ длина (2)
-//! └─ зашифрованное содержимое + метка AEAD
-//!         │
-//!         │  AEAD-Open(key, nonce = IV xor seq, aad = 5-байтный заголовок
-//!         │             записи, ciphertext)
-//!         ▼
-//! TLSInnerPlaintext = content || тип содержимого (1) || нулевой padding
-//! ```
-//!
-//! Нонс — RFC 8446 §5.3: `IV` (12 байт) поразрядно `xor` с восемью байтами
-//! номера записи (big-endian, начиная с нуля), выровненными по правому краю.
-//! Номер увеличивается на каждую успешно расшифрованную запись — но не на
-//! `change_cipher_spec`, которая не шифруется вовсе (мидлбокс-совместимость
-//! TLS 1.3, RFC 8446 Приложение D.4) и здесь просто пропускается тем, кто
-//! читает записи ([`crate::reality::handshake`]).
-//!
-//! Проверено на RFC 8448 §3: настоящая зашифрованная запись сервера (679
-//! октетов) расшифровывается ключом и `IV`, выведенными в
-//! `key_schedule.rs`, — и результат совпадает байт в байт с открытым текстом
-//! (`EncryptedExtensions` + `Certificate` + `CertificateVerify` + `Finished`),
-//! который RFC печатает отдельно.
+//! `TLSInnerPlaintext = content || тип || нулевое заполнение`. Счётчик растёт на каждую
+//! запись, кроме `change_cipher_spec` (не шифруется). Векторы RFC 8448 §3 — в тестах.
 
+use bytes::{BufMut, BytesMut};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey};
 
 use crate::reality::cipher_suite::CipherSuite;
 use crate::reality::error::RealityError;
 
-/// Запись несёт сообщение рукопожатия (до шифрования) или замаскированное
-/// под него содержимое (после — TLS 1.3 всегда шлёт `0x17` наружу).
+/// Сообщение рукопожатия (внутренний тип записи).
 pub const CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
-/// Заголовок записи снаружи у TLS 1.3 всегда этот, независимо от истинного
-/// содержимого — оно названо только внутри, после расшифровки.
+/// Внешний тип любой зашифрованной записи TLS 1.3.
 pub const CONTENT_TYPE_APPLICATION_DATA: u8 = 0x17;
-/// `change_cipher_spec` — не шифруется, посылается только ради мидлбоксов,
-/// ожидающих TLS 1.2, и не участвует в счётчике записей.
+/// `change_cipher_spec`: не шифруется и не входит в счётчик.
 pub const CONTENT_TYPE_CHANGE_CIPHER_SPEC: u8 = 0x14;
 
 /// Ключ и `IV` одного направления вместе со счётчиком записей.
@@ -50,8 +24,7 @@ pub struct RecordKey {
 }
 
 impl RecordKey {
-    /// Готовит ключ записи. `key_bytes`/`iv` — вывод
-    /// [`crate::reality::key_schedule::server_handshake_traffic_keys`].
+    /// Ключ записи из вывода [`crate::reality::key_schedule`].
     pub fn new(cipher: CipherSuite, key_bytes: &[u8], iv: [u8; 12]) -> Result<Self, RealityError> {
         let unbound = UnboundKey::new(cipher.aead_algorithm(), key_bytes)
             .map_err(|_| RealityError::Crypto("ключ записи рукопожатия"))?;
@@ -62,7 +35,7 @@ impl RecordKey {
         })
     }
 
-    /// Нонс текущей записи и продвижение счётчика — RFC 8446 §5.3.
+    /// Нонс записи (RFC 8446 §5.3) и шаг счётчика.
     fn next_nonce(&mut self) -> Nonce {
         let mut nonce_bytes = self.iv;
         let seq_bytes = self.seq.to_be_bytes();
@@ -70,21 +43,16 @@ impl RecordKey {
             *byte ^= seq_byte;
         }
         self.seq += 1;
-        // `assume_unique_for_key` оправдан: нонс строится из счётчика,
-        // который этот же метод и продвигает, — повтора не будет, пока
-        // `RecordKey` не переживёт `u64::MAX` записей одного рукопожатия.
         Nonce::assume_unique_for_key(nonce_bytes)
     }
 
-    /// Расшифровывает одну запись: `record_header` — 5 байт заголовка (AAD,
-    /// RFC 8446 §5.2), `ciphertext_and_tag` — тело записи как пришло с
-    /// провода. Возвращает настоящий тип содержимого и открытый текст без
-    /// заполнения нулями.
-    pub fn open(
+    /// Расшифровывает запись на месте: `record_header` — AAD, `ciphertext_and_tag` — тело.
+    /// Возвращает внутренний тип и открытый текст без заполнения.
+    pub fn open_in_place<'a>(
         &mut self,
         record_header: &[u8; 5],
-        ciphertext_and_tag: &mut [u8],
-    ) -> Result<(u8, Vec<u8>), RealityError> {
+        ciphertext_and_tag: &'a mut [u8],
+    ) -> Result<(u8, &'a mut [u8]), RealityError> {
         let nonce = self.next_nonce();
         let plaintext = self
             .key
@@ -95,41 +63,63 @@ impl RecordKey {
             )
             .map_err(|_| RealityError::Crypto("запись рукопожатия не расшифровывается"))?;
         let (content_type, content) = split_inner_plaintext(plaintext)?;
+        let len = content.len();
+        Ok((content_type, &mut plaintext[..len]))
+    }
+
+    /// То же с копией содержимого.
+    pub fn open(
+        &mut self,
+        record_header: &[u8; 5],
+        ciphertext_and_tag: &mut [u8],
+    ) -> Result<(u8, Vec<u8>), RealityError> {
+        let (content_type, content) = self.open_in_place(record_header, ciphertext_and_tag)?;
         Ok((content_type, content.to_vec()))
     }
 
-    /// Шифрует один кадр в TLS-запись — обратная операция к [`Self::open`],
-    /// той же формулой (RFC 8446 §5.2): `TLSInnerPlaintext = content ||
-    /// тип`, без набивки нулями (она нужна только для того, чтобы прятать
-    /// длину, — здесь нечего прятать), затем `AEAD-Seal` с AAD из
-    /// 5-байтного заголовка записи, который сам зависит от длины
-    /// зашифрованного содержимого и потому собирается заранее.
-    pub fn seal(&mut self, content_type: u8, plaintext: &[u8]) -> Result<Vec<u8>, RealityError> {
-        let mut inner = Vec::with_capacity(plaintext.len() + 1);
-        inner.extend_from_slice(plaintext);
-        inner.push(content_type);
+    /// Дописывает в `out` запись целиком (заголовок, шифротекст, метка), без заполнения.
+    pub fn seal_into(
+        &mut self,
+        content_type: u8,
+        plaintext: &[u8],
+        out: &mut BytesMut,
+    ) -> Result<(), RealityError> {
+        let sealed_len = plaintext.len() + 1 + self.key.algorithm().tag_len();
+        let sealed_len = u16::try_from(sealed_len)
+            .map_err(|_| RealityError::Crypto("прикладная запись длиннее 65535 байт"))?;
 
-        let sealed_len = inner.len() + self.key.algorithm().tag_len();
-        let mut header = [0u8; 5];
-        header[0] = CONTENT_TYPE_APPLICATION_DATA;
-        header[1..3].copy_from_slice(&[0x03, 0x03]);
-        header[3..5].copy_from_slice(&(sealed_len as u16).to_be_bytes());
+        let start = out.len();
+        out.reserve(5 + usize::from(sealed_len));
+        out.put_u8(CONTENT_TYPE_APPLICATION_DATA);
+        out.put_slice(&[0x03, 0x03]);
+        out.put_u16(sealed_len);
+        out.put_slice(plaintext);
+        out.put_u8(content_type);
 
         let nonce = self.next_nonce();
-        self.key
-            .seal_in_place_append_tag(nonce, Aad::from(header.as_slice()), &mut inner)
-            .map_err(|_| RealityError::Crypto("шифрование прикладной записи"))?;
+        let (header, body) = out[start..].split_at_mut(5);
+        match self
+            .key
+            .seal_in_place_separate_tag(nonce, Aad::from(&*header), body)
+        {
+            Ok(tag) => out.put_slice(tag.as_ref()),
+            Err(_) => {
+                out.truncate(start);
+                return Err(RealityError::Crypto("шифрование прикладной записи"));
+            }
+        }
+        Ok(())
+    }
 
-        let mut out = Vec::with_capacity(header.len() + inner.len());
-        out.extend_from_slice(&header);
-        out.extend_from_slice(&inner);
-        Ok(out)
+    /// Запись одним `Vec`; горячий путь использует [`Self::seal_into`].
+    pub fn seal(&mut self, content_type: u8, plaintext: &[u8]) -> Result<Vec<u8>, RealityError> {
+        let mut out = BytesMut::new();
+        self.seal_into(content_type, plaintext, &mut out)?;
+        Ok(out.into())
     }
 }
 
-/// Отделяет тип содержимого от заполнения нулями — RFC 8446 §5.4
-/// (`TLSInnerPlaintext`): содержимое, потом ровно один байт типа, потом
-/// сколько угодно (в том числе ноль) нулевых байт заполнения.
+/// Отделяет тип от нулевого заполнения (RFC 8446 §5.4).
 fn split_inner_plaintext(mut plaintext: &[u8]) -> Result<(u8, &[u8]), RealityError> {
     while let Some((0, rest)) = plaintext.split_last() {
         plaintext = rest;
@@ -174,12 +164,7 @@ mod tests {
         assert!(split_inner_plaintext(&[]).is_err());
     }
 
-    /// RFC 8448 §3: настоящая запись сервера (679 октетов на проводе, здесь
-    /// без 5-байтного заголовка) расшифровывается ключом и `IV`, которые
-    /// `key_schedule.rs` независимо вывел из той же трассы, и совпадает байт
-    /// в байт с открытым текстом, который RFC печатает как "payload (657
-    /// octets)": `EncryptedExtensions` + `Certificate` + `CertificateVerify`
-    /// + `Finished`, за которыми следует один байт типа `0x16`.
+    /// RFC 8448 §3: запись сервера (679 октетов) расшифровывается в "payload (657 octets)".
     #[test]
     fn decrypts_the_rfc_8448_test_vector_record() {
         let key = from_hex("3fce516009c21727d0f2e4e86ee403bc");
@@ -239,14 +224,7 @@ mod tests {
         assert!(record_key.open(&header, &mut garbage).is_err());
     }
 
-    /// RFC 8448 §3, "{client} send handshake record": клиентский `Finished`
-    /// (36 октетов, тип `handshake` = `0x16`), зашифрованный клиентским
-    /// ключом записи рукопожатия (тот же ключ и `IV`, что и в
-    /// `key_schedule.rs`, `traffic_keys_matches_the_rfc_8448_client_handshake_vector`),
-    /// даёт ровно ту запись, которую RFC печатает как "complete record (58
-    /// octets)". Обратная сторона [`decrypts_the_rfc_8448_test_vector_record`]
-    /// — там сервер шифрует, здесь клиент; независимая половина того же
-    /// формата.
+    /// RFC 8448 §3, "{client} send handshake record": клиентский `Finished` даёт "complete record (58 octets)".
     #[test]
     fn seals_the_rfc_8448_client_finished_record() {
         let key = from_hex("db fa a6 93 d1 76 2c 5b 66 6a f5 d9 50 25 8d 01");

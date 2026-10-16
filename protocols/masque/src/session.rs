@@ -1,11 +1,5 @@
-//! Общее соединение HTTP/3 с прокси MASQUE и открытие каналов `CONNECT-UDP`
-//! поверх него.
-//!
-//! Один [`Session`] — одно рукопожатие QUIC/HTTP/3 на весь профиль
-//! (`Outbound` обязан быть разделяемым, см. документацию
-//! [`penguin_proto::outbound::Outbound`]). Каждый вызов [`Session::open_flow`]
-//! открывает внутри уже поднятого соединения новый поток `CONNECT-UDP` —
-//! так же дёшево, как новая вкладка в уже открытом браузере.
+//! Общее соединение HTTP/3 с прокси MASQUE: одно рукопожатие на профиль,
+//! каждый [`Session::open_flow`] — новый поток `CONNECT-UDP` в нём.
 
 use bytes::Bytes;
 use penguin_core::address::SocketAddress;
@@ -54,11 +48,7 @@ impl Session {
         })
     }
 
-    /// Открывает новый канал `CONNECT-UDP` до `target`.
-    ///
-    /// `incoming` — очередь того [`crate::datagram::MasqueDatagram`], что
-    /// попросил канал: датаграммы, пришедшие по нему, попадают туда же, куда
-    /// и датаграммы от других целей того же направления.
+    /// Открывает канал `CONNECT-UDP` до `target`; `incoming` — общая очередь входящих.
     pub async fn open_flow(
         &self,
         target: &SocketAddress,
@@ -70,12 +60,7 @@ impl Session {
         Ok(Flow::new(target.clone(), stream, h3.clone(), incoming))
     }
 
-    /// Закрывает соединение с прокси.
-    ///
-    /// Каналы, открытые через [`Self::open_flow`], живут в кэше вызывающего
-    /// ([`crate::datagram::MasqueDatagram`]) и закрываются им самим —
-    /// закрытие транспорта здесь обрывает и их половины потоков, но не ждёт
-    /// этого явно.
+    /// Закрывает соединение с прокси (каналы обрываются вместе с ним).
     pub async fn close(&self) {
         self.transport.link.close(H3_NO_ERROR, b"").await;
     }

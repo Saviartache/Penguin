@@ -1,10 +1,6 @@
 //! Параметры: адрес прокси MASQUE, TLS, необязательный заголовок опознания.
 //!
-//! RFC 9298 не описывает опознание вовсе — прокси может требовать что угодно
-//! поверх обычного HTTP. Поле `authorization` — сырое значение заголовка
-//! `Authorization`, которое клиент просто прикладывает к каждому запросу
-//! `CONNECT`; какая это схема (`Bearer`, `Basic`), решает сервер, а не этот
-//! крейт.
+//! `authorization` — сырое значение заголовка `Authorization` для каждого `CONNECT`.
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
@@ -14,18 +10,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MasqueError, MasqueResult};
 
 /// Настройки подключения к прокси MASQUE.
-///
-/// `Debug` реализован вручную ниже — производный вывел бы заголовок
-/// опознания в журнал.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MasqueConfig {
     /// Адрес прокси: `example.com:443`.
     pub server: String,
 
-    /// Значение заголовка `Authorization` для каждого запроса `CONNECT-UDP`.
-    ///
-    /// В `Debug` не попадает: вывод пишется вручную ниже.
+    /// Значение заголовка `Authorization` (в `Debug` скрыто).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<String>,
 
@@ -42,7 +33,6 @@ impl MasqueConfig {
             .parse()
             .map_err(|e| MasqueError::config(format!("адрес прокси `{raw}`: {e}")))?;
 
-        // У CONNECT-UDP нет смены порта на ходу — прокси один и слушает один порт.
         if endpoint.ports.is_hopping() {
             return Err(MasqueError::config(
                 "masque не умеет смену порта: укажите один порт",
@@ -51,10 +41,7 @@ impl MasqueConfig {
         Ok((endpoint.host, endpoint.ports.first()))
     }
 
-    /// Имя, которое подставляется в TLS.
-    ///
-    /// Явно заданное `sni` сильнее: прокси за подменённым адресом всё равно
-    /// ждёт своё имя, и без этого сертификат не сойдётся.
+    /// Имя для TLS; явно заданное `sni` сильнее адреса.
     pub fn server_name(&self) -> MasqueResult<String> {
         if let Some(sni) = &self.tls.sni
             && !sni.is_empty()
@@ -63,7 +50,6 @@ impl MasqueConfig {
         }
         Ok(match self.endpoint()?.0 {
             Address::Domain(domain) => domain,
-            // Без скобок и для IPv6: rustls ждёт сам адрес.
             Address::Ip(ip) => ip.to_string(),
         })
     }
@@ -77,7 +63,6 @@ impl MasqueConfig {
     }
 }
 
-// Заголовок опознания не должен попасть в журнал ни целиком, ни частями.
 impl std::fmt::Debug for MasqueConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MasqueConfig")

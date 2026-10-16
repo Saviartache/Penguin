@@ -1,18 +1,8 @@
-//! Ошибки протокола.
+//! Ошибки протокола; по варианту `supervisor` решает, повторять ли (`AGENTS.md` §4.2).
 //!
-//! Различие между вариантами не косметическое: по нему `supervisor` решает,
-//! повторять ли попытку (`AGENTS.md` §4.2).
-//!
-//! `AuthRejected` здесь — это не то, что кажется на первый взгляд. WireGuard
-//! не присылает отказ: чужой ключ выглядит как молчание, неотличимое от
-//! потерянной сети (`man 8 wg` и сама спецификация не описывают код ошибки
-//! опознания вообще). Отличить одно от другого клиент не может — а значит и
-//! не должен: единственный способ, которым локальная сторона узнаёт про
-//! заведомо чужой ключ, — сверить его **до** попытки подключения, в
-//! [`crate::config::WireguardConfig::validate`]. После этого шага всё, что
-//! происходит на проводе, — это уже вопрос сети, и `AuthRejected` этот крейт
-//! никогда не возвращает: возвращать код специально ради него — как раз то
-//! неотличимое от домысла, о котором предупреждает план.
+//! `AuthRejected` не возвращается: WireGuard не присылает отказ, чужой ключ
+//! неотличим от потерянной сети. Ключи сверяются до подключения
+//! ([`crate::config::WireguardConfig::validate`]).
 use penguin_proto::error::ProtocolError;
 use thiserror::Error;
 
@@ -26,12 +16,7 @@ pub enum WireguardError {
     #[error("настройки WireGuard: {0}")]
     Config(String),
 
-    /// Пакет или сообщение рукопожатия не по формату либо не прошли
-    /// проверку подлинности.
-    ///
-    /// Оба случая неотличимы друг от друга по самому факту отказа AEAD, и не
-    /// нужно их различать: реакция одна — отбросить и не повторять с теми же
-    /// ключами.
+    /// Пакет не по формату или не прошёл проверку подлинности (случаи неотличимы).
     #[error("пакет не по протоколу: {0}")]
     Malformed(String),
 
@@ -43,18 +28,11 @@ pub enum WireguardError {
     #[error("сеанс WireGuard истёк: рукопожатие не обновилось за {0:?}")]
     SessionExpired(std::time::Duration),
 
-    /// Направление закрыто, и труба для пакетов больше не работает.
-    ///
-    /// `close()` вызывает сам движок при остановке профиля — в нормальной
-    /// работе этот вариант никому не виден. Если он всё же дошёл до
-    /// `send`/`recv`, для того, кто их позвал, это неотличимо от обрыва
-    /// связи, и реакция та же: отдать ошибку, а не притвориться, что пакет
-    /// ушёл.
+    /// Направление закрыто, труба для пакетов не работает.
     #[error("направление WireGuard закрыто")]
     Closed,
 
-    /// Сеть подвела: адрес не разрешился, сокет не открылся, соединение
-    /// пропало не на уровне рукопожатия и не на уровне сеанса.
+    /// Сеть подвела: адрес не разрешился, сокет не открылся и т. п.
     #[error("сеть WireGuard: {0}")]
     Disconnected(String),
 
@@ -84,9 +62,6 @@ impl From<WireguardError> for ProtocolError {
     fn from(err: WireguardError) -> Self {
         match err {
             WireguardError::Config(message) => Self::InvalidConfig(message),
-            // Разъехавшийся пакет — это либо чужой ключ, либо порча на
-            // проводе; ни то ни другое само не пройдёт при повторе с теми же
-            // ключами.
             err @ WireguardError::Malformed(_) => Self::InvalidConfig(err.to_string()),
             err @ WireguardError::HandshakeTimeout => Self::Disconnected(err.to_string()),
             err @ WireguardError::SessionExpired(_) => Self::Disconnected(err.to_string()),
@@ -98,13 +73,7 @@ impl From<WireguardError> for ProtocolError {
 }
 
 impl From<penguin_transport::TransportError> for WireguardError {
-    /// Переводит общую ошибку транспорта (используется здесь только ради
-    /// `deadline::handshake` — срока на рукопожатие) на язык этого крейта.
-    ///
-    /// На практике из всех вариантов встречается только `Timeout`: остальные
-    /// эта реализация не производит сама, но перевод обязан быть полным —
-    /// `deadline::within` требует `E: From<TransportError>` целиком, а не
-    /// один вариант.
+    /// Нужен `deadline::within`; на практике встречается только `Timeout`.
     fn from(err: penguin_transport::TransportError) -> Self {
         use penguin_transport::TransportError as E;
         match err {
@@ -130,15 +99,12 @@ mod tests {
 
     #[test]
     fn a_malformed_packet_is_not_retried() {
-        // Пока на проводе не то, что настроено (чужой ключ, порча), само
-        // оно не изменится.
         let err: ProtocolError = WireguardError::malformed("метка не сошлась").into();
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn a_handshake_timeout_is_retried() {
-        // Молчащий сервер — это сеть, а не настройки: обязательно повторить.
         let err: ProtocolError = WireguardError::HandshakeTimeout.into();
         assert!(err.is_retryable());
     }
@@ -152,8 +118,6 @@ mod tests {
 
     #[test]
     fn a_closed_outbound_is_retried() {
-        // `close()` вызывает сам движок при остановке профиля; появление
-        // этой ошибки в другом месте означает обрыв, а не намеренный отказ.
         let err: ProtocolError = WireguardError::Closed.into();
         assert!(err.is_retryable());
     }
@@ -167,8 +131,6 @@ mod tests {
 
     #[test]
     fn a_resolve_failure_is_retried() {
-        // Адрес не разрешился — это сеть (DNS сейчас недоступен), а не
-        // настройки (имя может быть верным).
         let err: ProtocolError = WireguardError::disconnected("example.com: не отвечает").into();
         assert!(err.is_retryable());
     }

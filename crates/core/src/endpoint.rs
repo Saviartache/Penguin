@@ -11,16 +11,13 @@ use crate::error::{CoreError, CoreResult};
 /// Адрес сервера вместе с тем, по каким портам к нему стучаться.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerEndpoint {
-    /// Хост сервера. Обычно домен: у него меняется адрес, и это нормально.
+    /// Хост сервера.
     pub host: Address,
     /// Порты.
     pub ports: PortSpec,
 }
 
-/// Один порт или набор портов.
-///
-/// Набор нужен для смены порта на ходу: провайдер, ограничивающий скорость по
-/// пятёрке, при смене порта видит новое соединение и начинает считать заново.
+/// Один порт или набор портов (port hopping).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortSpec {
     /// Один порт.
@@ -73,9 +70,7 @@ impl PortSpec {
         }
     }
 
-    /// Порт по сквозному индексу.
-    ///
-    /// Индекс берётся по модулю: смене порта незачем знать, сколько их всего.
+    /// Порт по сквозному индексу (по модулю числа портов).
     pub fn nth(&self, index: u32) -> u16 {
         match self {
             Self::Single(p) => *p,
@@ -88,8 +83,6 @@ impl PortSpec {
                     }
                     offset -= range.len();
                 }
-                // Недостижимо: сумма длин равна `total`. Но паниковать в коде,
-                // который держит соединение, нельзя ни при каких условиях.
                 ranges.first().map_or(0, |r| r.start)
             }
         }
@@ -117,10 +110,6 @@ impl FromStr for ServerEndpoint {
     type Err = CoreError;
 
     /// Разбирает `example.com:443`, `[2001:db8::1]:443`, `example.com:20000-30000`.
-    ///
-    /// Здесь, а не в каждом протоколе по разу: запись адреса сервера у всех
-    /// одна, а разбирали её порознь — и первым же расхождением стал IPv6,
-    /// у которого двоеточий больше одного.
     fn from_str(s: &str) -> CoreResult<Self> {
         let raw = s.trim();
         let (host, ports) =
@@ -129,14 +118,8 @@ impl FromStr for ServerEndpoint {
     }
 }
 
-/// Делит `host:ports`, не путаясь в двоеточиях IPv6.
-///
-/// `None` — порта нет вовсе. Умолчания здесь не подставляются: у каждого
-/// протокола порт свой, а молча подставленный чужой означает сервер, к
-/// которому не подключиться.
+/// Делит `host:ports` (IPv6 в скобках); `None` — порта нет, умолчание не подставляется.
 fn split_host_ports(raw: &str) -> Option<(&str, &str)> {
-    // IPv6 в скобках: `[::1]:443`. Без этого разбора двоеточия адреса приняли
-    // бы за разделитель порта.
     if let Some(rest) = raw.strip_prefix('[') {
         let (host, tail) = rest.split_once(']')?;
         return Some((host, tail.trim().strip_prefix(':')?));
@@ -157,9 +140,7 @@ impl FromStr for PortSpec {
         let mut ranges = Vec::new();
         for part in s.split(',') {
             let part = part.trim();
-            // Разделителем служит и дефис, и двоеточие: в мире Hysteria
-            // встречаются обе записи, и заставлять пользователя помнить, какая
-            // именно, незачем.
+            // Hysteria пишет диапазон и через дефис, и через двоеточие.
             let split = part.split_once('-').or_else(|| part.split_once(':'));
             let range = match split {
                 Some((a, b)) => {
@@ -226,8 +207,6 @@ impl Serialize for PortSpec {
 
 impl<'de> Deserialize<'de> for PortSpec {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        // Порт в конфигурации пишут и числом, и строкой с диапазоном.
-        // Принимаются оба вида: заставлять брать `443` в кавычки — придирка.
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Raw {
@@ -270,7 +249,6 @@ mod tests {
         assert_eq!(spec.count(), 5);
         let walked: Vec<u16> = (0..5).map(|i| spec.nth(i)).collect();
         assert_eq!(walked, vec![443, 8443, 9000, 9001, 9002]);
-        // Индекс за пределами набора заворачивается, а не паникует.
         assert_eq!(spec.nth(5), 443);
     }
 
@@ -291,7 +269,6 @@ mod tests {
         let endpoint: ServerEndpoint = "1.2.3.4:1080".parse().expect("разбирается");
         assert!(endpoint.host.as_ip().is_some());
 
-        // IPv6 в скобках: двоеточий в нём больше, чем разделителей.
         let endpoint: ServerEndpoint = "[2001:db8::1]:443".parse().expect("разбирается");
         assert!(endpoint.host.as_ip().is_some_and(|ip| ip.is_ipv6()));
         assert_eq!(endpoint.ports, PortSpec::Single(443));
@@ -302,8 +279,6 @@ mod tests {
 
     #[test]
     fn an_endpoint_without_a_port_is_refused() {
-        // Молча подставленный чужой порт — это сервер, к которому не
-        // подключиться, и узнать об этом можно будет только по таймауту.
         assert!("example.com".parse::<ServerEndpoint>().is_err());
         assert!("[2001:db8::1]".parse::<ServerEndpoint>().is_err());
         assert!("example.com:абв".parse::<ServerEndpoint>().is_err());

@@ -2,12 +2,8 @@
 //!
 //! ```text
 //! клиент → 0x05 NMETHODS METHODS…
-//! сервер → 0x05 METHOD
+//! сервер → 0x05 METHOD   (0x00 без проверки, 0x02 логин и пароль, 0xFF отказ)
 //! ```
-//!
-//! `METHOD` — выбранный способ: `0x00` без проверки, `0x02` логин и пароль,
-//! `0xFF` «ничего из предложенного не подходит», после чего соединение
-//! закрывается.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -34,23 +30,22 @@ pub enum Chosen {
 
 /// Согласовывает способ проверки.
 ///
-/// `require_auth` — нужен ли пароль. Когда пароль задан, вариант без проверки
-/// не предлагается вовсе: иначе клиент выберет его, и пароль окажется
-/// украшением.
+/// При `require_auth` вариант без проверки не принимается, даже если клиент его предложил.
 pub async fn negotiate<S>(stream: &mut S, require_auth: bool) -> InboundResult<Chosen>
 where
     S: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-    let version = stream.read_u8().await?;
+    let mut head = [0u8; 2];
+    stream.read_exact(&mut head).await?;
+    let [version, count] = head;
+    // Сюда попадает и HTTP-клиент, постучавшийся не в тот порт.
     if version != VERSION {
-        // Сюда попадает и HTTP-клиент, постучавшийся не в тот порт: его
-        // первый байт — буква из `GET` или `CONNECT`.
         return Err(InboundError::NotSocks5(version));
     }
 
-    let count = stream.read_u8().await? as usize;
-    let mut methods = vec![0u8; count];
-    stream.read_exact(&mut methods).await?;
+    let mut buf = [0u8; 255];
+    let methods = &mut buf[..usize::from(count)];
+    stream.read_exact(methods).await?;
 
     let wanted = if require_auth {
         METHOD_USERPASS
@@ -67,8 +62,7 @@ where
         });
     }
 
-    // Отказ полагается отправить: без него клиент ждёт ответа до тайм-аута и
-    // сообщает пользователю «прокси не отвечает» вместо «прокси отказал».
+    // Без отказа клиент ждёт до тайм-аута.
     stream.write_all(&[VERSION, METHOD_UNACCEPTABLE]).await?;
     Err(InboundError::NoAcceptableAuth)
 }
@@ -110,8 +104,6 @@ mod tests {
     async fn picks_userpass_when_password_required() {
         let (result, reply) = run(&[VERSION, 2, METHOD_NONE, METHOD_USERPASS], true).await;
         assert_eq!(result.expect("согласовано"), Chosen::UserPass);
-        // Вариант без проверки не выбирается, хотя клиент его предложил, —
-        // иначе заданный пароль ничего бы не значил.
         assert_eq!(reply, vec![VERSION, METHOD_USERPASS]);
     }
 
@@ -119,14 +111,12 @@ mod tests {
     async fn refuses_when_client_cannot_authenticate() {
         let (result, reply) = run(&[VERSION, 1, METHOD_NONE], true).await;
         assert!(matches!(result, Err(InboundError::NoAcceptableAuth)));
-        // Отказ обязан быть отправлен, иначе клиент ждёт до тайм-аута.
         assert_eq!(reply, vec![VERSION, METHOD_UNACCEPTABLE]);
     }
 
     #[tokio::test]
     async fn rejects_wrong_version() {
-        // `G` из `GET` — обычный случай, когда браузеру дали адрес прокси
-        // как HTTP-прокси.
+        // `G` из `GET`: адрес SOCKS-прокси дали как HTTP.
         let mut reader = Cursor::new(vec![b'G', 1, 0]);
         let (mut stream, _) = duplex(16);
         let _ = &mut stream;

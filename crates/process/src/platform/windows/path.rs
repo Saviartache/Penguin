@@ -1,10 +1,5 @@
-//! `QueryFullProcessImageName` и приведение пути к каноническому виду.
-//!
-//! Именно `QueryFullProcessImageNameW`, а не `GetModuleFileNameEx`: первый
-//! требует лишь `PROCESS_QUERY_LIMITED_INFORMATION` и потому работает для
-//! процессов другого пользователя и для служб, а второй требует прав, которых
-//! у клиента может не быть. Разница видна сразу: без неё половина системных
-//! процессов остаётся без пути, и правила на них не действуют.
+//! Путь процесса через `QueryFullProcessImageNameW`: ему хватает
+//! `PROCESS_QUERY_LIMITED_INFORMATION`, в отличие от `GetModuleFileNameEx`.
 
 #![allow(unsafe_code, reason = "системные вызовы Windows")]
 
@@ -16,28 +11,19 @@ use windows::core::PWSTR;
 
 use crate::identity::ProcessIdentity;
 
-/// Путь к исполняемому файлу процесса.
-///
-/// `None` — процесс уже завершился или доступ запрещён. И то и другое
-/// нормально: между чтением таблицы и этим вызовом проходит время.
+/// Путь к исполняемому файлу; `None` — процесс завершился или доступ запрещён.
 pub fn path_of(pid: u32) -> Option<String> {
     if pid == 0 {
-        // Нулевой номер принадлежит псевдопроцессу простоя — открывать его
-        // нечего.
         return None;
     }
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let path = read_path(handle);
-    // Дескриптор закрывается в любом случае: утечка здесь копится по одному
-    // на каждое новое соединение.
     unsafe { CloseHandle(handle) }.ok()?;
     path
 }
 
 fn read_path(handle: HANDLE) -> Option<String> {
-    // Путь может быть длиннее MAX_PATH; запас берётся сразу, чтобы не
-    // повторять вызов.
     let mut buffer = vec![0u16; MAX_PATH as usize * 4];
     let mut len = buffer.len() as u32;
 
@@ -88,8 +74,6 @@ mod tests {
 
     #[test]
     fn missing_process_is_not_an_error() {
-        // Ноль — псевдопроцесс простоя; номер из будущего почти наверняка
-        // свободен. Ни то ни другое не должно ронять клиент.
         assert!(path_of(0).is_none());
         assert!(path_of(u32::MAX - 1).is_none());
     }

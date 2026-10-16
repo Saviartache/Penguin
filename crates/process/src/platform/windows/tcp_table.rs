@@ -1,12 +1,4 @@
-//! `GetExtendedTcpTable` — сопоставление TCP-соединения и pid.
-//!
-//! Таблица возвращается как структура переменной длины: сначала число
-//! записей, следом сами записи подряд. Прочитать её без арифметики по
-//! указателям нельзя — отсюда `unsafe` в этом файле.
-//!
-//! Порты в записях лежат в сетевом порядке байт внутри `DWORD`. Забыть про
-//! это — классическая ошибка: порт 443 превращается в 47873, и владелец
-//! никогда не находится.
+//! `GetExtendedTcpTable`: TCP-соединение -> pid. Порты лежат в `DWORD` в сетевом порядке байт.
 
 #![allow(unsafe_code, reason = "чтение системной таблицы переменной длины")]
 
@@ -43,7 +35,6 @@ fn read_v4() -> Vec<Entry> {
         return Vec::new();
     };
 
-    // Заголовок таблицы — число записей; за ним подряд сами записи.
     let table = buffer.as_ptr().cast::<MIB_TCPTABLE_OWNER_PID>();
     let count = unsafe { (*table).dwNumEntries } as usize;
     let rows = unsafe { rows_of::<MIB_TCPTABLE_OWNER_PID, MIB_TCPROW_OWNER_PID>(table, count) };
@@ -89,11 +80,7 @@ fn read_v6() -> Vec<Entry> {
         .collect()
 }
 
-/// Достаёт порт из `DWORD`, где он лежит в сетевом порядке байт.
-///
-/// Свободная функция и с собственным тестом: перепутать порядок здесь легко,
-/// а последствие — «владелец не найден» на каждом соединении, без единой
-/// ошибки в журнале.
+/// Достаёт порт из `DWORD` в сетевом порядке байт.
 pub(super) fn port_of(raw: u32) -> u16 {
     u16::from_be_bytes([(raw & 0xFF) as u8, ((raw >> 8) & 0xFF) as u8])
 }
@@ -104,8 +91,6 @@ mod tests {
 
     #[test]
     fn port_is_read_in_network_order() {
-        // 443 в сетевом порядке — это `0x01BB`, то есть байты `01 BB`,
-        // лежащие в `DWORD` как `0x0000BB01`.
         assert_eq!(port_of(0x0000_BB01), 443);
         assert_eq!(port_of(0x0000_5000), 80);
         assert_eq!(port_of(0x0000_3500), 53);
@@ -113,8 +98,6 @@ mod tests {
 
     #[test]
     fn snapshot_does_not_panic() {
-        // Настоящая таблица системы. Проверяем не содержимое, а то, что
-        // разбор переменной длины не выходит за границы.
         let entries = snapshot();
         for entry in entries.iter().take(50) {
             assert!(entry.local.port() > 0 || entry.pid == 0);
@@ -123,8 +106,6 @@ mod tests {
 
     #[test]
     fn snapshot_finds_a_listening_socket() {
-        // Открываем свой сокет и ищем его в таблице: если разбор сдвинут хотя
-        // бы на байт, найти его не удастся.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("сокет");
         let local = listener.local_addr().expect("адрес");
         let ours = std::process::id();

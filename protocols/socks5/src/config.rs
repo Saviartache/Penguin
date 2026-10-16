@@ -1,8 +1,4 @@
 //! Параметры: адрес прокси, имя, пароль, разрешение на UDP.
-//!
-//! Полей мало, и это свойство самого протокола: договариваться в SOCKS5 не о
-//! чем — ни шифрования, ни транспорта, ни версий. Всё, что есть, — куда
-//! стучаться и под каким именем.
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
@@ -12,8 +8,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Socks5Error, Socks5Result};
 
 /// Настройки подключения к прокси SOCKS5.
-///
-/// `Debug` реализован вручную ниже — производный вывел бы пароль в журнал.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Socks5Config {
@@ -24,25 +18,15 @@ pub struct Socks5Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
 
-    /// Пароль.
-    ///
-    /// В `Debug` не попадает: вывод пишется вручную ниже.
+    /// Пароль; в `Debug` не попадает.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 
-    /// TLS до прокси. Относится только к протоколу `socks5-tls`.
-    ///
-    /// Заворачивается в него **только управляющее соединение**: датаграммы
-    /// `UDP ASSOCIATE` идут мимо, открытым текстом. Это свойство протокола, а
-    /// не недоделка (см. документ крейта), и окно обязано сказать о нём вслух.
+    /// TLS до прокси (только `socks5-tls`); защищает лишь управляющее соединение, не датаграммы.
     #[serde(default)]
     pub tls: TlsConfig,
 
-    /// Пускать ли UDP через прокси.
-    ///
-    /// По умолчанию да, но выключатель нужен: `UDP ASSOCIATE` поддерживают
-    /// не все прокси, а маршрутизатор обязан знать заранее — направление,
-    /// не умеющее UDP, не должно получить DNS-запрос и молча его потерять.
+    /// Пускать ли UDP: `UDP ASSOCIATE` умеют не все прокси, маршрутизатор должен знать заранее.
     #[serde(default = "yes")]
     pub udp: bool,
 }
@@ -60,10 +44,6 @@ impl Socks5Config {
             .parse()
             .map_err(|e| Socks5Error::config(format!("адрес прокси `{raw}`: {e}")))?;
 
-        // Диапазон портов — это смена порта на ходу, и у SOCKS5 её нет:
-        // соединение открывается на каждое подключение заново, и «сменить»
-        // тут нечего. Молча взять первый порт значило бы подключаться не туда,
-        // куда просили.
         if endpoint.ports.is_hopping() {
             return Err(Socks5Error::config(
                 "SOCKS5 не умеет смену порта: укажите один порт",
@@ -72,20 +52,13 @@ impl Socks5Config {
         Ok((endpoint.host, endpoint.ports.first()))
     }
 
-    /// Имя и пароль, если прокси их спрашивает.
-    ///
-    /// Пароль без имени — не «анонимный вход с паролем», а незаполненное поле:
-    /// в RFC 1929 имя обязательно. Разбирается это в [`Self::validate`].
+    /// Имя и пароль, если прокси их спрашивает; пароль без имени отвергает [`Self::validate`].
     pub fn credentials(&self) -> Option<(&str, &str)> {
         let username = self.username.as_deref().filter(|name| !name.is_empty())?;
         Some((username, self.password.as_deref().unwrap_or_default()))
     }
 
-    /// Настройки TLS кто-то трогал.
-    ///
-    /// Нужно, чтобы отличить «человек выбрал не тот протокол» от «поля просто
-    /// нет». Блок `tls` в профиле без TLS означает первое, и промолчать здесь
-    /// значило бы отдать пароль в открытую ровно тогда, когда просили обратного.
+    /// Заданы ли настройки TLS: в профиле без TLS это ошибка выбора протокола.
     fn tls_is_set(&self) -> bool {
         let tls = &self.tls;
         tls.sni.is_some()
@@ -95,9 +68,7 @@ impl Socks5Config {
             || !tls.alpn.is_empty()
     }
 
-    /// Проверяет настройки, не устанавливая соединения.
-    ///
-    /// `secure` — под TLS ли разговор с прокси.
+    /// Проверяет настройки без сети; `secure` — под TLS ли разговор с прокси.
     pub fn validate(&self, secure: bool) -> Socks5Result<()> {
         self.endpoint()?;
 
@@ -117,21 +88,18 @@ impl Socks5Config {
                 "задан пароль без имени пользователя: в SOCKS5 они идут только парой",
             ));
         }
-        if let Some((username, password)) = self.credentials() {
-            // Длина пишется одним байтом (RFC 1929): то, что длиннее, в запрос
-            // просто не поместится.
-            if username.len() > 255 || password.len() > 255 {
-                return Err(Socks5Error::config(
-                    "имя и пароль SOCKS5 не длиннее 255 байт каждый",
-                ));
-            }
+        if let Some((username, password)) = self.credentials()
+            && (username.len() > 255 || password.len() > 255)
+        {
+            return Err(Socks5Error::config(
+                "имя и пароль SOCKS5 не длиннее 255 байт каждый",
+            ));
         }
         Ok(())
     }
 }
 
-// Пароль не должен попасть в журнал ни целиком, ни частями: строка «первые
-// четыре символа» — это уже утечка, если паролей у пользователя два-три.
+// Пароль в журнал не попадает ни целиком, ни частями (AGENTS §5.2)
 impl std::fmt::Debug for Socks5Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Socks5Config")
@@ -180,8 +148,6 @@ mod tests {
 
     #[test]
     fn refuses_a_port_range() {
-        // Смены порта у SOCKS5 нет; молча взять первый порт значило бы
-        // подключаться не туда, куда просили.
         assert!(config("127.0.0.1:1080-1090").endpoint().is_err());
     }
 
@@ -201,8 +167,6 @@ mod tests {
 
     #[test]
     fn an_empty_password_still_counts_as_credentials() {
-        // Прокси, спрашивающий имя и пустой пароль, встречается: пропустить
-        // проверку подлинности значило бы получить отказ на ровном месте.
         let config = Socks5Config {
             username: Some("penguin".to_owned()),
             ..config("127.0.0.1:1080")
@@ -213,8 +177,6 @@ mod tests {
 
     #[test]
     fn a_password_without_a_name_is_reported() {
-        // В RFC 1929 имя обязательно; молча отправить пустое — значит получить
-        // отказ и гадать, при чём тут пароль.
         let config = Socks5Config {
             password: Some("секрет".to_owned()),
             ..config("127.0.0.1:1080")
@@ -224,9 +186,6 @@ mod tests {
 
     #[test]
     fn tls_settings_in_a_plain_profile_are_refused() {
-        // Иначе человек ставит «не проверять сертификат», видит, что профиль
-        // сохранился, и уверен, что TLS есть, — а пароль и адрес назначения
-        // всё это время уходят открытым текстом.
         let mut config = config("127.0.0.1:1080");
         config.tls.insecure = true;
         assert!(config.validate(false).is_err());
@@ -247,8 +206,6 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_field() {
-        // Опечатка в имени поля не должна молча превращаться в умолчание:
-        // человек напишет `user` и будет гадать, почему прокси его не пускает.
         let raw = json!({ "server": "127.0.0.1:1080", "user": "penguin" });
         assert!(serde_json::from_value::<Socks5Config>(raw).is_err());
     }

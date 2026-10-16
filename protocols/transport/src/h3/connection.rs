@@ -1,13 +1,11 @@
 //! Соединение HTTP/3 поверх готового соединения QUIC.
 //!
-//! Соединение QUIC приходит снаружи: как его поднять — со своим сокетом,
-//! обфускацией и управлением перегрузкой — решает протокол. Здесь только
-//! HTTP/3 поверх него: свой поток управления с `SETTINGS`, фоновая задача
-//! для потоков сервера и запросы.
+//! QUIC приходит снаружи; здесь поток управления с `SETTINGS`, фоновая задача и запросы.
 
 use std::sync::Arc;
 
 use bytes::{BufMut, BytesMut};
+use penguin_proto::random;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -29,8 +27,7 @@ const MAX_FIELD_SECTION_SIZE: u64 = 64 * 1024;
 pub struct Options {
     /// Объявить и принимать датаграммы HTTP/3 (RFC 9297).
     ///
-    /// Выключено — датаграммы соединения QUIC не трогаются: ими может
-    /// пользоваться сам протокол, как Hysteria 2.
+    /// Выключено — датаграммы QUIC не трогаются (они нужны протоколу, как Hysteria 2).
     pub datagrams: bool,
 }
 
@@ -58,8 +55,7 @@ impl Drop for Inner {
 impl Connection {
     /// Поднимает HTTP/3: открывает поток управления и шлёт `SETTINGS`.
     ///
-    /// Настроек сервера не ждёт (RFC 9114, §7.2.4.2): запрос можно слать
-    /// сразу, ждёт только расширенный `CONNECT`.
+    /// Настроек сервера не ждёт (RFC 9114, §7.2.4.2), кроме расширенного `CONNECT`.
     pub async fn new(quic: quinn::Connection, options: Options) -> H3Result<Self> {
         let mut control = quic.open_uni().await.map_err(H3Error::closed)?;
         control
@@ -188,8 +184,8 @@ impl Connection {
 /// Начало своего потока управления: тип и `SETTINGS`.
 fn control_preface(datagrams: bool) -> BytesMut {
     let grease = (
-        settings::grease_id(rand::random::<u16>().into()),
-        rand::random::<u8>().into(),
+        settings::grease_id(random::range(0..1 << 16)),
+        random::range(0..1 << 8),
     );
     let payload = settings::encode(MAX_FIELD_SECTION_SIZE, datagrams, grease);
     let mut out = BytesMut::new();

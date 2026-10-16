@@ -1,27 +1,18 @@
-//! Разговор с ядром на языке netlink.
-//!
-//! Не `ip route`: маршруты — то, чем тоннель забирает трафик, и снимать их
-//! обязательно даже по аварийному пути. Зависеть в этом от чужой программы,
-//! которой в системе может не оказаться, а вывод которой к тому же
-//! переводится, нельзя.
-//!
-//! Заголовки объявлены здесь, а не взяты из `libc`: их там нет, а сама
-//! раскладка — двоичный договор ядра с программами, собранными десятилетия
-//! назад, и не меняется.
+//! Netlink без `ip route`: снимать маршруты надо и по аварийному пути, а чужая программа может
+//! отсутствовать. Заголовки объявлены здесь — в `libc` их нет, раскладка — договор ядра.
 
 use crate::error::{PlatformError, PlatformResult};
 
 /// Это запрос.
 pub(super) const NLM_F_REQUEST: u16 = 0x001;
-/// Ответить, даже если всё получилось: молчание ядра нам не годится —
-/// неудача снятия маршрута обязана быть заметной.
+/// Ответить, даже если всё получилось: неудача снятия должна быть заметной.
 pub(super) const NLM_F_ACK: u16 = 0x004;
 /// Не подменять существующий маршрут.
 pub(super) const NLM_F_EXCL: u16 = 0x200;
 /// Создать, если его нет.
 pub(super) const NLM_F_CREATE: u16 = 0x400;
 
-/// Ответ с кодом ошибки. Он же — подтверждение с нулём вместо кода.
+/// Ответ с кодом ошибки; код 0 — подтверждение.
 const NLMSG_ERROR: u16 = 2;
 
 /// Длина заголовка сообщения.
@@ -48,9 +39,9 @@ pub(super) struct RouteHeader {
     pub(super) family: u8,
     /// Длина префикса назначения.
     pub(super) destination_len: u8,
-    /// Длина префикса источника. Всегда ноль: источник мы не сужаем.
+    /// Длина префикса источника (всегда 0).
     pub(super) source_len: u8,
-    /// Тип обслуживания. Не используется.
+    /// Тип обслуживания.
     pub(super) tos: u8,
     /// Таблица маршрутизации.
     pub(super) table: u8,
@@ -60,7 +51,7 @@ pub(super) struct RouteHeader {
     pub(super) scope: u8,
     /// Вид маршрута.
     pub(super) kind: u8,
-    /// Флаги. Не используются.
+    /// Флаги.
     pub(super) flags: u32,
 }
 
@@ -70,14 +61,12 @@ pub(super) struct Message {
 }
 
 impl Message {
-    /// Начинает сообщение о маршруте.
+    /// Начинает сообщение о маршруте; номер проставляет [`Self::finish`].
     pub(super) fn new(kind: u16, flags: u16, route: &RouteHeader) -> Self {
         let header = MessageHeader {
             length: 0,
             kind,
             flags: flags | NLM_F_REQUEST,
-            // Порядковый номер и порт заполняет отправка: одному сообщению —
-            // один номер, и следить за ним удобнее в одном месте.
             sequence: 0,
             port: 0,
         };
@@ -88,10 +77,7 @@ impl Message {
         Self { buffer }
     }
 
-    /// Дописывает свойство маршрута.
-    ///
-    /// Каждое выровнено по четыре байта — так его читает ядро. Без выравнивания
-    /// оно прочитает следующее свойство со сдвигом и вернёт `EINVAL`.
+    /// Дописывает свойство, выровненное по 4 байта (иначе ядро вернёт `EINVAL`).
     pub(super) fn attribute(&mut self, kind: u16, value: &[u8]) {
         let length = 4 + value.len();
         #[allow(
@@ -105,7 +91,7 @@ impl Message {
         self.buffer.resize(align(self.buffer.len()), 0);
     }
 
-    /// Проставляет длину и отдаёт готовые байты.
+    /// Проставляет длину и номер, отдаёт готовые байты.
     pub(super) fn finish(mut self, sequence: u32) -> Vec<u8> {
         #[allow(
             clippy::cast_possible_truncation,
@@ -126,6 +112,7 @@ const fn align(length: usize) -> usize {
 /// Байты структуры как они лягут в сообщение.
 fn bytes_of<T: Copy>(value: &T) -> &[u8] {
     #[allow(unsafe_code, reason = "заголовок netlink передаётся ядру как есть")]
+    // SAFETY: `T` — `repr(C)` без указателей; длина равна размеру значения.
     unsafe {
         std::slice::from_raw_parts(
             std::ptr::from_ref(value).cast::<u8>(),
@@ -140,18 +127,15 @@ pub(super) fn talk(message: Message) -> PlatformResult<Vec<u8>> {
 
     use nix::sys::socket::{AddressFamily, MsgFlags, SockFlag, SockType};
 
+    // Протокол `None` (0) — `NETLINK_ROUTE`.
     let socket = nix::sys::socket::socket(
         AddressFamily::Netlink,
         SockType::Raw,
         SockFlag::empty(),
-        // `None` — протокол ноль, а ноль в семействе netlink и есть
-        // подсистема маршрутизации (`NETLINK_ROUTE`). Отдельного варианта под
-        // неё в `nix` нет.
         None,
     )
     .map_err(|err| PlatformError::Route(format!("сокет netlink: {err}")))?;
 
-    // Номер нужен только чтобы отличить свой ответ от чужого; часов хватает.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "от времени нужен лишь неповторяющийся хвост"
@@ -174,9 +158,7 @@ pub(super) fn talk(message: Message) -> PlatformResult<Vec<u8>> {
     Ok(reply)
 }
 
-/// Проверяет ответ ядра.
-///
-/// Подтверждение приходит тем же сообщением, что и ошибка: нулём вместо кода.
+/// Проверяет ответ ядра; подтверждение — это `NLMSG_ERROR` с кодом 0.
 fn check(reply: &[u8]) -> PlatformResult<()> {
     let Some(kind) = reply.get(4..6) else {
         return Err(PlatformError::Route("ядро ответило пустотой".to_owned()));
@@ -203,10 +185,7 @@ fn check(reply: &[u8]) -> PlatformResult<()> {
     })
 }
 
-/// Перебирает свойства, приложенные к сообщению.
-///
-/// Возвращает пары «вид, значение». Ответ ядра — чужие данные, и обрыв в
-/// середине здесь обычное дело: перебор просто заканчивается.
+/// Пары «вид, значение» свойств сообщения; обрыв чужих данных просто завершает перебор.
 pub(super) fn attributes(payload: &[u8]) -> Vec<(u16, &[u8])> {
     let mut found = Vec::new();
     let mut offset = 0;
@@ -223,7 +202,7 @@ pub(super) fn attributes(payload: &[u8]) -> Vec<(u16, &[u8])> {
     found
 }
 
-/// Полезная часть ответа о маршруте: всё, что идёт после двух заголовков.
+/// Полезная часть ответа о маршруте: всё после двух заголовков.
 pub(super) fn route_payload(reply: &[u8]) -> Option<&[u8]> {
     reply.get(HEADER_LEN + ROUTE_LEN..)
 }
@@ -234,22 +213,18 @@ mod tests {
 
     #[test]
     fn headers_are_the_size_the_kernel_expects() {
-        // Разойдясь с ядром на байт, мы получим `EINVAL` без единого намёка
-        // на причину.
         assert_eq!(std::mem::size_of::<MessageHeader>(), HEADER_LEN);
         assert_eq!(std::mem::size_of::<RouteHeader>(), ROUTE_LEN);
     }
 
     #[test]
     fn attributes_are_aligned_to_four_bytes() {
-        // Без выравнивания ядро читает следующее свойство со сдвигом.
         let mut message = Message::new(0, 0, &RouteHeader::default());
         message.attribute(1, &[1, 2, 3]);
         message.attribute(2, &[4, 5, 6, 7]);
 
         let bytes = message.finish(7);
         assert_eq!(bytes.len() % 4, 0);
-        // Первое свойство занимает 4 + 3 = 7 байт и дополняется до восьми.
         assert_eq!(bytes.len(), HEADER_LEN + ROUTE_LEN + 8 + 8);
     }
 
@@ -268,7 +243,7 @@ mod tests {
 
     #[test]
     fn a_request_flag_is_always_set() {
-        // Без него ядро считает сообщение уведомлением и молча его роняет.
+        // Без него ядро считает сообщение уведомлением и роняет.
         let bytes = Message::new(24, NLM_F_ACK, &RouteHeader::default()).finish(1);
         let flags = u16::from_ne_bytes([bytes[6], bytes[7]]);
         assert_eq!(flags & NLM_F_REQUEST, NLM_F_REQUEST);
@@ -276,7 +251,6 @@ mod tests {
 
     #[test]
     fn a_zero_code_is_an_acknowledgement() {
-        // Подтверждение приходит тем же сообщением, что и ошибка.
         let mut reply = vec![0u8; HEADER_LEN + 4];
         reply[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
         check(&reply).expect("ноль означает успех");
@@ -294,8 +268,6 @@ mod tests {
 
     #[test]
     fn attributes_stop_at_a_truncated_tail() {
-        // Ответ ядра — чужие данные; обрыв в середине не должен приводить к
-        // панике.
         let payload = [8u8, 0, 5, 0, 1, 2, 3, 4, 200, 0];
         let found = attributes(&payload);
         assert_eq!(found.len(), 1);

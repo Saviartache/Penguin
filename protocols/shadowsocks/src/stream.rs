@@ -6,18 +6,9 @@
 //!       открытым текстом, один раз в начале
 //! ```
 //!
-//! Заголовков у Shadowsocks нет вовсе: с первого байта после соли идёт шифр.
-//! Адрес назначения — тоже внутри, первым куском, и снаружи его не видно.
-//!
-//! # Отчего здесь так мало
-//!
-//! Кадр — соль, длина отдельным сообщением, кусок следующим — у Shadowsocks
-//! общий со Snell, и живёт он в [`penguin_transport::aead`]. Своим у
-//! протокола остался только вывод ключа, и он передаётся туда через
-//! [`penguin_transport::aead::Keying`].
-//!
-//! Тесты, однако, остались здесь. Общий кадр проверяется у себя на выдуманном
-//! выводе ключа; здесь — на настоящем, том самом, которым говорит сервер.
+//! Кадр общий со Snell и лежит в [`penguin_transport::aead`]; протокол передаёт туда
+//! только вывод ключа через [`penguin_transport::aead::Keying`]. Тесты здесь — на
+//! настоящем выводе ключа.
 
 use penguin_transport::aead::{ChunkStream, Cipher, Keying};
 
@@ -48,10 +39,7 @@ mod tests {
     const METHOD: Method = Method::Aes256Gcm;
     const PASSWORD: &str = "пароль от сервера";
 
-    /// Собирает пару «клиент, сервер» с общим паролем.
-    ///
-    /// Сервер здесь ненастоящий: он умеет только то же, что клиент, — и это
-    /// ровно то, что нужно, чтобы проверить кадры без сети.
+    /// Пара «клиент, сервер» с общим паролем; сервер ненастоящий.
     fn pair() -> (
         SsStream<tokio::io::DuplexStream>,
         tokio::io::DuplexStream,
@@ -71,7 +59,7 @@ mod tests {
         )
     }
 
-    /// Собирает то, что прислал бы сервер: свою соль и куски под ней.
+    /// То, что прислал бы сервер: соль и куски под ней.
     fn from_server(master: &[u8], pieces: &[&[u8]]) -> Vec<u8> {
         let salt = vec![9u8; METHOD.salt_len()];
         let key = kdf::session_key(master, &salt, METHOD).expect("выводится");
@@ -99,7 +87,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_reply_arriving_in_pieces_is_assembled() {
-        // Соль, длина и кусок приезжают тремя пакетами — обычное дело.
         let (mut client, mut server, master) = pair();
         let wire = from_server(&master, &[b"payload"]);
 
@@ -117,8 +104,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_wrong_password_looks_like_a_refusal() {
-        // Отказа у Shadowsocks нет: сервер с другим паролем просто пришлёт то,
-        // что у нас не расшифруется. Это и есть «неверный пароль».
         let (mut client, mut server, _) = pair();
         let other = kdf::master_key("другой пароль", METHOD);
         server
@@ -161,7 +146,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_server_that_says_nothing_is_a_clean_end() {
-        // Сервер вправе закрыть соединение, не прислав даже соли.
         let (mut client, server, _) = pair();
         drop(server);
 
@@ -172,7 +156,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_absurd_length_is_refused() {
-        // Больше предела протокол не допускает: на том конце не Shadowsocks.
         let (mut client, mut server, master) = pair();
 
         let salt = vec![9u8; METHOD.salt_len()];
@@ -193,8 +176,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_long_write_is_cut_into_chunks() {
-        // Длина пишется двумя байтами с запасом на служебные биты: кусок
-        // длиннее предела сервер не примет.
         let (mut client, mut server, _) = pair();
         let payload = vec![7u8; MAX_CHUNK + 1000];
 
@@ -203,7 +184,6 @@ mod tests {
             client.flush().await.expect("сброшено");
         });
 
-        // Первый кусок — ровно предел, второй — остаток.
         let mut head = vec![0u8; LENGTH_FRAME];
         server.read_exact(&mut head).await.expect("пришло");
         let mut body = vec![0u8; sealed_len(MAX_CHUNK)];

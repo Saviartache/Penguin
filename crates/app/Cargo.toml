@@ -20,16 +20,12 @@ path = "src/main.rs"
 [dependencies]
 penguin-config.workspace = true
 penguin-platform.workspace = true
-# Три роли одной программы. Крейт стоит выше всех и никем не подключается —
-# стрелки вверх отсюда невозможны по построению.
 penguin-cli.workspace = true
 penguin-daemon.workspace = true
 penguin-gui.workspace = true
 
-clap.workspace = true
 anyhow.workspace = true
 tracing-subscriber.workspace = true
-tracing-appender.workspace = true
 
 # Иконка `penguin.exe`: ресурс собирает `build.rs`.
 #

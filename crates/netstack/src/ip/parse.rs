@@ -1,13 +1,4 @@
-//! Быстрый разбор заголовков: адреса и порты нужны раньше, чем соединение
-//! установлено.
-//!
-//! Стек TCP/IP из smoltcp разбирает пакеты сам, но решение о судьбе
-//! соединения принимается **до** того, как оно установлено: по первому же
-//! пакету надо понять, кому и куда, чтобы завести под него сокет. UDP же
-//! через smoltcp не идёт вовсе — состояния у него нет, и заводить сокет на
-//! каждую пару адресов было бы чистой тратой.
-//!
-//! Разбор идёт по срезу без единой копии: заголовок читается на месте.
+//! Разбор заголовков на месте, без копий: адреса нужны до создания сокета, а UDP идёт мимо smoltcp.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -36,19 +27,13 @@ pub struct Packet<'a> {
     pub destination: SocketAddr,
     /// Вид трафика.
     pub network: Network,
-    /// Флаг `SYN` без `ACK` — начало соединения.
-    ///
-    /// Только для TCP; для UDP всегда `false`.
+    /// Флаг `SYN` без `ACK` — начало соединения (только TCP).
     pub is_syn: bool,
     /// Данные после транспортного заголовка.
     pub payload: &'a [u8],
 }
 
-/// Разбирает IP-пакет.
-///
-/// `None` — не IP, обрезано, или протокол не тот, которым мы занимаемся.
-/// Всё это обычный фон: по интерфейсу ходят ICMP, широковещательные
-/// объявления и что угодно ещё.
+/// Разбирает IP-пакет; `None` — не IP, обрезано или чужой протокол (обычный фон, например ICMP).
 pub fn parse(packet: &[u8]) -> Option<Packet<'_>> {
     match packet.first()? >> 4 {
         4 => parse_v4(packet),
@@ -62,15 +47,12 @@ fn parse_v4(packet: &[u8]) -> Option<Packet<'_>> {
         return None;
     }
 
-    // Длина заголовка задаётся младшими четырьмя битами первого байта в
-    // тридцатидвухбитных словах: пакеты с параметрами длиннее двадцати байт.
     let header_len = usize::from(packet[0] & 0x0F) * 4;
     if header_len < IPV4_MIN_HEADER || packet.len() < header_len {
         return None;
     }
 
-    // Фрагмент не первый — транспортного заголовка в нём нет. Смещение
-    // лежит в младших тринадцати битах поля флагов и смещения.
+    // Не первый фрагмент: транспортного заголовка нет.
     let fragment_offset = u16::from_be_bytes([packet[6], packet[7]]) & 0x1FFF;
     if fragment_offset != 0 {
         return None;
@@ -80,8 +62,7 @@ fn parse_v4(packet: &[u8]) -> Option<Packet<'_>> {
     let source = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
     let destination = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
 
-    // Общая длина из заголовка может быть меньше того, что пришло: драйвер
-    // иногда дополняет пакет до минимального размера кадра.
+    // Драйвер может дополнить пакет: верим длине из заголовка.
     let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
     let end = total_len.clamp(header_len, packet.len());
 
@@ -98,8 +79,7 @@ fn parse_v6(packet: &[u8]) -> Option<Packet<'_>> {
         return None;
     }
 
-    // Заголовков расширения не разбираем: в тоннеле они не встречаются, а
-    // делать вид, что разобрали, хуже, чем честно пропустить пакет мимо.
+    // Заголовки расширения не разбираются.
     let protocol = packet[6];
 
     let source = Ipv6Addr::from(<[u8; 16]>::try_from(&packet[8..24]).ok()?);
@@ -131,13 +111,13 @@ fn transport<'a>(
             let source_port = u16::from_be_bytes([body[0], body[1]]);
             let destination_port = u16::from_be_bytes([body[2], body[3]]);
 
-            // Смещение данных — старшие четыре бита тринадцатого байта, в
-            // тридцатидвухбитных словах.
             let data_offset = usize::from(body[12] >> 4) * 4;
             let flags = body[13];
             let is_syn = flags & 0x02 != 0 && flags & 0x10 == 0;
 
-            let payload = body.get(data_offset.max(20)..).unwrap_or(&[]);
+            let payload = body
+                .get(data_offset.max(20)..)
+                .unwrap_or(&body[body.len()..]);
 
             Some(Packet {
                 source: SocketAddr::new(source, source_port),
@@ -154,7 +134,6 @@ fn transport<'a>(
             let source_port = u16::from_be_bytes([body[0], body[1]]);
             let destination_port = u16::from_be_bytes([body[2], body[3]]);
 
-            // Длина в заголовке UDP считается вместе с ним самим.
             let length = u16::from_be_bytes([body[4], body[5]]) as usize;
             let end = length.clamp(8, body.len());
 
@@ -219,7 +198,6 @@ mod tests {
 
     #[test]
     fn syn_ack_is_not_a_new_connection() {
-        // Ответ сервера тоже несёт `SYN`, но новым соединением не является.
         let packet = ipv4(PROTO_TCP, &tcp_header(443, 50000, 0x12));
         assert!(!parse(&packet).expect("разбирается").is_syn);
     }
@@ -234,8 +212,6 @@ mod tests {
 
     #[test]
     fn respects_the_length_field_over_the_buffer() {
-        // Драйвер дополняет короткий пакет до минимального размера кадра;
-        // лишние байты не должны попасть в данные.
         let mut packet = ipv4(PROTO_UDP, &udp_datagram(1, 53, b"ab"));
         packet.extend_from_slice(&[0xFF; 40]);
         assert_eq!(parse(&packet).expect("разбирается").payload, b"ab");
@@ -243,8 +219,6 @@ mod tests {
 
     #[test]
     fn handles_options_in_the_header() {
-        // Заголовок с параметрами длиннее двадцати байт; транспорт начинается
-        // после него, а не по фиксированному смещению.
         let mut packet = ipv4(PROTO_TCP, &tcp_header(50000, 443, 0x02));
         packet[0] = 0x46; // 24 байта заголовка
         packet.splice(20..20, [0u8; 4]);
@@ -257,8 +231,6 @@ mod tests {
 
     #[test]
     fn skips_non_first_fragments() {
-        // Транспортного заголовка во втором фрагменте нет; разбирать там
-        // нечего, и притворяться, что разобрали, нельзя.
         let mut packet = ipv4(PROTO_TCP, &tcp_header(50000, 443, 0x02));
         packet[6..8].copy_from_slice(&0x0001u16.to_be_bytes());
         assert!(parse(&packet).is_none());
@@ -283,7 +255,6 @@ mod tests {
 
     #[test]
     fn ignores_other_protocols() {
-        // ICMP по интерфейсу ходит постоянно; это фон, а не ошибка.
         assert!(parse(&ipv4(PROTO_ICMP, &[0u8; 8])).is_none());
     }
 
@@ -297,7 +268,6 @@ mod tests {
 
     #[test]
     fn garbage_never_panics() {
-        // Заголовки приходят из сети: любое число в них может быть любым.
         let mut packet = ipv4(PROTO_TCP, &tcp_header(50000, 443, 0x02));
         for index in 0..packet.len() {
             let original = packet[index];

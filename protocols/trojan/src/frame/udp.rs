@@ -8,48 +8,42 @@
 //! +------+----------+----------+--------+------+----------+
 //! ```
 //!
-//! Адрес стоит на **каждой** посылке, поэтому один поток обслуживает всю
-//! UDP-сессию приложения, сколько бы адресатов у неё ни было. Этим Trojan
-//! отличается от VLESS, где адрес назван один раз в заголовке и на каждый
-//! адрес нужен свой поток.
-//!
-//! # Зачем длина, если границы и так есть
-//!
-//! Их нет. Внутри — поток TLS, то есть байты без границ: две датаграммы,
-//! отправленные подряд, приходят одним куском, а одна большая — тремя. Длина
-//! и есть та граница, которую протокол восстанавливает; `CRLF` после неё —
-//! проверка, что мы читаем заголовок, а не середину чужих данных.
+//! Адрес стоит на каждой посылке: один поток обслуживает всю UDP-сессию. Длина
+//! восстанавливает границы в потоке TLS, `CRLF` после неё проверяет, что читается заголовок.
 
-use bytes::Bytes;
+use std::ops::Range;
+
 use penguin_core::address::SocketAddress;
 use penguin_transport::addr::socks;
 
 use crate::error::{TrojanError, TrojanResult};
 use crate::frame::request::CRLF;
 
-/// Наибольшая датаграмма, которую мы согласны принять.
-///
-/// Больше и не бывает: 65535 — предел самого UDP. Верить объявленной длине
-/// без предела значит отдать памяти столько, сколько скажет тот конец.
+/// Наибольшая датаграмма, которую принимаем (предел UDP).
 pub const MAX_PAYLOAD: usize = 65_535;
 
-/// Собирает датаграмму для отправки в поток.
-pub fn encode(target: &SocketAddress, payload: &[u8]) -> TrojanResult<Vec<u8>> {
+/// Дописывает датаграмму для отправки в `out`.
+pub fn encode_into(out: &mut Vec<u8>, target: &SocketAddress, payload: &[u8]) -> TrojanResult<()> {
     let len = u16::try_from(payload.len()).map_err(|_| TrojanError::Oversized(payload.len()))?;
 
-    let mut out = Vec::with_capacity(socks::encoded_len(target) + 4 + payload.len());
-    socks::encode(target, &mut out)?;
+    out.reserve(socks::encoded_len(target) + 4 + payload.len());
+    socks::encode(target, out)?;
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&CRLF);
     out.extend_from_slice(payload);
+    Ok(())
+}
+
+/// Собирает датаграмму для отправки в поток.
+pub fn encode(target: &SocketAddress, payload: &[u8]) -> TrojanResult<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_into(&mut out, target, payload)?;
     Ok(out)
 }
 
-/// Читает датаграмму с начала среза.
-///
-/// Возвращает адрес отправителя, данные и число съеденных байт.
-/// `Ok(None)` — пришло пока не всё; это не ошибка, а обычное дело в потоке.
-pub fn decode(bytes: &[u8]) -> TrojanResult<Option<(SocketAddress, Bytes, usize)>> {
+/// Читает датаграмму с начала среза: адрес отправителя и границы данных (`range.end` — съедено).
+/// `Ok(None)` — пришло не всё, это обычное дело в потоке.
+pub fn decode(bytes: &[u8]) -> TrojanResult<Option<(SocketAddress, Range<usize>)>> {
     let Some((source, used)) = socks::decode(bytes)? else {
         return Ok(None);
     };
@@ -62,9 +56,7 @@ pub fn decode(bytes: &[u8]) -> TrojanResult<Option<(SocketAddress, Bytes, usize)
     let Some(crlf) = bytes.get(used + 2..).and_then(<[u8]>::first_chunk::<2>) else {
         return Ok(None);
     };
-    // Не сошлось — значит, мы читаем не заголовок. Дальше в потоке смысла нет:
-    // восстановить границу нечем, и притворяться, что пакет просто потерян,
-    // означало бы отдавать приложению мусор до конца сессии.
+    // Границу не восстановить: поток дальше не читается
     if *crlf != CRLF {
         return Err(TrojanError::malformed(
             "после длины датаграммы нет CRLF: поток разъехался",
@@ -72,10 +64,10 @@ pub fn decode(bytes: &[u8]) -> TrojanResult<Option<(SocketAddress, Bytes, usize)
     }
 
     let start = used + 4;
-    let Some(payload) = bytes.get(start..start + len) else {
+    if bytes.len() < start + len {
         return Ok(None);
-    };
-    Ok(Some((source, Bytes::copy_from_slice(payload), start + len)))
+    }
+    Ok(Some((source, start..start + len)))
 }
 
 #[cfg(test)]
@@ -94,11 +86,11 @@ mod tests {
             SocketAddress::domain("dns.example.com", 53),
         ] {
             let wrapped = encode(&target, b"\x00\x01payload").expect("собирается");
-            let (back, payload, used) = decode(&wrapped).expect("разбирается").expect("целиком");
+            let (back, range) = decode(&wrapped).expect("разбирается").expect("целиком");
 
             assert_eq!(back, target);
-            assert_eq!(&payload[..], b"\x00\x01payload");
-            assert_eq!(used, wrapped.len(), "съедено не всё");
+            assert_eq!(&wrapped[range.clone()], b"\x00\x01payload");
+            assert_eq!(range.end, wrapped.len(), "съедено не всё");
         }
     }
 
@@ -115,28 +107,23 @@ mod tests {
 
     #[test]
     fn two_datagrams_in_one_chunk_are_read_one_by_one() {
-        // Внутри TLS границ нет: две посылки подряд приходят одним куском, и
-        // разделяет их только объявленная длина.
         let first = encode(&ip("203.0.113.5", 53), b"one").expect("собирается");
         let second = encode(&ip("198.51.100.9", 5353), b"two").expect("собирается");
         let mut stream = first.clone();
         stream.extend_from_slice(&second);
 
-        let (_, payload, used) = decode(&stream).expect("разбирается").expect("целиком");
-        assert_eq!(&payload[..], b"one");
-        assert_eq!(used, first.len());
+        let (_, range) = decode(&stream).expect("разбирается").expect("целиком");
+        assert_eq!(&stream[range.clone()], b"one");
+        assert_eq!(range.end, first.len());
 
-        let (_, payload, used) = decode(&stream[used..])
-            .expect("разбирается")
-            .expect("целиком");
-        assert_eq!(&payload[..], b"two");
-        assert_eq!(used, second.len());
+        let rest = &stream[range.end..];
+        let (_, range) = decode(rest).expect("разбирается").expect("целиком");
+        assert_eq!(&rest[range.clone()], b"two");
+        assert_eq!(range.end, second.len());
     }
 
     #[test]
     fn a_datagram_arriving_in_pieces_is_not_an_error() {
-        // Одна датаграмма приходит тремя кусками — это обычное дело в потоке,
-        // и объявлять поломкой надо не это.
         let full =
             encode(&SocketAddress::domain("dns.example.com", 53), b"payload").expect("собирается");
 
@@ -151,15 +138,13 @@ mod tests {
     #[test]
     fn an_empty_payload_is_still_a_datagram() {
         let wrapped = encode(&ip("203.0.113.5", 53), b"").expect("собирается");
-        let (_, payload, used) = decode(&wrapped).expect("разбирается").expect("целиком");
-        assert!(payload.is_empty());
-        assert_eq!(used, wrapped.len());
+        let (_, range) = decode(&wrapped).expect("разбирается").expect("целиком");
+        assert!(range.is_empty());
+        assert_eq!(range.end, wrapped.len());
     }
 
     #[test]
     fn a_missing_crlf_stops_the_stream() {
-        // Восстановить границу нечем: дальше по потоку всё будет мусором, и
-        // отдавать его приложению хуже, чем оборвать сессию.
         let mut wrapped = encode(&ip("203.0.113.5", 53), b"xy").expect("собирается");
         wrapped[9] = b'!';
         assert!(decode(&wrapped).is_err());
@@ -167,8 +152,6 @@ mod tests {
 
     #[test]
     fn a_datagram_too_big_to_announce_is_refused() {
-        // Длина пишется двумя байтами; молча обрезать значит испортить данные
-        // так, что приложение не узнает о потере.
         let huge = vec![0u8; MAX_PAYLOAD + 1];
         assert!(encode(&ip("203.0.113.5", 53), &huge).is_err());
     }

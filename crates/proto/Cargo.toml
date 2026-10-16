@@ -22,5 +22,5 @@ bytes.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
-# Тестам контракта нужен исполнитель: сам контракт задач не запускает.
+# Исполнитель для тестов контракта.
 tokio = { workspace = true, features = ["rt", "macros"] }

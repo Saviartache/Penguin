@@ -1,18 +1,7 @@
 //! Поток VLESS: снять заголовок ответа, дальше пропускать как есть.
 //!
-//! Своего шифрования у VLESS нет, кадров тоже — после заголовков это ровно тот
-//! поток байт, который отдало приложение. Вся работа здесь в одном: снять
-//! ответный заголовок сервера, и снять его **лениво**.
-//!
-//! # Почему лениво
-//!
-//! Сервер шлёт свой заголовок не в ответ на наш, а вместе с первыми данными.
-//! Прочитать его сразу после отправки запроса нельзя: данных ещё нет, и
-//! чтение повисло бы до тех пор, пока приложение что-нибудь не спросит, — то
-//! есть навсегда для протоколов, где первым говорит сервер.
-//!
-//! Поэтому заголовок снимается в первом же [`AsyncRead::poll_read`], до того
-//! как приложение увидит хоть байт.
+//! Сервер шлёт заголовок вместе с первыми данными, поэтому снимается он лениво, в первом
+//! [`AsyncRead::poll_read`]: читать его сразу значило бы повиснуть там, где первым говорит сервер.
 
 use std::io;
 use std::pin::Pin;
@@ -30,10 +19,7 @@ const CHUNK: usize = 8 * 1024;
 /// Поток VLESS поверх соединения с сервером.
 pub struct VlessStream<S> {
     io: S,
-    /// Прочитанное до того, как заголовок снят.
-    ///
-    /// После этого не используется: дальше данные идут мимо, прямо в буфер
-    /// читателя, — лишняя копия на каждый пакет ни к чему.
+    /// Прочитанное до снятия заголовка; потом данные идут мимо, без копии.
     buffered: BytesMut,
     /// Заголовок ответа снят.
     ready: bool,
@@ -59,9 +45,7 @@ impl<S> VlessStream<S> {
 }
 
 impl<S: AsyncRead + Unpin> VlessStream<S> {
-    /// Пытается снять заголовок из накопленного.
-    ///
-    /// `Ok(true)` — снят; `Ok(false)` — байт пока не хватает.
+    /// `Ok(true)` — заголовок снят; `Ok(false)` — не хватает байт.
     fn take_header(&mut self) -> Result<bool, VlessError> {
         match request::response_len(&self.buffered)? {
             Some(len) => {
@@ -99,8 +83,6 @@ impl<S: AsyncRead + Unpin> AsyncRead for VlessStream<S> {
 
             match result {
                 Poll::Ready(Ok(())) if filled == 0 => {
-                    // Сервер закрылся, не прислав заголовка. Это не «конец
-                    // данных»: до данных дело даже не дошло.
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
                         VlessError::Disconnected(
@@ -114,8 +96,6 @@ impl<S: AsyncRead + Unpin> AsyncRead for VlessStream<S> {
             }
         }
 
-        // Что успело прийти вместе с заголовком, отдаётся первым: иначе оно
-        // потерялось бы, а это начало ответа сервера.
         if !this.buffered.is_empty() {
             let take = this.buffered.len().min(buf.remaining());
             buf.put_slice(&this.buffered[..take]);
@@ -193,8 +173,6 @@ mod tests {
 
     #[tokio::test]
     async fn data_arriving_with_the_header_is_not_lost() {
-        // Заголовок и первые данные приходят одним пакетом — так бывает
-        // почти всегда.
         let (client, mut server) = duplex(4096);
         let mut stream = VlessStream::new(client);
 
@@ -228,8 +206,6 @@ mod tests {
 
     #[tokio::test]
     async fn what_we_write_goes_out_untouched() {
-        // Своего шифрования и своих кадров у VLESS нет: после заголовка это
-        // ровно те байты, что отдало приложение.
         let (client, mut server) = duplex(4096);
         let mut stream = VlessStream::new(client);
 
@@ -243,8 +219,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_ordinary_web_page_is_told_apart() {
-        // Самая частая ошибка настройки — не тот адрес: на нём сидит сайт, и
-        // отвечает он страницей.
         let (client, mut server) = duplex(4096);
         let mut stream = VlessStream::new(client);
 
@@ -260,8 +234,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_server_that_closes_without_answering_is_an_error() {
-        // Не «конец данных»: до данных дело даже не дошло, и молчаливый конец
-        // выглядел бы для приложения пустым, но успешным ответом.
         let (client, server) = duplex(4096);
         let mut stream = VlessStream::new(client);
         drop(server);

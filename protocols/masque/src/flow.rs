@@ -1,19 +1,9 @@
 //! Один канал `CONNECT-UDP`: поток HTTP/3 до одного адреса назначения.
 //!
-//! # Датаграммы или капсулы
-//!
-//! RFC 9298 переносит UDP по каналу двумя способами, и RFC 9297, §3.5
-//! объявляет их семантически одинаковыми:
-//!
-//! - **кадром `HTTP/3 DATAGRAM`** поверх QUIC — без гарантий доставки и
-//!   порядка и без задержки на потерянном пакете; ровно то, что нужно UDP;
-//! - **капсулой `DATAGRAM`** в теле потока — надёжно и по порядку, ценой
-//!   задержки: поток стоит, пока не пришёл потерянный кусок.
-//!
-//! Датаграммы — когда обе стороны объявили `SETTINGS_H3_DATAGRAM` и QUIC их
-//! пропускает ([`h3::Connection::datagrams_available`]). Иначе, и для
-//! пакета, не влезающего в датаграмму QUIC, — капсулы. Принимаются оба
-//! способа всегда: сервер выбирает свой сам.
+//! Отправка: кадр `HTTP/3 DATAGRAM`, если обе стороны объявили
+//! `SETTINGS_H3_DATAGRAM` ([`h3::Connection::datagrams_available`]); иначе и
+//! для пакета, не влезающего в датаграмму QUIC, — капсула `DATAGRAM` в потоке
+//! (RFC 9297, §3.5). Приём — оба способа.
 
 use bytes::Bytes;
 use penguin_core::address::SocketAddress;
@@ -48,13 +38,8 @@ impl std::fmt::Debug for Flow {
 }
 
 impl Flow {
-    /// Заводит канал вокруг уже открытого и подтверждённого потока
-    /// `CONNECT-UDP` и запускает приём.
-    ///
-    /// `incoming` — общая очередь той [`crate::datagram::MasqueDatagram`],
-    /// что открыла этот канал: датаграммы от разных целей одного и того же
-    /// направления `bind_udp` сходятся в одну очередь, как и у остальных
-    /// протоколов с [`penguin_proto::datagram::ProxyDatagram`].
+    /// Заводит канал вокруг подтверждённого потока и запускает приём;
+    /// `incoming` — общая очередь [`crate::datagram::MasqueDatagram`].
     pub fn new(
         target: SocketAddress,
         stream: RequestStream,
@@ -62,7 +47,6 @@ impl Flow {
         incoming: mpsc::Sender<(Bytes, SocketAddress)>,
     ) -> Self {
         let stream_id = stream.id();
-        // Без включённых датаграмм очереди нет — остаются капсулы.
         let datagrams = h3.register_datagrams(stream_id).ok();
         let (send, recv) = stream.split();
         let reader = tokio::spawn(receive(recv, datagrams, target.clone(), incoming));
@@ -76,14 +60,12 @@ impl Flow {
         }
     }
 
-    /// Отправляет UDP-нагрузку: датаграммой HTTP/3, если можно, иначе
-    /// капсулой `DATAGRAM` по потоку.
+    /// Отправляет UDP-нагрузку датаграммой HTTP/3, иначе капсулой.
     pub async fn send(&self, payload: &[u8]) -> MasqueResult<()> {
         if self.h3.datagrams_available() {
             let datagram = capsule::encode_udp_payload(payload)?;
             match self.h3.send_datagram(self.stream_id, &datagram) {
                 Ok(()) => return Ok(()),
-                // Не влезло в датаграмму QUIC — уйдёт капсулой.
                 Err(H3Error::DatagramTooLarge) => {}
                 Err(err) => return Err(MasqueError::Disconnected(err.to_string())),
             }
@@ -100,19 +82,12 @@ impl Flow {
 
 impl Drop for Flow {
     fn drop(&mut self) {
-        // Без этого задача приёма переживает канал и держит его половину
-        // потока открытой — тот самый «после отключения не остаётся живой
-        // задачи» из общего чек-листа приёмки протокола.
         self.reader.abort();
     }
 }
 
-/// Принимает UDP канала — и капсулы из потока, и датаграммы HTTP/3 — и
-/// раскладывает его в общую очередь.
-///
-/// Останавливается сама, когда поток заканчивается или рвётся: сервер
-/// закрыл канал, и открывать его снова придётся заново через
-/// [`crate::session::Session::open_flow`].
+/// Принимает капсулы и датаграммы HTTP/3 канала в общую очередь; кончается
+/// вместе с потоком.
 async fn receive(
     mut recv: RecvStream,
     mut datagrams: Option<DatagramReceiver>,
@@ -123,13 +98,14 @@ async fn receive(
     let mut chunk = vec![0u8; READ_CHUNK];
 
     loop {
-        let payloads = tokio::select! {
+        tokio::select! {
             read = recv.read(&mut chunk) => match read {
-                // Поток закрылся штатно — прокси завершил канал.
                 Ok(0) => return,
                 Ok(n) => {
                     reader.push(&chunk[..n]);
-                    drain_capsules(&mut reader, &target)
+                    if !forward_capsules(&mut reader, &target, &incoming).await {
+                        return;
+                    }
                 }
                 Err(err) => {
                     tracing::debug!(%target, %err, "канал CONNECT-UDP оборвался при чтении");
@@ -138,22 +114,16 @@ async fn receive(
             },
             Some(datagram) = next_datagram(&mut datagrams) => {
                 match capsule::decode_udp_payload(datagram) {
-                    Ok(payload) => Some(payload.into_iter().collect()),
+                    Ok(Some(payload)) => {
+                        if incoming.send((payload, target.clone())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => {}
                     Err(err) => {
-                        // Одна испорченная датаграмма — потеря пакета, не обрыв.
                         tracing::debug!(%target, %err, "датаграмма CONNECT-UDP не разобралась");
-                        Some(Vec::new())
                     }
                 }
-            }
-        };
-        let Some(payloads) = payloads else {
-            return;
-        };
-        for payload in payloads {
-            if incoming.send((payload, target.clone())).await.is_err() {
-                // Получатель (MasqueDatagram) уже уронен — принимать некому.
-                return;
             }
         }
     }
@@ -167,17 +137,24 @@ async fn next_datagram(datagrams: &mut Option<DatagramReceiver>) -> Option<Bytes
     }
 }
 
-/// Все целиком собранные нагрузки. `None` — капсула испорчена, и канал
-/// дальше читать нельзя: границы следующих капсул потеряны.
-fn drain_capsules(reader: &mut CapsuleReader, target: &SocketAddress) -> Option<Vec<Bytes>> {
-    let mut payloads = Vec::new();
+/// Отдаёт собранные нагрузки в очередь; `false` — приём надо прекратить
+/// (капсула испорчена, границы потеряны, либо получателя нет).
+async fn forward_capsules(
+    reader: &mut CapsuleReader,
+    target: &SocketAddress,
+    incoming: &mpsc::Sender<(Bytes, SocketAddress)>,
+) -> bool {
     loop {
         match reader.next_datagram() {
-            Ok(Some(payload)) => payloads.push(payload),
-            Ok(None) => return Some(payloads),
+            Ok(Some(payload)) => {
+                if incoming.send((payload, target.clone())).await.is_err() {
+                    return false;
+                }
+            }
+            Ok(None) => return true,
             Err(err) => {
                 tracing::warn!(%target, %err, "капсула CONNECT-UDP не разобралась");
-                return None;
+                return false;
             }
         }
     }

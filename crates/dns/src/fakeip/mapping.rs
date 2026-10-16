@@ -1,38 +1,26 @@
-//! Двустороннее соответствие адрес <-> домен. Именно оно позволяет правилам
-//! по доменам работать после подмены.
+//! Двустороннее соответствие адрес <-> домен: оно возвращает правилам по
+//! доменам имя, которого в соединении нет.
 //!
-//! Ради этого fake-IP и существует. Приложение спрашивает у нас адрес
-//! `youtube.com`, получает подставной и соединяется с ним; в момент
-//! соединения мы по адресу узнаём имя обратно — и правило «youtube.com в
-//! тоннель» срабатывает, хотя в самом соединении никакого имени нет.
-//!
-//! ```text
-//!   запрос  youtube.com ──► 198.18.0.7   (прямое отображение)
-//!   пакет   на 198.18.0.7 ──► youtube.com (обратное)
-//! ```
-//!
-//! Оба направления обязаны жить одинаково долго: адрес, для которого имя уже
-//! забыто, — это соединение, которое уйдёт не туда.
+//! Оба направления живут одинаково долго: адрес без имени — соединение не туда.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
+use ipnet::Ipv4Net;
 use parking_lot::Mutex;
 
 use super::pool::FakeIpPool;
 use crate::error::DnsResult;
 
 /// Сколько соответствий помнить.
-///
-/// Столько же, сколько имён приложение успевает спросить за время жизни
-/// адреса. Восемь тысяч — с запасом; больше означает лишь, что круг адресов
-/// замкнётся раньше, чем забудется имя.
 pub const MAX_ENTRIES: usize = 8192;
 
 /// Соответствие имён и подставных адресов.
 #[derive(Debug)]
 pub struct FakeIpMap {
+    /// Вне замка: `is_fake` спрашивают на каждом соединении.
+    network: Ipv4Net,
     inner: Mutex<Inner>,
 }
 
@@ -41,28 +29,26 @@ struct Inner {
     pool: FakeIpPool,
     to_address: HashMap<Arc<str>, Ipv4Addr>,
     to_domain: HashMap<Ipv4Addr, Arc<str>>,
-    /// Порядок выдачи — по нему вытесняются самые старые.
-    order: std::collections::VecDeque<Ipv4Addr>,
+    /// Порядок выдачи: по нему вытесняются самые старые.
+    order: VecDeque<Ipv4Addr>,
 }
 
 impl FakeIpMap {
     /// Заводит соответствие на указанной подсети.
     pub fn new(cidr: &str) -> DnsResult<Self> {
+        let pool = FakeIpPool::parse(cidr)?;
         Ok(Self {
+            network: pool.network(),
             inner: Mutex::new(Inner {
-                pool: FakeIpPool::parse(cidr)?,
+                pool,
                 to_address: HashMap::new(),
                 to_domain: HashMap::new(),
-                order: std::collections::VecDeque::new(),
+                order: VecDeque::new(),
             }),
         })
     }
 
-    /// Подставной адрес для имени.
-    ///
-    /// Повторный запрос того же имени возвращает тот же адрес: приложения
-    /// кэшируют ответы, и выдать им второй адрес значило бы держать два
-    /// соответствия там, где нужно одно.
+    /// Подставной адрес для имени; то же имя получает тот же адрес.
     pub fn address_for(&self, domain: &str) -> DnsResult<Ipv4Addr> {
         let mut inner = self.inner.lock();
 
@@ -73,9 +59,7 @@ impl FakeIpMap {
         let address = inner.pool.allocate()?;
         let domain: Arc<str> = Arc::from(domain);
 
-        // Адрес мог быть занят прежним именем — круг замкнулся. Прежнее
-        // соответствие снимается целиком, иначе имя осталось бы указывать на
-        // чужой адрес.
+        // Круг замкнулся: прежнее имя адреса снимается целиком.
         if let Some(previous) = inner.to_domain.insert(address, Arc::clone(&domain)) {
             inner.to_address.remove(&previous);
         }
@@ -94,16 +78,14 @@ impl FakeIpMap {
         Ok(address)
     }
 
-    /// Имя по подставному адресу.
-    ///
-    /// `None` — адрес не наш или соответствие уже забыто.
+    /// Имя по подставному адресу; `None` — адрес не наш или имя забыто.
     pub fn domain_for(&self, address: Ipv4Addr) -> Option<Arc<str>> {
         self.inner.lock().to_domain.get(&address).cloned()
     }
 
     /// Наш ли это адрес.
     pub fn is_fake(&self, address: Ipv4Addr) -> bool {
-        self.inner.lock().pool.contains(address)
+        self.network.contains(&address)
     }
 
     /// Сколько соответствий помнится.
@@ -135,8 +117,6 @@ mod tests {
 
     #[test]
     fn round_trips_domain_and_address() {
-        // Главное свойство: имя восстанавливается по адресу — иначе правила
-        // по доменам в режиме TUN не работают вовсе.
         let map = map();
         let address = map.address_for("youtube.com").expect("адрес выдан");
         assert_eq!(map.domain_for(address).as_deref(), Some("youtube.com"));
@@ -144,8 +124,6 @@ mod tests {
 
     #[test]
     fn same_domain_gets_the_same_address() {
-        // Приложения кэшируют ответы; второй адрес держал бы два соответствия
-        // там, где нужно одно.
         let map = map();
         let first = map.address_for("example.com").expect("адрес выдан");
         let second = map.address_for("example.com").expect("адрес выдан");
@@ -166,16 +144,14 @@ mod tests {
         let map = map();
         assert!(map.domain_for(Ipv4Addr::new(8, 8, 8, 8)).is_none());
         assert!(!map.is_fake(Ipv4Addr::new(8, 8, 8, 8)));
+        assert!(map.is_fake(Ipv4Addr::new(198, 18, 0, 7)));
     }
 
     #[test]
     fn reused_address_forgets_the_old_domain() {
-        // Круг замкнулся, адрес достался новому имени. Старое имя не должно
-        // продолжать указывать на него: соединение ушло бы не туда.
         let map = FakeIpMap::new("198.18.0.0/30").expect("подсеть разбирается");
         let first = map.address_for("first.example").expect("адрес выдан");
 
-        // Обходим круг, пока адрес не выдастся повторно.
         let mut reused = false;
         for step in 0..50 {
             let domain = format!("host{step}.example");
@@ -186,7 +162,6 @@ mod tests {
             }
         }
         assert!(reused, "адрес так и не переиспользовался");
-        // Старое имя больше не указывает на этот адрес.
         assert_ne!(
             map.address_for("first.example").expect("адрес выдан"),
             first

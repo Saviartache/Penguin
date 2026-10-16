@@ -43,8 +43,6 @@ impl ProtocolFactory for AnyTlsFactory {
         params: &serde_json::Value,
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = Self::parse(params)?;
-        // Соединение здесь не поднимается: первая сессия заводится первым
-        // потоком. Включённый профиль не обязан держать соединение TLS.
         Ok(Arc::new(AnyTlsOutbound::new(ctx.id, config, ctx.dialer)?))
     }
 }
@@ -91,7 +89,6 @@ mod tests {
 
     #[test]
     fn rejects_a_fingerprint_together_with_a_skipped_check() {
-        // Настройка обещала бы защиту, которой при `insecure` нет.
         let params = json!({
             "server": "example.com:443",
             "password": "x",

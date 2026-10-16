@@ -1,8 +1,6 @@
 //! Соединение с сервером по HTTP/2: TCP, TLS, рукопожатие `h2`.
 //!
-//! Сокет не открывается здесь напрямую: TUN перехватывает весь трафик
-//! машины, и сокет, открытый в обход [`Dialer`], отправил бы рукопожатие в
-//! собственный, ещё не поднятый тоннель (`AGENTS.md`, §3).
+//! Сокет выдаёт [`Dialer`] (`AGENTS.md`, §3).
 
 use bytes::Bytes;
 use h2::client::SendRequest;
@@ -16,34 +14,22 @@ use tokio::task::JoinHandle;
 use crate::config::TrustTunnelConfig;
 use crate::error::{TrustTunnelError, TrustTunnelResult};
 
-/// Начальный размер окна потока HTTP/2: 131072 байта (`PROTOCOL.md`, §3.1) —
-/// умолчание Chrome. Маскировка держится на том, что рукопожатие неотличимо
-/// от браузера, и окно по умолчанию `h2` (65535) выдало бы клиента первым же
-/// `SETTINGS`-кадром.
+/// Начальное окно потока HTTP/2, как у Chrome (`PROTOCOL.md`, §3.1).
 const INITIAL_WINDOW_SIZE: u32 = 131_072;
 
-/// Отправитель запросов HTTP/2.
-///
-/// Клонируется — им открывается и поток `CONNECT` на каждый TCP-адрес, и
-/// (один раз) поток `_udp2`: все они делят одно соединение.
+/// Отправитель запросов HTTP/2; клонируется, все потоки делят одно соединение.
 pub type H2SendRequest = SendRequest<Bytes>;
 
 /// Установленное соединение HTTP/2.
 pub struct Http2Transport {
     /// Отправитель запросов. Клонируется на каждый вызов.
     pub send_request: H2SendRequest,
-    /// Задача, качающая кадры соединения.
-    ///
-    /// `h2` не продвигает соединение сам по себе — без опроса `Connection`
-    /// оно не увидит ни исходящих, ни входящих кадров. Останавливается явно
-    /// в [`Http2Transport::shutdown`]: падение `JoinHandle` саму задачу не
-    /// останавливает.
+    /// Задача, качающая кадры; останавливается в [`Http2Transport::shutdown`].
     driver: JoinHandle<()>,
 }
 
 impl Http2Transport {
-    /// Останавливает задачу, качающую соединение, и вместе с ней — само
-    /// соединение: она единственная держит TLS-поток.
+    /// Останавливает задачу, а с ней и соединение.
     pub fn shutdown(&self) {
         self.driver.abort();
     }
@@ -60,15 +46,9 @@ pub async fn connect(
         .await
         .map_err(|e| TrustTunnelError::disconnected(e.to_string()))?;
 
-    // ALPN `h2` обязателен (`PROTOCOL.md`, §3.1): сервер демультиплексирует
-    // TLS по ALPN, и без него не поймёт, что за протокол ждать дальше.
     let tls = TlsClient::new(&config.tls, host, &[ALPN_H2])?;
     let io = tls.connect(tcp).await?;
 
-    // Срок нужен отдельно от TLS: сервер, принявший TLS-соединение и
-    // замолчавший до `SETTINGS`, не отличим от рабочего иначе — у своего
-    // рукопожатия здесь протокол просто нет (`AGENTS.md`, чек-лист
-    // приёмки: «у рукопожатия есть срок»).
     let (send_request, connection) = deadline::handshake("рукопожатие HTTP/2", async {
         h2::client::Builder::new()
             .initial_window_size(INITIAL_WINDOW_SIZE)
@@ -100,8 +80,6 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_stops_the_driver_task() {
-        // Настоящего сервера здесь нет: важно только то, что задача не
-        // крутится вечно после `shutdown`, а не то, что отвечает пир.
         let (client_io, _server_io) = duplex(4096);
         let (send_request, connection) = h2::client::Builder::new()
             .initial_window_size(INITIAL_WINDOW_SIZE)

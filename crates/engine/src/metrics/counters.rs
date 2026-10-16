@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dashmap::DashMap;
+use std::collections::HashMap;
+
+use parking_lot::RwLock;
 use penguin_core::id::OutboundId;
 use penguin_core::stats::{Counters, Traffic};
 use serde::{Deserialize, Serialize};
@@ -12,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default)]
 pub struct Metrics {
     total: Counters,
-    by_outbound: DashMap<OutboundId, Arc<Counters>>,
+    by_outbound: RwLock<HashMap<OutboundId, Arc<Counters>>>,
     live_connections: AtomicU64,
 }
 
@@ -22,17 +24,12 @@ impl Metrics {
         Arc::new(Self::default())
     }
 
-    /// Счётчики направления.
-    ///
-    /// Создаются при первом обращении: направлений немного, а заводить их
-    /// заранее пришлось бы при каждом изменении списка профилей.
+    /// Счётчики направления; создаются при первом обращении.
     pub fn outbound(&self, id: &OutboundId) -> Arc<Counters> {
-        if let Some(existing) = self.by_outbound.get(id) {
-            return Arc::clone(&existing);
+        if let Some(existing) = self.by_outbound.read().get(id) {
+            return Arc::clone(existing);
         }
-        let counters = Counters::new();
-        self.by_outbound.insert(id.clone(), Arc::clone(&counters));
-        counters
+        Arc::clone(self.by_outbound.write().entry(id.clone()).or_default())
     }
 
     /// Общие счётчики.
@@ -42,14 +39,24 @@ impl Metrics {
 
     /// Учитывает отправленные байты.
     pub fn add_uploaded(&self, outbound: &OutboundId, bytes: u64) {
-        self.total.add_uploaded(bytes);
-        self.outbound(outbound).add_uploaded(bytes);
+        self.add_uploaded_to(&self.outbound(outbound), bytes);
     }
 
     /// Учитывает принятые байты.
     pub fn add_downloaded(&self, outbound: &OutboundId, bytes: u64) {
+        self.add_downloaded_to(&self.outbound(outbound), bytes);
+    }
+
+    /// Как [`Self::add_uploaded`], но по готовым счётчикам (без поиска в таблице).
+    pub fn add_uploaded_to(&self, outbound: &Counters, bytes: u64) {
+        self.total.add_uploaded(bytes);
+        outbound.add_uploaded(bytes);
+    }
+
+    /// Как [`Self::add_downloaded`], но по готовым счётчикам.
+    pub fn add_downloaded_to(&self, outbound: &Counters, bytes: u64) {
         self.total.add_downloaded(bytes);
-        self.outbound(outbound).add_downloaded(bytes);
+        outbound.add_downloaded(bytes);
     }
 
     /// Соединение открылось.
@@ -61,8 +68,7 @@ impl Metrics {
 
     /// Соединение закрылось.
     pub fn connection_closed(&self) {
-        // `fetch_update`, а не `fetch_sub`: счётчик беззнаковый, и лишнее
-        // закрытие увело бы его в число размером с адресное пространство.
+        // Не `fetch_sub`: лишнее закрытие переполнило бы счётчик.
         let _ = self
             .live_connections
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |live| {
@@ -79,10 +85,11 @@ impl Metrics {
     pub fn per_outbound(&self) -> Vec<OutboundTraffic> {
         let mut rows: Vec<OutboundTraffic> = self
             .by_outbound
+            .read()
             .iter()
-            .map(|entry| OutboundTraffic {
-                outbound: entry.key().to_string(),
-                traffic: entry.value().snapshot(),
+            .map(|(id, counters)| OutboundTraffic {
+                outbound: id.to_string(),
+                traffic: counters.snapshot(),
             })
             .collect();
         rows.sort_by_key(|row| std::cmp::Reverse(row.traffic.total()));
@@ -92,8 +99,8 @@ impl Metrics {
     /// Обнуляет всё — при новом подключении.
     pub fn reset(&self) {
         self.total.reset();
-        for entry in self.by_outbound.iter() {
-            entry.value().reset();
+        for counters in self.by_outbound.read().values() {
+            counters.reset();
         }
         self.live_connections.store(0, Ordering::Relaxed);
     }
@@ -131,9 +138,6 @@ mod tests {
 
     #[test]
     fn live_connections_never_go_negative() {
-        // Лишнее закрытие увело бы беззнаковый счётчик в число размером с
-        // адресное пространство, и интерфейс показал бы 18 квинтиллионов
-        // соединений.
         let metrics = Metrics::new();
         metrics.connection_opened(&id("home"));
         metrics.connection_closed();

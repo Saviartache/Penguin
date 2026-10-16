@@ -1,10 +1,7 @@
 //! `Outbound` для TrustTunnel: `CONNECT` поверх HTTP/2 или HTTP/3.
 //!
-//! Собирает воедино три части: [`crate::transport`] (HTTP/2 или HTTP/3),
-//! [`crate::connect`] (сам запрос `CONNECT` и разбор кода ответа) и
-//! [`crate::udp::session`] (единый поток `_udp2`). Здесь же живёт проверка
-//! живости (`PROTOCOL.md`, §8) и правило из §9.2: код `407` предписывает
-//! закрыть **всю** сессию, а не только не удавшийся поток.
+//! Соединяет [`crate::transport`], [`crate::connect`] и [`crate::udp::session`);
+//! держит проверку живости (`PROTOCOL.md`, §8) и правило §9.2: `407` закрывает всю сессию.
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -28,23 +25,14 @@ use crate::error::{TrustTunnelError, TrustTunnelResult};
 use crate::transport::Link;
 use crate::udp::session::UdpManager;
 
-/// Срок ожидания ответа на `CONNECT _check` (`PROTOCOL.md`, §8.4, §13.3).
-///
-/// Спецификация описывает проверку как срабатывающую по бездействию: она
-/// нужна, когда «данные не приходили `timeout_ms`». Отслеживать бездействие
-/// по каждому из потенциально многих одновременных потоков `CONNECT` —
-/// отдельная задача сама по себе, и здесь её нет: вместо этого проверка идёт
-/// с тем же периодом, каким задан её собственный срок. Цена — чуть больше
-/// служебного трафика, чем у эталона при активном тоннеле; на способность
-/// заметить мёртвую сессию это не влияет.
+/// Срок и период `CONNECT _check` (`PROTOCOL.md`, §8.4, §13.3). Бездействие
+/// не отслеживается (эталон проверяет по `timeout_ms`): проверка идёт безусловно.
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(7);
 
-/// Почему направление признано нездоровым — причина хранится, чтобы её не
-/// потерять к моменту, когда следующий вызов `connect_tcp`/`bind_udp` спросит,
-/// что случилось.
+/// Почему направление нездорово; отдаётся следующим `connect_tcp`/`bind_udp`.
 #[derive(Debug, Clone)]
 enum Poison {
-    /// `PROTOCOL.md`, §9.2: `407` предписывает пересоздать сессию целиком.
+    /// `407`: пересоздать сессию (`PROTOCOL.md`, §9.2).
     AuthRejected,
     /// Проверка живости не прошла или соединение оборвалось иначе.
     Disconnected(String),
@@ -82,10 +70,7 @@ impl std::fmt::Debug for TrustTunnelOutbound {
 }
 
 impl TrustTunnelOutbound {
-    /// Устанавливает соединение с сервером и держит его открытым.
-    ///
-    /// Соединение одно на весь профиль: каждый `connect_tcp` открывает свой
-    /// поток `CONNECT` внутри него, а не поднимает TLS или QUIC заново.
+    /// Устанавливает соединение; каждый `connect_tcp` — свой поток `CONNECT` в нём.
     pub async fn connect(
         id: OutboundId,
         config: TrustTunnelConfig,
@@ -112,7 +97,7 @@ impl TrustTunnelOutbound {
         })
     }
 
-    /// Ошибка направления, если оно уже признано непригодным, — до сети.
+    /// Ошибка, если направление уже непригодно.
     fn check_alive(&self) -> TrustTunnelResult<()> {
         match self
             .poisoned
@@ -125,10 +110,7 @@ impl TrustTunnelOutbound {
         }
     }
 
-    /// Запоминает `407` как причину, по которой направление больше не годится.
-    ///
-    /// Первая причина остаётся: направление, уже признанное нездоровым,
-    /// не переобъясняется следующей ошибкой.
+    /// Запоминает `407` как причину; первая причина сохраняется.
     fn note_auth_rejected(&self) {
         let mut guard = self.poisoned.lock().unwrap_or_else(|e| e.into_inner());
         guard.get_or_insert(Poison::AuthRejected);
@@ -145,9 +127,6 @@ impl TrustTunnelOutbound {
 
         match result {
             Ok(stream) => Ok(stream),
-            // Один отклонённый адрес не значит, что вся сессия сгнила —
-            // сервер мог просто не достучаться до цели (см. `outcome`
-            // в `crate::connect`: не любой отказ — это `AuthRejected`.
             Err(err @ TrustTunnelError::AuthRejected { .. }) => {
                 self.note_auth_rejected();
                 Err(err)
@@ -197,19 +176,9 @@ impl Outbound for TrustTunnelOutbound {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // UDP ходит внутри того же переноса: `_udp2` несёт все
-            // датаграммы направления (`PROTOCOL.md`, §6.1).
             udp: true,
-            // Рукопожатие TLS или QUIC происходит один раз на весь профиль,
-            // а каждый `connect_tcp` получает свой поток внутри него.
             multiplex: true,
             port_hopping: false,
-            // Доменное имя уходит на сервер в `:authority` дословно (TCP) или
-            // разрешается на этой стороне перед отправкой кадра (UDP, у
-            // которого в кадре только числовой адрес, — см.
-            // `crate::udp::session::resolve_numeric`). Разница не видна
-            // снаружи: с точки зрения вызывающего домен работает в обоих
-            // случаях.
             remote_dns: true,
         }
     }
@@ -236,12 +205,8 @@ impl Outbound for TrustTunnelOutbound {
     }
 }
 
-/// Заводит фоновую проверку живости: `CONNECT _check` каждые
-/// [`HEALTH_CHECK_TIMEOUT`] (см. пояснение у константы).
-///
-/// Останавливается сама, как только направление один раз признано
-/// нездоровым, — дальше проверять нечего: `close()` всё равно оборвёт эту
-/// задачу явно, а до того ей незачем крутиться просто так.
+/// Фоновая проверка живости: `CONNECT _check` каждые [`HEALTH_CHECK_TIMEOUT`];
+/// останавливается после первого провала.
 fn spawn_health_check(
     link: Arc<Link>,
     credentials: (String, String),
@@ -278,10 +243,6 @@ fn spawn_health_check(
 
 /// Один обмен `CONNECT _check`.
 async fn health_check_once(link: &Link, credentials: (&str, &str)) -> TrustTunnelResult<()> {
-    // `true` — поток закрывается с нашей стороны сразу: проверка живости не
-    // несёт тела, а сервер-эталон отвечает и сам закрывает поток немедленно
-    // (`lib/src/http_downstream.rs`: `send_ok_response(true)` только для
-    // `_check`, у `_udp2`/`_icmp` — `false`).
     let (status, _stream) = link
         .open(connect::HEALTH_CHECK_AUTHORITY, credentials, true)
         .await?;
@@ -298,9 +259,6 @@ mod tests {
 
     #[test]
     fn the_first_poisoning_reason_is_kept() {
-        // Направление, уже объяснившее себе, почему оно нездорово, не должно
-        // переписывать причину следующей ошибкой — иначе диагностика гоняется
-        // за симптомом, а не за первопричиной.
         let poisoned = StdMutex::new(None);
         poisoned.lock().unwrap().get_or_insert(Poison::AuthRejected);
         poisoned

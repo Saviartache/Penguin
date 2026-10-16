@@ -21,29 +21,19 @@ penguin-netstack.workspace = true
 penguin-inbound.workspace = true
 penguin-tun.workspace = true
 penguin-dns.workspace = true
-# Только ради имён внутри пакетного тоннеля: `RecordType` для сборки запроса.
-# В дереве он и так есть — его тянет `penguin-dns`.
-hickory-proto.workspace = true
 penguin-platform.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
 tokio-util.workspace = true
 bytes.workspace = true
-# Номер запроса DNS: совпадения мало для подлинности, но предсказуемый номер
-# облегчил бы подделку ответа тому, кто уже внутри тоннеля.
-rand.workspace = true
-# Снимки счётчиков и истории уезжают в интерфейс через канал управления.
 serde.workspace = true
-# Параметры профиля непрозрачны для движка и передаются протоколу как есть.
 serde_json.workspace = true
 arc-swap.workspace = true
-dashmap.workspace = true
+parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 # Протоколы подключаются здесь и только здесь — по фиче на протокол.
-# Добавление второго протокола не трогает ни одной строки существующего кода:
-# новая фича, новая строка зависимости, новая регистрация в реестре.
 penguin-hysteria2 = { workspace = true, optional = true }
 penguin-socks5 = { workspace = true, optional = true }
 penguin-trojan = { workspace = true, optional = true }
@@ -63,8 +53,7 @@ penguin-naive = { workspace = true, optional = true }
 [features]
 default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "trusttunnel", "socks5"]
 pingwin = ["dep:penguin-pingwin"]
-# Не протокол в обычном смысле: сервера у него нет вовсе, есть только обход
-# DPI на прямом соединении. Фича своя, потому что и крейт свой.
+# Не протокол: обход DPI на прямом соединении.
 dpi = ["dep:penguin-dpi"]
 hysteria2 = ["dep:penguin-hysteria2"]
 socks5 = ["dep:penguin-socks5"]

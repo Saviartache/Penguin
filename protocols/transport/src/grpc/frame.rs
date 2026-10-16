@@ -1,18 +1,6 @@
-//! Кадр gRPC с сообщением `Hunk` внутри — без сети.
-//!
-//! ```text
-//!  gRPC Length-Prefixed-Message {
-//!    Compressed-Flag (8) = 0,
-//!    Message-Length (32, big-endian),
-//!    Message (protobuf),
-//!  }
-//!
-//!  message Hunk { bytes data = 1; }   // Xray, transport/internet/grpc/encoding/stream.proto
-//! ```
-//!
-//! Поле `data` на проводе — ключ `0x0A` (поле 1, тип 2), длина варинтом
-//! protobuf и сами байты. Пустой `Hunk` — пустое сообщение: proto3 не пишет
-//! поле со значением по умолчанию.
+//! Кадр gRPC (флаг сжатия 0, длина u32 BE, сообщение) с `Hunk { bytes data = 1; }`
+//! (Xray `transport/internet/grpc/encoding/stream.proto`): ключ `0x0A`, длина-варинт, байты;
+//! пустой `Hunk` — пустое сообщение.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -24,23 +12,34 @@ const PREFIX: usize = 5;
 /// Ключ поля `data`: номер 1, тип «длина и байты».
 const DATA_KEY: u64 = (1 << 3) | 2;
 
-/// Самое длинное сообщение, которое примет разборщик. Xray шлёт куски не
-/// больше буфера в несколько килобайт; предел защищает память от чужого.
+/// Предел сообщения разборщика (защита памяти).
 const MAX_MESSAGE: usize = 1 << 20;
 
 /// Собирает кадр gRPC с `Hunk { data }`.
 pub fn encode_hunk(data: &[u8]) -> Bytes {
-    let mut message = BytesMut::with_capacity(data.len() + 11);
-    if !data.is_empty() {
-        put_varint(DATA_KEY, &mut message);
-        put_varint(data.len() as u64, &mut message);
-        message.put_slice(data);
-    }
-    let mut out = BytesMut::with_capacity(PREFIX + message.len());
-    out.put_u8(0);
-    out.put_u32(message.len() as u32);
-    out.put_slice(&message);
+    let mut out = BytesMut::new();
+    put_hunk(data, &mut out);
     out.freeze()
+}
+
+/// Дописывает кадр gRPC с `Hunk { data }` в `out` без промежуточных буферов.
+pub fn put_hunk(data: &[u8], out: &mut impl BufMut) {
+    let message_len = if data.is_empty() {
+        0
+    } else {
+        1 + varint_len(data.len() as u64) + data.len()
+    };
+    out.put_u8(0);
+    out.put_u32(message_len as u32);
+    if !data.is_empty() {
+        put_varint(DATA_KEY, out);
+        put_varint(data.len() as u64, out);
+        out.put_slice(data);
+    }
+}
+
+fn varint_len(value: u64) -> usize {
+    (64 - (value | 1).leading_zeros() as usize).div_ceil(7)
 }
 
 /// Собирает сообщения из кусков тела ответа.
@@ -61,7 +60,6 @@ impl Deframer {
             return Ok(None);
         }
         if self.buf[0] != 0 {
-            // Сжатие не согласовывалось: `grpc-encoding` клиент не шлёт.
             return Err(TransportError::malformed("сжатое сообщение gRPC"));
         }
         let len = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]) as usize;
@@ -148,10 +146,18 @@ mod tests {
 
     #[test]
     fn a_hunk_is_laid_out_like_protobuf() {
-        // Без внешнего вектора: раскладка по `stream.proto` Xray и
-        // описанию формата protobuf (ключ 0x0A, длина, байты).
+        // Внешнего вектора нет: раскладка по `stream.proto` Xray
         let frame = encode_hunk(b"abc");
         assert_eq!(&frame[..], &[0, 0, 0, 0, 5, 0x0a, 3, b'a', b'b', b'c']);
+    }
+
+    #[test]
+    fn varint_len_matches_the_encoder() {
+        for value in [0u64, 1, 127, 128, 300, 16_383, 16_384, 1 << 20, u64::MAX] {
+            let mut buf = Vec::new();
+            put_varint(value, &mut buf);
+            assert_eq!(varint_len(value), buf.len(), "{value}");
+        }
     }
 
     #[test]
@@ -163,7 +169,6 @@ mod tests {
     fn a_long_hunk_has_a_multibyte_length() {
         let data = vec![7u8; 300];
         let frame = encode_hunk(&data);
-        // 300 = 0b1_0010_1100 → 0xAC 0x02.
         assert_eq!(&frame[5..8], &[0x0a, 0xac, 0x02]);
         let mut deframer = Deframer::default();
         deframer.push(&frame);
@@ -196,7 +201,6 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_skipped() {
-        // Поле 2 (varint 1), затем `data`.
         let message = [0x10, 0x01, 0x0a, 0x01, b'x'];
         let mut wire = vec![0, 0, 0, 0, message.len() as u8];
         wire.extend_from_slice(&message);

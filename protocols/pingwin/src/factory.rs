@@ -33,8 +33,6 @@ impl ProtocolFactory for PingwinFactory {
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
-        // Проверка без сети: интерфейс должен показать ошибку в поле сразу,
-        // а не через минуту неудачного подключения.
         self.parse(params)?.validate().map_err(Into::into)
     }
 
@@ -46,9 +44,7 @@ impl ProtocolFactory for PingwinFactory {
         let config = self.parse(params)?;
         let outbound = PingwinOutbound::new(ctx.id, config, ctx.dialer)?;
 
-        // Соединение поднимается **здесь**, а не на первом потоке: движок
-        // пишет «подключено», как только `build` вернул направление, и без
-        // этого «подключено» видел бы и тот, чей путь до сервера режут.
+        // Движок пишет «подключено» сразу после `build`
         outbound.warm_up().await?;
         Ok(Arc::new(outbound))
     }
@@ -77,8 +73,6 @@ mod tests {
 
     #[test]
     fn rejects_a_config_without_a_server_key() {
-        // Ключ сервера — не украшение: на нём стоит и опознание сервера, и
-        // устойчивость к активной проверке.
         let mut params = params();
         params["key"] = json!("");
         assert!(PingwinFactory::new().validate(&params).is_err());
@@ -98,7 +92,6 @@ mod tests {
 
     #[test]
     fn the_protocol_name_is_stable() {
-        // Имя стоит в конфигурациях пользователей — менять его нельзя.
         assert_eq!(PingwinFactory::new().protocol(), "pingwin");
     }
 }

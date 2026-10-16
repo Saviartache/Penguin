@@ -1,29 +1,7 @@
 //! Сборка датаграмм, приехавших частями.
 //!
-//! Датаграмма QUIC ограничена путевым MTU, а UDP приложения — нет: DNS с
-//! DNSSEC, QUIC внутри QUIC, игровой трафик легко перешагивают полторы тысячи
-//! байт. Такие датаграммы едут частями и собираются здесь.
-//!
-//! # Два ограничения, без которых сборка становится дырой в памяти
-//!
-//! **Время жизни.** Части одной датаграммы уходят подряд. Не собралось за
-//! несколько секунд — уже не соберётся: у UDP нет перепосылки, и ждать больше
-//! нечего.
-//!
-//! **Потолок числа буферов.** Иначе сторона, приславшая по одной части от
-//! тысячи датаграмм, занимает память под тысячу буферов и не завершает ни
-//! одного.
-//!
-//! # Почему это здесь, а не в крейте протокола
-//!
-//! Дробить датаграммы приходится всем, кто носит UDP поверх QUIC: у Hysteria 2
-//! это своя сессия и адрес строкой, у TUIC — номер ассоциации и разобранный
-//! адрес, у Juicity будет третье. Различается только то, чем помечены части;
-//! сама сборка — одна и та же, и две её копии однажды разойдутся в мелочи
-//! вроде повторившегося номера пакета.
-//!
-//! Отсюда обобщение по типу адреса: собиратель его не разбирает и не
-//! сравнивает, а просто запоминает тот, что пришёл с первой частью.
+//! Общая для протоколов UDP поверх QUIC; адрес любого типа запоминается с первой частью.
+//! Незавершённые датаграммы ограничены временем ([`TTL`]) и числом ([`MAX_PENDING`]).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -41,9 +19,7 @@ pub const MAX_PENDING: usize = 512;
 pub struct Fragment<A> {
     /// Сессия: одна на каждый канал датаграмм.
     ///
-    /// Шире, чем у любого из протоколов: у Hysteria 2 она тридцатидвухбитная,
-    /// у TUIC шестнадцатибитная. Общий тип избавляет от разговора о том, чей
-    /// номер шире.
+    /// Шире, чем у любого протокола.
     pub session: u64,
     /// Номер датаграммы внутри сессии. Общий у всех её частей.
     pub packet: u16,
@@ -94,9 +70,7 @@ impl<A: Clone> Reassembler<A> {
 
     /// Принимает часть.
     ///
-    /// Возвращает собранную датаграмму вместе с адресом, когда она готова.
-    /// Целая датаграмма проходит насквозь, ничего не занимая, — а это
-    /// подавляющее большинство трафика.
+    /// Возвращает собранную датаграмму с адресом, когда она готова; целая проходит насквозь.
     pub fn accept(&mut self, fragment: Fragment<A>) -> Option<(Bytes, A)> {
         if fragment.is_whole() {
             return Some((fragment.payload, fragment.address));
@@ -104,10 +78,8 @@ impl<A: Clone> Reassembler<A> {
         self.accept_at(fragment, Instant::now())
     }
 
-    /// То же с явным моментом времени — для тестов, которым нельзя ждать.
+    /// То же с явным моментом времени — для тестов.
     fn accept_at(&mut self, fragment: Fragment<A>, now: Instant) -> Option<(Bytes, A)> {
-        // Часть с номером за пределами объявленного — это либо ошибка того
-        // конца, либо попытка занять память; ни то ни другое собирать нечего.
         if fragment.index >= fragment.count {
             return None;
         }
@@ -124,8 +96,7 @@ impl<A: Clone> Reassembler<A> {
             started: now,
         });
 
-        // Номер пакета шестнадцатибитный и рано или поздно повторится. Часть
-        // от другой датаграммы с тем же номером — не повод склеить их вместе.
+        // Номер пакета повторяется
         if entry.parts.len() != count {
             *entry = Pending {
                 parts: vec![None; count],
@@ -196,8 +167,6 @@ mod tests {
 
     #[test]
     fn a_whole_datagram_passes_through_without_buffering() {
-        // Подавляющее большинство трафика — целые датаграммы: платить за них
-        // записью в таблицу незачем.
         let mut reassembler = Reassembler::new();
         let (payload, address) = reassembler
             .accept(part(7, 1, 0, b"payload"))
@@ -210,8 +179,6 @@ mod tests {
 
     #[test]
     fn parts_are_joined_in_order_whatever_order_they_arrive() {
-        // У UDP порядка нет: части приезжают как придётся, а склеиться обязаны
-        // по своим номерам.
         let mut reassembler = Reassembler::new();
         assert!(reassembler.accept(part(7, 3, 2, b"three")).is_none());
         assert!(reassembler.accept(part(7, 3, 0, b"one")).is_none());
@@ -225,7 +192,6 @@ mod tests {
 
     #[test]
     fn a_repeated_part_does_not_count_twice() {
-        // Иначе датаграмма «соберётся» из двух копий одной части.
         let mut reassembler = Reassembler::new();
         assert!(reassembler.accept(part(7, 2, 0, b"one")).is_none());
         assert!(reassembler.accept(part(7, 2, 0, b"one")).is_none());
@@ -245,12 +211,9 @@ mod tests {
 
     #[test]
     fn a_reused_packet_number_starts_over() {
-        // Номер шестнадцатибитный и повторяется; склеить части двух разных
-        // датаграмм — значит отдать приложению мусор.
         let mut reassembler = Reassembler::new();
         assert!(reassembler.accept(part(7, 3, 0, b"one")).is_none());
 
-        // Тот же номер, но частей теперь две — это уже другая датаграмма.
         assert!(reassembler.accept(part(7, 2, 0, b"a")).is_none());
         let (payload, _) = reassembler.accept(part(7, 2, 1, b"b")).expect("собралась");
         assert_eq!(&payload[..], b"ab");
@@ -269,8 +232,6 @@ mod tests {
 
     #[test]
     fn what_never_arrives_is_forgotten() {
-        // У UDP нет перепосылки: не собралось за отведённое время — не
-        // соберётся никогда, и держать буфер незачем.
         let mut reassembler = Reassembler::new();
         let start = Instant::now();
         assert!(
@@ -291,8 +252,6 @@ mod tests {
 
     #[test]
     fn the_number_of_buffers_has_a_ceiling() {
-        // Сторона, приславшая по одной части от тысячи датаграмм, иначе
-        // занимает память под тысячу буферов и не завершает ни одного.
         let mut reassembler = Reassembler::new();
         let start = Instant::now();
 

@@ -16,15 +16,8 @@ pub fn get_config(engine: &Arc<Engine>) -> Response {
 
 /// Принимает настройки: пишет на диск и применяет.
 ///
-/// Порядок именно такой, и он важен дважды.
-///
-/// **Проверка до всего.** Применить половину правил хуже, чем не применить ни
-/// одного: трафик пошёл бы не туда, а пользователь считал бы, что настройки в
-/// силе.
-///
-/// **Запись до применения.** Настройки, применённые, но не записанные, живут
-/// до перезапуска службы — и «Сохранить» в окне перестаёт что-либо сохранять.
-/// Заметить это можно только через неделю, когда служба перезапустится сама.
+/// Порядок: проверка, запись, применение. Непроверенное нельзя применять
+/// частично, а применённое без записи пропадёт после перезапуска.
 pub fn set_config(
     engine: &Arc<Engine>,
     store: &penguin_config::ConfigStore,
@@ -35,14 +28,12 @@ pub fn set_config(
     }
 
     if let Err(err) = store.save(&config) {
-        // Не записалось — не применяем. Иначе окно показывало бы одно, файл
-        // содержал бы другое, а после перезапуска вернулось бы третье.
+        // Не записалось — не применяем
         tracing::error!(%err, "настройки не записаны");
         return Response::error(err, true);
     }
 
-    // Журнал ведёт служба, а не движок: уровень доводится здесь, до передачи
-    // настроек дальше.
+    // Журнал ведёт служба, а не движок
     crate::logging::set_level(config.app.log_level);
 
     match engine.reload(config) {
@@ -59,9 +50,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Проверяет задержку до профилей.
 ///
-/// Через сам протокол, а не `ping`: ICMP до сервера может ходить прекрасно,
-/// пока QUIC на нужном порту режется. Проверка должна мерить то, чем потом
-/// пойдёт трафик.
+/// Через сам протокол, а не `ping`: ICMP может ходить, пока QUIC режется.
 pub async fn probe_profiles(engine: &Arc<Engine>, profile: Option<ProfileId>) -> Response {
     let config = engine.config();
     let profiles: Vec<_> = match &profile {
@@ -87,8 +76,7 @@ async fn probe_one(
 ) -> ProbeResult {
     let name = profile.id.to_string();
 
-    // Проверка настроек идёт первой и без сети: неверная конфигурация
-    // выясняется мгновенно, а неудачное подключение — за секунды.
+    // Сначала без сети: ошибка настроек видна мгновенно
     if let Err(err) = engine.outbounds().validate(profile) {
         return ProbeResult {
             profile: name,
@@ -141,10 +129,7 @@ mod tests {
         Engine::new(RootConfig::default()).expect("движок собирается")
     }
 
-    /// Хранилище в отдельном временном каталоге.
-    ///
-    /// Настоящее, а не заглушка: половина смысла `set_config` в том, что
-    /// настройки доходят до диска, и проверить это можно только диском.
+    /// Настоящее хранилище во временном каталоге.
     fn store(tag: &str) -> penguin_config::ConfigStore {
         let dir =
             std::env::temp_dir().join(format!("penguin-handler-{tag}-{}", std::process::id()));
@@ -162,7 +147,6 @@ mod tests {
 
     #[test]
     fn broken_config_is_refused_before_applying() {
-        // Применить половину правил хуже, чем не применить ни одного.
         let engine = engine();
         let mut config = RootConfig::default();
         config.network.tun.mtu = 9000;
@@ -183,8 +167,6 @@ mod tests {
 
     #[test]
     fn accepted_settings_reach_the_disk() {
-        // Настройки, применённые, но не записанные, живут до перезапуска
-        // службы — и «Сохранить» в окне перестаёт что-либо сохранять.
         let store = store("saved");
         let mut config = RootConfig::default();
         config.network.kill_switch = false;
@@ -204,8 +186,6 @@ mod tests {
 
     #[test]
     fn probe_target_parses() {
-        // Адрес проверки зашит в контракте протокола; опечатка в нём
-        // сломала бы измерение задержки у всех профилей сразу.
         assert!(probe::PROBE_TARGET.parse::<SocketAddress>().is_ok());
     }
 }

@@ -1,25 +1,21 @@
-//! Таблица сессий и вытеснение по таймауту.
-//!
-//! У UDP нет закрытия: приложение просто перестаёт пользоваться сокетом, и
-//! узнать об этом неоткуда. Поэтому сессии живут по таймеру, а таблица
-//! ограничена сверху — иначе приложение, разославшее пакеты тысяче адресов,
-//! оставит после себя тысячу вечных записей.
+//! Таблица UDP-сессий: вытеснение по таймауту и предел размера.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::session::{Session, SessionKey};
 
 /// Сколько сессий держать одновременно.
-///
-/// Восемь тысяч — заведомо больше, чем бывает у настоящего приложения, и
-/// заведомо меньше, чем нужно, чтобы съесть память.
 pub const MAX_SESSIONS: usize = 8192;
+
+/// Как часто чистить таблицу при вставке.
+const SWEEP_EVERY: Duration = Duration::from_secs(1);
 
 /// Таблица UDP-сессий.
 #[derive(Debug, Default)]
 pub struct SessionTable {
     sessions: HashMap<SessionKey, Session>,
+    last_sweep: Option<Instant>,
 }
 
 impl SessionTable {
@@ -28,23 +24,24 @@ impl SessionTable {
         Self::default()
     }
 
-    /// Отмечает прохождение датаграммы и говорит, новая ли это сессия.
-    ///
-    /// Новая означает, что для неё ещё не спрошен маршрутизатор и не открыт
-    /// канал наружу.
+    /// Отмечает прохождение датаграммы; `true` — сессия новая (или просроченная и заведена заново).
     pub fn touch(&mut self, key: SessionKey, now: Instant) -> bool {
-        self.expire(now);
-
-        match self.sessions.get_mut(&key) {
-            Some(session) => {
-                session.touch(now);
-                false
-            }
-            None => {
-                self.sessions.insert(key, Session::new(key, now));
-                true
-            }
+        if let Some(session) = self.sessions.get_mut(&key)
+            && !session.is_expired(now)
+        {
+            session.touch(now);
+            return false;
         }
+
+        let due = self
+            .last_sweep
+            .is_none_or(|last| now.duration_since(last) >= SWEEP_EVERY);
+        if due || self.sessions.len() >= MAX_SESSIONS {
+            self.last_sweep = Some(now);
+            self.expire(now);
+        }
+        self.sessions.insert(key, Session::new(key, now));
+        true
     }
 
     /// Есть ли такая сессия.
@@ -67,10 +64,7 @@ impl SessionTable {
         self.sessions.is_empty()
     }
 
-    /// Выбрасывает просроченные и лишние.
-    ///
-    /// Возвращает ключи выброшенных: по ним вызывающий закрывает каналы
-    /// наружу, иначе они остались бы висеть.
+    /// Выбрасывает просроченные и лишние; возвращает их ключи.
     pub fn expire(&mut self, now: Instant) -> Vec<SessionKey> {
         let mut dropped: Vec<SessionKey> = self
             .sessions
@@ -83,11 +77,7 @@ impl SessionTable {
             self.sessions.remove(key);
         }
 
-        // Если и после этого сессий слишком много, выбрасывается самая
-        // давняя: она ближе всех к тому, чтобы всё равно просрочиться.
-        //
-        // Сравнение нестрогое: вызывающий сразу после этого добавит запись,
-        // и место под неё надо освободить заранее.
+        // `>=`: сразу после вызывающий добавит запись.
         while self.sessions.len() >= MAX_SESSIONS {
             let Some(oldest) = self
                 .sessions
@@ -174,8 +164,6 @@ mod tests {
 
     #[test]
     fn table_is_bounded() {
-        // Приложение, разославшее пакеты тысячам адресов, не должно оставить
-        // после себя тысячи вечных записей.
         let mut table = SessionTable::new();
         let now = Instant::now();
         for step in 0..(MAX_SESSIONS as u32 + 64) {

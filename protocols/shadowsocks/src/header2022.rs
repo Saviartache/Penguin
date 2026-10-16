@@ -1,16 +1,9 @@
-//! Общее у заголовков TCP и UDP протокола Shadowsocks 2022: тип стороны,
-//! метка времени, дополнение длины.
+//! Общее у заголовков TCP и UDP Shadowsocks 2022: тип стороны, метка времени, дополнение.
 //!
-//! Числа отсюда — часть договора с сервером, а не наш выбор. Тридцать секунд
-//! и девятьсот байт названы в `shadowsocks-rust`
-//! (`crates/shadowsocks/src/relay/tcprelay/proxy_stream/protocol/v2.rs`:
-//! `SERVER_STREAM_TIMESTAMP_MAX_DIFF = 30`, `MAX_PADDING_SIZE = 900`;
-//! `relay/udprelay/aead_2022.rs`: `SERVER_PACKET_TIMESTAMP_MAX_DIFF = 30`) и
-//! независимо в `sing-shadowsocks2`
-//! (`shadowaead_2022/protocol.go`: `MaxPaddingLength = 900`, `method.go`:
-//! `if diff > 30`).
+//! Эталон: `shadowsocks-rust` (`SERVER_STREAM_TIMESTAMP_MAX_DIFF = 30`,
+//! `MAX_PADDING_SIZE = 900`), `sing-shadowsocks2` (`MaxPaddingLength = 900`, `diff > 30`).
 
-use rand::Rng;
+use penguin_proto::random;
 
 use crate::error::{ShadowsocksError, ShadowsocksResult};
 
@@ -25,12 +18,7 @@ pub const MAX_PADDING: u16 = 900;
 /// Наибольшее расхождение метки времени с часами машины.
 const MAX_TIMESTAMP_DIFF_SECS: u64 = 30;
 
-/// Текущее время в секундах от эпохи Unix.
-///
-/// `unwrap_or` вместо `expect`: часы до 1970 года не бывают на практике, но
-/// падать на пути соединения нельзя ни при каком вводе (`AGENTS.md` §4.3) —
-/// нулевая метка в этом случае просто не пройдёт проверку сервера, и это не
-/// хуже паники.
+/// Текущее время в секундах от эпохи Unix; часы до 1970 дают 0, а не панику.
 pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -38,11 +26,7 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Проверяет метку времени из заголовка собеседника.
-///
-/// `Err` называет расхождение прямо: рассинхронизация часов этой машины —
-/// частая причина, из-за которой сервер молча закрывает соединение, и без
-/// явного текста её ищут в сети, а не в `date`.
+/// Проверяет метку времени собеседника; ошибка называет расхождение часов.
 pub fn check_timestamp(theirs: u64, now: u64) -> ShadowsocksResult<()> {
     let diff = now.abs_diff(theirs);
     if diff > MAX_TIMESTAMP_DIFF_SECS {
@@ -51,15 +35,10 @@ pub fn check_timestamp(theirs: u64, now: u64) -> ShadowsocksResult<()> {
     Ok(())
 }
 
-/// Длина случайного дополнения.
-///
-/// Дополнение имеет смысл только тогда, когда полезной нагрузки в кадре ещё
-/// нет: кадр без него был бы всегда одной и той же длины, и по ней его легко
-/// выделить в трафике. Ровно так же решает и `shadowsocks-rust`
-/// (`get_aead_2022_padding_size`: дополнение только при пустом `payload`).
+/// Длина дополнения: только при пустой нагрузке, как в `shadowsocks-rust`.
 pub fn padding_len(payload_is_empty: bool) -> u16 {
     if payload_is_empty {
-        rand::thread_rng().gen_range(0..=MAX_PADDING)
+        random::range(0..u64::from(MAX_PADDING) + 1) as u16
     } else {
         0
     }

@@ -1,13 +1,7 @@
 //! Точка входа службы Windows и обработка управляющих команд.
 //!
-//! Диспетчер служб устроен строго: он вызывает точку входа в своём потоке,
-//! ждёт, что она немедленно зарегистрирует обработчик команд, и с этого
-//! момента считает службу обязанной отвечать. Служба, не сообщившая о
-//! запуске за отведённое время, снимается принудительно.
-//!
-//! Отсюда порядок: сначала регистрация и `Running`, потом вся настоящая
-//! работа. Поднимать движок до регистрации нельзя — на медленной машине это
-//! секунды, и диспетчер сочтёт службу зависшей.
+//! Диспетчер снимает службу, не сообщившую о запуске вовремя, поэтому сначала
+//! регистрация обработчика и `Running`, потом остальная работа.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -24,10 +18,7 @@ use windows_service::{define_windows_service, service_dispatcher};
 
 use crate::runtime;
 
-/// Каталог настроек, переданный при запуске.
-///
-/// Через глобальную переменную, потому что точку входа службы вызывает
-/// диспетчер и передать ей аргументы иначе нечем.
+/// Каталог настроек; глобальный, т.к. точку входа вызывает диспетчер.
 static CONFIG_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 define_windows_service!(ffi_service_main, service_main);
@@ -43,8 +34,6 @@ pub fn run(config_dir: Option<PathBuf>) -> Result<()> {
 /// Точка входа службы.
 fn service_main(_arguments: Vec<OsString>) {
     if let Err(err) = serve() {
-        // Терминала у службы нет; единственное место, куда можно пожаловаться,
-        // — журнал событий и файл журнала.
         tracing::error!(%err, "служба завершилась с ошибкой");
     }
 }
@@ -54,12 +43,11 @@ fn serve() -> Result<()> {
     let config_dir = CONFIG_DIR.get().cloned().flatten();
 
     let store = runtime::open_store(config_dir.clone())?;
-    let _guard = crate::logging::init_file(store.paths().data_dir(), false);
+    crate::logging::init_file(store.paths().data_dir(), false);
 
     let cancel = CancellationToken::new();
 
-    // Обработчик регистрируется первым: до этого момента диспетчер не может
-    // даже попросить службу остановиться.
+    // Первым: иначе диспетчер не сможет остановить службу
     let handler = {
         let cancel = cancel.clone();
         move |control| match control {
@@ -68,7 +56,6 @@ fn serve() -> Result<()> {
                 cancel.cancel();
                 ServiceControlHandlerResult::NoError
             }
-            // На проверку состояния положено отвечать успехом, ничего не делая.
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         }
@@ -90,8 +77,7 @@ fn serve() -> Result<()> {
         });
     };
 
-    // О запуске сообщается до подъёма движка: на медленной машине это
-    // секунды, и диспетчер счёл бы службу зависшей.
+    // До подъёма движка: он может занять секунды
     report(
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
@@ -105,8 +91,7 @@ fn serve() -> Result<()> {
 
     let result = runtime.block_on(runtime::run(config_dir, cancel));
 
-    // Об остановке сообщается в любом случае, включая аварийный выход: иначе
-    // диспетчер считает службу работающей и не даёт запустить её заново.
+    // Всегда, иначе службу нельзя запустить заново
     report(ServiceState::Stopped, ServiceControlAccept::empty());
     tracing::info!("служба остановлена");
 
@@ -119,16 +104,12 @@ mod tests {
 
     #[test]
     fn config_dir_is_settable_once() {
-        // Диспетчер вызывает точку входа один раз за жизнь процесса.
         let _ = CONFIG_DIR.set(Some(PathBuf::from("C:/penguin")));
         assert!(CONFIG_DIR.get().is_some());
     }
 
     #[test]
     fn service_name_matches_the_installer() {
-        // Имя, под которым служба зарегистрирована, и имя, под которым она
-        // регистрирует обработчик, обязаны совпадать — иначе диспетчер не
-        // свяжет их между собой.
         assert_eq!(penguin_platform::service::SERVICE_NAME, "PenguinVpn");
     }
 }

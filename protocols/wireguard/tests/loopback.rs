@@ -1,21 +1,8 @@
 //! Направление против поддельного сервера — через настоящий сокет UDP.
 //!
-//! Юнит-тесты `crypto::handshake` проверяют формулы рукопожатия
-//! независимо от сети. Этот файл проверяет то, чего по отдельным файлам не
-//! видно: что `WireguardOutbound::connect` доводит рукопожатие до конца по
-//! настоящему сокету, что `send`/`recv` шифруют и расшифровывают пакеты
-//! данных так, что сервер (свой, поддельный) их принимает и понимает, и что
-//! `close()` действительно останавливает фоновую задачу, а не просто
-//! возвращает `Ok`.
-//!
-//! Сервер здесь — реализация роли ответчика по тем же формулам спецификации,
-//! написанная заново по общим примитивам крейта (`crypto::primitives`,
-//! `frame::*`), а не скопированная из юнит-теста `crypto::handshake`: крейт
-//! роль ответчика не реализует и не экспортирует, а тест на настоящем сокете
-//! обязан играть обе стороны сам.
+//! Проверяет `connect`, `send`/`recv` и `close` на настоящем сокете. Сервер -
+//! роль ответчика по формулам спецификации поверх примитивов крейта.
 
-// Проверка падает там, где сервер или клиент повели себя не по протоколу —
-// это провалившийся тест, а не путь соединения в проде.
 #![allow(clippy::expect_used)]
 
 use std::net::{IpAddr, SocketAddr};
@@ -38,7 +25,7 @@ use penguin_wireguard::outbound::WireguardOutbound;
 use tokio::net::{TcpStream, UdpSocket};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-/// Сколько ждать событие, прежде чем считать, что его не будет.
+/// Предел ожидания события.
 const PATIENCE: Duration = Duration::from_secs(5);
 
 /// Звонящий, который ходит по настоящему сокету на loopback.
@@ -64,8 +51,7 @@ impl Dialer for LocalDialer {
     }
 }
 
-/// Поддельный сервер: играет роль ответчика Noise IK по тем же формулам,
-/// что настоящий, и после рукопожатия эхом отвечает на пакеты данных.
+/// Поддельный сервер: ответчик Noise IK, затем эхо пакетов данных.
 struct FakeServer {
     socket: UdpSocket,
     private: StaticSecret,
@@ -92,9 +78,7 @@ impl FakeServer {
         penguin_core::base64::encode(self.public.as_bytes())
     }
 
-    /// Проводит одно рукопожатие (мы — ответчик) и возвращает ключи и
-    /// индексы установленного сеанса вместе с уже прочитанным буфером на
-    /// случай, если следом сразу пришёл пакет данных.
+    /// Одно рукопожатие (мы - ответчик); возвращает сеанс.
     async fn perform_handshake(&self) -> ServerSession {
         let mut buf = [0u8; 2048];
         let (len, client_addr) = self
@@ -109,13 +93,12 @@ impl FakeServer {
 
         let init = initiation::parse(&buf[..len]).expect("инициация разбирается");
 
-        // Шаги 1-2 (сторона ответчика): те же формулы, что у инициатора, но
-        // хэш замешивает СВОЙ статический ключ (это ответчик), а не чужой.
+        // Шаги 1-2: хэш замешивает свой статический ключ.
         let mut chaining_key = hash(&[CONSTRUCTION]);
         let mut transcript = hash(&[&chaining_key, IDENTIFIER]);
         transcript = hash(&[&transcript, self.public.as_bytes()]);
 
-        // Шаг 3 (со стороны ответчика: смешать эфемерный ключ ИНИЦИАТОРА).
+        // Шаг 3: эфемерный ключ инициатора.
         chaining_key =
             penguin_wireguard::crypto::primitives::kdf1(&chaining_key, &init.ephemeral_public);
         transcript = hash(&[&transcript, &init.ephemeral_public]);
@@ -134,7 +117,7 @@ impl FakeServer {
         let mut initiator_static_pub = [0u8; KEY_LEN];
         initiator_static_pub.copy_from_slice(&initiator_static);
 
-        // Шаг 6: та же общая точка Диффи-Хеллмана статика-статика.
+        // Шаг 6: DH статика-статика.
         let ss_static = *self
             .private
             .diffie_hellman(&PublicKey::from(initiator_static_pub))
@@ -145,7 +128,7 @@ impl FakeServer {
             .expect("метка времени расшифровывается");
         transcript = hash(&[&transcript, &init.timestamp_ciphertext]);
 
-        // Сообщение 2: свой эфемерный ключ, тройное смешивание, PSK (пустой).
+        // Сообщение 2: свой эфемерный ключ, пустой PSK.
         let ephemeral_private = StaticSecret::random();
         let ephemeral_public = *PublicKey::from(&ephemeral_private).as_bytes();
         transcript = hash(&[&transcript, &ephemeral_public]);
@@ -182,8 +165,7 @@ impl FakeServer {
 
         self.socket.send(&out).await.expect("ответ отправлен");
 
-        // Ключи сеанса со стороны ответчика: порядок обратный инициатору
-        // (см. `BeginSymmetricSession` в `device/noise-protocol.go`).
+        // У ответчика порядок ключей обратный (`BeginSymmetricSession`).
         let (recv_key, send_key) = kdf2(&chaining_key, &[]);
         ServerSession {
             recv_key,
@@ -193,8 +175,7 @@ impl FakeServer {
         }
     }
 
-    /// Проводит рукопожатие и дальше эхом отвечает на пакеты данных, пока
-    /// сокет не откажет.
+    /// Рукопожатие и эхо пакетов, пока сокет не откажет.
     async fn run_one_handshake_then_echo(self) {
         let session = self.perform_handshake().await;
         let mut buf = [0u8; 2048];
@@ -208,8 +189,7 @@ impl FakeServer {
                 continue;
             };
             if plaintext.is_empty() {
-                // Keepalive от клиента — эху отвечать нечем, а сама метка
-                // подлинности уже подтвердила, что сеанс с обеих сторон жив.
+                // Keepalive: отвечать нечем.
                 continue;
             }
 
@@ -220,8 +200,7 @@ impl FakeServer {
         }
     }
 
-    /// Проводит рукопожатие и ждёт первый пакет данных с пустым открытым
-    /// текстом — то есть keepalive, который клиент никто не просил слать.
+    /// Рукопожатие и ожидание первого keepalive.
     async fn run_handshake_then_wait_for_keepalive(self) {
         let session = self.perform_handshake().await;
         let mut buf = [0u8; 2048];
@@ -315,12 +294,7 @@ async fn a_client_completes_the_handshake_and_exchanges_data_with_a_real_socket(
 
 #[tokio::test]
 async fn a_silent_client_still_sends_a_keepalive_before_nat_forgets_it() {
-    // Настройки-таймер (`crate::outbound::driver`) — ветка кода, которую
-    // остальные тесты этого файла не задевают вовсе: там либо шлют данные
-    // сами, либо не ждут достаточно долго. Здесь keepalive выставлен в одну
-    // секунду именно затем, чтобы дождаться его в разумное время теста, а не
-    // затем, что так будет в настоящих настройках (`DEFAULT_KEEPALIVE_SECS`
-    // — 25, см. `crate::crypto::constants`).
+    // Таймер драйвера: keepalive в одну секунду, чтобы дождаться его в тесте.
     let server = FakeServer::start().await;
     let client_private = StaticSecret::random();
     let config = WireguardConfig {
@@ -337,8 +311,7 @@ async fn a_silent_client_still_sends_a_keepalive_before_nat_forgets_it() {
     .expect("рукопожатие уложилось в срок")
     .expect("рукопожатие прошло");
 
-    // Клиент ничего не посылает сам — весь трафик ниже должен быть
-    // keepalive, который завёл именно таймер направления.
+    // Клиент сам ничего не шлёт: весь трафик - keepalive таймера.
     tokio::time::timeout(PATIENCE, server_task)
         .await
         .expect("keepalive не пришёл вовремя")
@@ -364,8 +337,6 @@ async fn after_close_the_background_task_stops_and_send_reports_it() {
 
     outbound.close().await.expect("закрывается");
 
-    // Фоновая задача забрала с собой получающий конец канала — послать
-    // пакет в закрытое направление больше нельзя.
     let err = outbound
         .send("после закрытия".as_bytes())
         .await
@@ -375,7 +346,7 @@ async fn after_close_the_background_task_stops_and_send_reports_it() {
 
 #[tokio::test]
 async fn a_handshake_with_no_server_on_the_other_end_times_out_instead_of_hanging() {
-    // Никакого `FakeServer` не поднимаем: порт занят, но никто не отвечает.
+    // Порт занят, но никто не отвечает.
     let dead_socket = UdpSocket::bind("127.0.0.1:0").await.expect("слушается");
     let dead_addr = dead_socket.local_addr().expect("адрес");
     drop(dead_socket);
@@ -391,11 +362,7 @@ async fn a_handshake_with_no_server_on_the_other_end_times_out_instead_of_hangin
         ..WireguardConfig::default()
     };
 
-    // `REKEY_ATTEMPT_TIME` — девяносто секунд; тест не ждёт их: снаружи ещё
-    // один срок покороче. Не важно, что именно случится раньше — внешний
-    // срок или отказ ОС (закрытый порт на loopback нередко возвращает ICMP
-    // «недоступно», и это тоже не должно выглядеть зависанием), — важно,
-    // чтобы подключение не состоялось: сервера на том конце нет.
+    // Внешний срок короче `REKEY_ATTEMPT_TIME`; важно лишь, что подключения нет.
     let outcome = tokio::time::timeout(
         Duration::from_secs(2),
         WireguardOutbound::connect(OutboundId::from("тест"), config, Arc::new(LocalDialer)),

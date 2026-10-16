@@ -1,25 +1,19 @@
 //! Серверная сторона: приём соединений и диспетчеризация.
 //!
-//! Соединение живёт в одном из двух режимов. Обычное — «запрос, ответ,
-//! запрос, ответ»; так работают все команды. Подписка ([`Request::Subscribe`])
-//! переводит соединение во второй режим: дальше по нему идут только события,
-//! и запросов там больше не ждут.
-//!
-//! Смешивать эти режимы в одном соединении нельзя. Ответ на запрос и событие
-//! выглядят на проводе одинаково — рамка и JSON, — и получатель различает их
-//! только тем, что знает, в каком режиме он находится.
+//! Соединение — «запрос, ответ» либо, после [`Request::Subscribe`], только
+//! события; на проводе они неразличимы, режимы смешивать нельзя.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use interprocess::local_socket::tokio::prelude::*;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
+use crate::auth;
 use crate::codec;
 use crate::error::IpcResult;
 use crate::schema::{Event, Request, Response};
-use crate::{auth, transport};
+use crate::transport::{self, Listener, Stream};
 
 /// Кто отвечает на запросы.
 #[async_trait]
@@ -43,21 +37,18 @@ impl Server {
     }
 
     /// Слушает канал, пока не отменят.
-    ///
-    /// Канал занимается сразу, а не внутри задачи: ошибка «служба уже
-    /// работает» должна прийти тому, кто её запускал.
     pub async fn serve(&self, cancel: CancellationToken) -> IpcResult<()> {
         let listener = transport::listen()?;
         self.serve_with_listener(listener, cancel).await
     }
 
-    /// Serves an already-bound listener until cancellation.
+    /// Обслуживает уже занятый канал до отмены.
     ///
-    /// Bind with [`transport::listen`] before recovery or autoconnect, so a
-    /// second daemon cannot modify networking before discovering the first.
+    /// Занимать его ([`transport::listen`]) надо до восстановления сети: второй
+    /// демон не должен успеть тронуть её, не узнав о первом.
     pub async fn serve_with_listener(
         &self,
-        listener: LocalSocketListener,
+        mut listener: Listener,
         cancel: CancellationToken,
     ) -> IpcResult<()> {
         tracing::info!(channel = transport::CHANNEL_NAME, "канал управления открыт");
@@ -72,9 +63,7 @@ impl Server {
             let stream = match accepted {
                 Ok(stream) => stream,
                 Err(err) => {
-                    // Исчерпание дескрипторов лечится тем, что часть клиентов
-                    // отключится. Выходить из цикла нельзя — демон перестал бы
-                    // отвечать насовсем.
+                    // Выходить нельзя: демон перестал бы отвечать насовсем.
                     tracing::warn!(%err, "соединение не принято");
                     continue;
                 }
@@ -96,21 +85,19 @@ impl Server {
 
 /// Обслуживает одного клиента.
 async fn serve_client(
-    stream: LocalSocketStream,
+    mut stream: Stream,
     handler: Arc<dyn Handler>,
     cancel: CancellationToken,
 ) -> IpcResult<()> {
     auth::check_peer(&stream)?;
 
-    let (mut reader, mut writer) = stream.split();
-
     loop {
         let request: Request = tokio::select! {
             biased;
             () = cancel.cancelled() => break,
-            request = codec::read(&mut reader) => match request {
+            // Ошибка чтения — клиент закрыл соединение.
+            request = codec::read(&mut stream) => match request {
                 Ok(request) => request,
-                // Клиент закрыл соединение — обычный конец работы.
                 Err(_) => break,
             },
         };
@@ -119,15 +106,13 @@ async fn serve_client(
             tracing::info!(request = request.name(), "запрос из канала управления");
         }
 
-        // Подписка меняет режим соединения: дальше по нему идут только
-        // события, и запросов там больше не ждут.
         if matches!(request, Request::Subscribe) {
-            codec::write(&mut writer, &Response::Ok).await?;
-            return stream_events(&mut writer, handler.subscribe(), cancel).await;
+            codec::write(&mut stream, &Response::Ok).await?;
+            return stream_events(&mut stream, handler.subscribe(), cancel).await;
         }
 
         let response = handler.handle(request).await;
-        codec::write(&mut writer, &response).await?;
+        codec::write(&mut stream, &response).await?;
     }
 
     Ok(())
@@ -151,9 +136,7 @@ where
 
         match event {
             Ok(event) => codec::write(writer, &event).await?,
-            // Клиент отстал: часть событий пропущена. Разрывать из-за этого
-            // соединение незачем — график, в котором не хватило кадра, лучше
-            // отсутствующего графика.
+            // Пропуск событий не повод рвать соединение.
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                 tracing::debug!(skipped, "подписчик отстал");
             }
@@ -201,27 +184,27 @@ mod tests {
 
     #[tokio::test]
     async fn a_prebound_listener_serves_requests_and_cancels() {
-        use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
-
-        // A test-only endpoint, never the installed service's channel.
+        // Свой канал, не служебный.
         let label = format!("penguin-prebound-test-{}", std::process::id());
-        let name = label.to_ns_name::<GenericNamespaced>().unwrap();
-        let options = ListenerOptions::new().name(name.clone());
+        #[cfg(unix)]
+        let (listener, path) = {
+            let path = std::env::temp_dir().join(&label).join("control.sock");
+            (transport::listen_at(&path).unwrap(), path)
+        };
         #[cfg(windows)]
-        let options = transport::windows::secure(options).unwrap();
-        let listener = options.create_tokio().unwrap();
+        let listener = transport::windows::Listener::bind(&label).unwrap();
         let (handler, _events) = handler();
         let server = Server::new(handler);
         let cancel = CancellationToken::new();
         let serving = server.serve_with_listener(listener, cancel.clone());
         let client = async {
-            let stream = LocalSocketStream::connect(name).await.unwrap();
             #[cfg(unix)]
-            auth::check_server(&stream, nix::unistd::geteuid().as_raw()).unwrap();
-            let (mut reader, mut writer) = stream.split();
-            codec::write(&mut writer, &Request::Ping).await.unwrap();
+            let mut stream = transport::connect_at(&path).await.unwrap();
+            #[cfg(windows)]
+            let mut stream = transport::windows::connect_to(&label).await.unwrap();
+            codec::write(&mut stream, &Request::Ping).await.unwrap();
             assert!(matches!(
-                codec::read::<_, Response>(&mut reader).await.unwrap(),
+                codec::read::<_, Response>(&mut stream).await.unwrap(),
                 Response::Pong { .. }
             ));
             cancel.cancel();
@@ -232,13 +215,12 @@ mod tests {
         })
         .await
         .expect("prebound server responded and stopped");
+        #[cfg(unix)]
+        let _ = std::fs::remove_dir(path.parent().unwrap());
     }
 
     #[tokio::test]
     async fn handler_answers_a_ping() {
-        // Сам обмен по каналу проверяется в `transport`: канал один на
-        // систему, и два теста, занимающих его, мешали бы друг другу так же,
-        // как мешают два демона. Здесь проверяется только диспетчеризация.
         let (handler, _events) = handler();
         assert!(matches!(
             handler.handle(Request::Ping).await,
@@ -249,8 +231,6 @@ mod tests {
 
     #[tokio::test]
     async fn lagging_subscriber_does_not_break_the_stream() {
-        // Пропущенное событие — не повод рвать соединение: график без кадра
-        // лучше отсутствующего графика.
         let (events, receiver) = broadcast::channel(2);
         for step in 0..10 {
             let _ = events.send(Event::Log {
@@ -263,8 +243,6 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        // Отмена завершает поток сразу; проверяем, что отставание не выдаёт
-        // ошибку наружу.
         stream_events(&mut sink, receiver, cancel)
             .await
             .expect("поток завершился штатно");

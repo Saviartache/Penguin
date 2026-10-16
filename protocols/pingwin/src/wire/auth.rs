@@ -4,9 +4,6 @@
 //!  authorization  Pingwin b64(эфемерный клиента ‖ user ‖ client)   72 байта
 //!  pingwin-proof  b64(server)                                       32 байта
 //! ```
-//!
-//! Обе стороны здесь — чистые функции над экспортом TLS: экспорт снимает с
-//! соединения тот, у кого оно есть, и приносит сюда.
 
 use crate::error::PingwinResult;
 use crate::wire::keys::{self, KEY_LEN, PUBLIC_LEN, Proofs, StaticKeyPair, USER_LEN};
@@ -86,9 +83,7 @@ impl std::fmt::Debug for Admitted<'_> {
     }
 }
 
-/// Проверяет `authorization`. `None` — клиент чужой, по какой бы причине.
-///
-/// `password` находит пароль по метке пользователя.
+/// Проверяет `authorization`; `None` — клиент чужой. `password` ищет пароль по метке.
 pub fn verify<'a>(
     header: &str,
     exporter: &[u8; KEY_LEN],

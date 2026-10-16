@@ -4,10 +4,7 @@ use penguin_transport::desync::{Desync, DesyncConfig, Strategy};
 use penguin_transport::error::{TransportError, TransportResult};
 use serde::{Deserialize, Serialize};
 
-/// Стратегия нового профиля.
-///
-/// Разрез посреди имени узла: самое безобидное из действенного — лишних
-/// пакетов не появляется вовсе, меняется только граница сегментов.
+/// Стратегия нового профиля: разрез посреди имени узла, лишних пакетов нет.
 const DEFAULT_STRATEGY: Strategy = Strategy::Multisplit;
 
 /// Настройки режима DPI.
@@ -30,11 +27,8 @@ impl Default for DpiConfig {
 }
 
 impl DpiConfig {
-    /// Проверяет настройки и собирает план.
-    ///
-    /// Отвергается больше, чем у обычного протокола, и по одной причине: на
-    /// том конце здесь не наш сервер, а сайт, который о нас не знает
-    /// (см. документ крейта).
+    /// Проверяет настройки и собирает план; ложная посылка (`fake`, `fakedsplit`) отвергается:
+    /// на том конце сайт, а не наш сервер.
     pub fn plan(&self) -> TransportResult<Desync> {
         let plan = self.desync.compile()?;
         match plan.strategy() {
@@ -70,16 +64,12 @@ mod tests {
 
     #[test]
     fn a_new_profile_already_bypasses_something() {
-        // Умолчание «ничего не делать» превратило бы режим в прямое
-        // соединение с лишним именем в списке протоколов.
         let plan = DpiConfig::default().plan().expect("настройки верны");
         assert_eq!(plan.strategy(), DEFAULT_STRATEGY);
     }
 
     #[test]
     fn the_strategies_that_need_a_decoy_are_refused_by_name() {
-        // Молча превратить их в «ничего не делать» значило бы показать
-        // настроенный обход там, где обхода нет.
         for strategy in ["fake", "fakedsplit"] {
             let err = config(strategy)
                 .plan()
@@ -107,7 +97,6 @@ mod tests {
 
     #[test]
     fn the_settings_section_is_the_usual_one() {
-        // Раздел — общий формат `penguin_transport::desync`.
         let config: DpiConfig = serde_json::from_value(serde_json::json!({
             "desync": { "strategy": "disorder", "split_pos": ["midsld"], "delay_ms": 2 }
         }))
@@ -119,7 +108,6 @@ mod tests {
 
     #[test]
     fn an_unknown_field_is_refused() {
-        // Опечатка в имени поля — это профиль, который выглядит настроенным.
         assert!(
             serde_json::from_value::<DpiConfig>(serde_json::json!({ "server": "example.com:443" }))
                 .is_err()

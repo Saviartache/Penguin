@@ -1,4 +1,4 @@
-//! Descriptor-based checks before elevated filesystem access.
+//! Проверки по дескрипторам перед привилегированным доступом к ФС.
 
 use std::fs::{DirBuilder, File, OpenOptions, Permissions};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -7,8 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 
 pub(super) fn prepare_directory(path: &Path, owner: u32) -> Result<()> {
-    // System parents already exist (/etc may itself be a system symlink on
-    // macOS). Never recursively create ancestors or follow our own directory.
+    // Предков не создаём (/etc на macOS — ссылка) и каталог не разыменовываем
     let created = DirBuilder::new().mode(0o700).create(path);
     if !created
         .as_ref()

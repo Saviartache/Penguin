@@ -1,19 +1,7 @@
-//! Канал датаграмм: по потоку на адресата — тот же приём, что и у VLESS.
+//! Канал датаграмм: поток на адресата, как у `penguin_vless::datagram`.
 //!
-//! Адрес назначения назван **один раз**, в заголовке запроса: значит, поток
-//! обслуживает одного адресата, а канал датаграмм приложения — сколько
-//! угодно адресатов сразу. Держать их все, разбирать, кто ответил, и
-//! закрывать по времени жизни канала приходится самому клиенту — устройство
-//! и код здесь дословно повторяют `penguin_vless::datagram`, отличаясь
-//! только тем, что несёт сам поток: там — кадр VLESS без шифрования, здесь —
-//! кадр тела VMess ([`crate::frame::body`]), уже встроенный в
-//! [`crate::stream::VmessStream`], так что читать и писать можно как обычный
-//! байтовый поток.
-//!
-//! `security = "zero"` с UDP несовместим и отклоняется в
-//! [`crate::config::VmessConfig::validate`] — у `zero` нет ни единой границы
-//! куска, а с ней невозможно понять, где кончается одна датаграмма и
-//! начинается следующая.
+//! `security = "zero"` с UDP несовместим ([`crate::config::VmessConfig::validate`]):
+//! без границ кусков датаграммы не разделить.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,7 +37,7 @@ pub struct VmessDatagram {
     sender: mpsc::Sender<(Bytes, SocketAddress)>,
 }
 
-/// Один адресат: куда писать и кто читает.
+/// Один адресат.
 struct Session {
     send: WriteHalf<Box<dyn ProxyStream>>,
     reader: JoinHandle<()>,
@@ -64,8 +52,7 @@ impl std::fmt::Debug for VmessDatagram {
 }
 
 impl VmessDatagram {
-    /// Собирает канал. Потоков при этом не открывается: их заводит первая
-    /// посылка каждому адресату.
+    /// Потоки открывает первая посылка каждому адресату.
     pub fn new(connector: Arc<Connector>) -> Self {
         let (sender, incoming) = mpsc::channel(QUEUE);
         Self {
@@ -99,7 +86,6 @@ impl ProxyDatagram for VmessDatagram {
             return Err(VmessError::Disconnected("поток до адресата пропал".into()).into());
         };
 
-        // Обрыв одного адресата — это не конец канала: остальные живут.
         if let Err(err) = write_payload(&mut session.send, &payload).await {
             if let Some(session) = sessions.remove(target) {
                 session.reader.abort();
@@ -137,11 +123,7 @@ impl Drop for VmessDatagram {
     }
 }
 
-/// Пишет одну датаграмму в поток адресата.
-///
-/// Границы куска даёт сам [`crate::stream::VmessStream`] — здесь ровно один
-/// `write_all` на одну датаграмму, без своей длины поверх: второй такой
-/// поверх кадра тела означал бы двойную рамку там, где хватает одной.
+/// Одна датаграмма — один `write_all`; границы куска даёт [`crate::stream::VmessStream`].
 async fn write_payload(
     send: &mut WriteHalf<Box<dyn ProxyStream>>,
     payload: &[u8],

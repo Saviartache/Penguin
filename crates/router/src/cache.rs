@@ -1,44 +1,65 @@
-//! Кэш решений. Горячий путь: правила не пересчитываются на каждый пакет.
-//!
-//! Разбор набора правил — это обход списка с проверкой условий; для одного
-//! соединения это ничто, но браузер открывает их десятками в секунду, а
-//! маршрутизатор вызывается дважды на каждое (до и после опознания имени).
-//!
-//! Ключ — то, от чего решение зависит: вид трафика, адрес назначения, имя и
-//! путь процесса. Исходный порт в ключ **не** входит: он у каждого соединения
-//! свой, и кэш с ним никогда бы не попадал.
+//! Кэш решений: ключ — вид трафика, адрес, порт назначения, имя и путь процесса.
+//! Исходный порт в ключ не входит, иначе кэш никогда не попадал бы.
 
+use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
+use parking_lot::RwLock;
+use penguin_core::network::Network;
 
 use crate::context::FlowContext;
 use crate::decision::Verdict;
 
-/// Сколько живёт запись.
-///
-/// Не про экономию памяти, а про правильность: подставные адреса fake-IP
-/// переиспользуются, и решение, принятое для прежнего домена, не должно
-/// пережить его.
+/// Время жизни записи: адреса fake-IP переиспользуются, старое решение не должно пережить домен.
 const TTL: Duration = Duration::from_secs(60);
 
-/// Сколько решений помнить.
+/// Потолок числа решений.
 const MAX_ENTRIES: usize = 8192;
 
-/// Ключ решения.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Ключ записи; хранится ради проверки на коллизию хэша.
+#[derive(Debug)]
 struct Key {
-    network: penguin_core::network::Network,
-    destination_ip: Option<std::net::IpAddr>,
+    network: Network,
+    destination_ip: Option<IpAddr>,
     port: u16,
-    domain: Option<String>,
-    process: Option<std::sync::Arc<str>>,
+    domain: Option<Box<str>>,
+    process: Option<Box<str>>,
+}
+
+impl Key {
+    fn of(flow: &FlowContext) -> Self {
+        Self {
+            network: flow.network,
+            destination_ip: flow.destination_ip(),
+            port: flow.destination.port,
+            domain: flow.domain().map(Into::into),
+            process: flow.process.as_ref().map(|p| (&*p.path).into()),
+        }
+    }
+
+    fn is(&self, flow: &FlowContext) -> bool {
+        self.network == flow.network
+            && self.destination_ip == flow.destination_ip()
+            && self.port == flow.destination.port
+            && self.domain.as_deref() == flow.domain()
+            && self.process.as_deref() == flow.process.as_ref().map(|p| &*p.path)
+    }
+}
+
+#[derive(Debug)]
+struct Entry {
+    key: Key,
+    verdict: Verdict,
+    stored: Instant,
 }
 
 /// Кэш решений маршрутизатора.
 #[derive(Debug, Default)]
 pub struct DecisionCache {
-    entries: DashMap<Key, (Verdict, Instant)>,
+    hasher: RandomState,
+    entries: RwLock<HashMap<u64, Entry>>,
 }
 
 impl DecisionCache {
@@ -47,72 +68,69 @@ impl DecisionCache {
         Self::default()
     }
 
+    // Хэш по заимствованным полям: поиск без аллокаций.
+    fn hash(&self, flow: &FlowContext) -> u64 {
+        self.hasher.hash_one((
+            flow.network,
+            flow.destination_ip(),
+            flow.destination.port,
+            flow.domain(),
+            flow.process.as_ref().map(|p| &*p.path),
+        ))
+    }
+
     /// Решение из кэша.
     pub fn get(&self, flow: &FlowContext) -> Option<Verdict> {
-        let key = key_of(flow);
-        let entry = self.entries.get(&key)?;
-        if entry.1.elapsed() >= TTL {
-            return None;
-        }
-        Some(entry.0.clone())
+        let hash = self.hash(flow);
+        let entries = self.entries.read();
+        let entry = entries.get(&hash)?;
+        (entry.stored.elapsed() < TTL && entry.key.is(flow)).then(|| entry.verdict.clone())
     }
 
     /// Запоминает решение.
     pub fn insert(&self, flow: &FlowContext, verdict: &Verdict) {
-        if self.entries.len() >= MAX_ENTRIES {
-            self.evict();
+        let hash = self.hash(flow);
+        let mut entries = self.entries.write();
+        if entries.len() >= MAX_ENTRIES {
+            evict(&mut entries);
         }
-        self.entries
-            .insert(key_of(flow), (verdict.clone(), Instant::now()));
+        entries.insert(
+            hash,
+            Entry {
+                key: Key::of(flow),
+                verdict: verdict.clone(),
+                stored: Instant::now(),
+            },
+        );
     }
 
-    /// Забывает всё.
-    ///
-    /// Вызывается при смене правил и при смене профиля: старые решения после
-    /// этого не просто устарели, а стали неверными.
+    /// Забывает всё; вызывается при смене правил и профиля.
     pub fn clear(&self) {
-        self.entries.clear();
+        self.entries.write().clear();
     }
 
     /// Сколько решений запомнено.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.read().len()
     }
 
     /// Кэш пуст.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    fn evict(&self) {
-        self.entries.retain(|_, (_, stored)| stored.elapsed() < TTL);
-
-        if self.entries.len() < MAX_ENTRIES {
-            return;
-        }
-
-        // Просроченного не нашлось — записи свежие, их просто много. Ключи
-        // собираются заранее: удалять во время обхода `DashMap` нельзя.
-        let mut by_age: Vec<(Key, Instant)> = self
-            .entries
-            .iter()
-            .map(|e| (e.key().clone(), e.1))
-            .collect();
-        by_age.sort_unstable_by_key(|(_, stored)| *stored);
-
-        for (key, _) in by_age.into_iter().take(MAX_ENTRIES / 2) {
-            self.entries.remove(&key);
-        }
+        self.entries.read().is_empty()
     }
 }
 
-fn key_of(flow: &FlowContext) -> Key {
-    Key {
-        network: flow.network,
-        destination_ip: flow.destination_ip(),
-        port: flow.destination.port,
-        domain: flow.domain().map(str::to_owned),
-        process: flow.process.as_ref().map(|p| p.path.clone()),
+/// Выбрасывает просроченное; если не помогло, половину самого старого.
+fn evict(entries: &mut HashMap<u64, Entry>) {
+    entries.retain(|_, e| e.stored.elapsed() < TTL);
+    if entries.len() < MAX_ENTRIES {
+        return;
+    }
+
+    let mut by_age: Vec<(u64, Instant)> = entries.iter().map(|(k, e)| (*k, e.stored)).collect();
+    by_age.sort_unstable_by_key(|(_, stored)| *stored);
+    for (hash, _) in by_age.into_iter().take(MAX_ENTRIES / 2) {
+        entries.remove(&hash);
     }
 }
 
@@ -150,7 +168,6 @@ mod tests {
 
     #[test]
     fn source_port_is_not_part_of_the_key() {
-        // Иначе кэш не попадал бы никогда: у каждого соединения свой порт.
         let cache = DecisionCache::new();
         let mut first = flow("1.2.3.4:443");
         first.source = "127.0.0.1:11111".parse().expect("адрес");
@@ -163,8 +180,6 @@ mod tests {
 
     #[test]
     fn domain_is_part_of_the_key() {
-        // Один и тот же адрес CDN обслуживает разные имена, и решения по ним
-        // разные.
         let cache = DecisionCache::new();
         let with_name = flow("1.2.3.4:443").with_domain(Address::domain("a.example"));
         cache.insert(&with_name, &verdict());

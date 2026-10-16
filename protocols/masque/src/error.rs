@@ -1,9 +1,7 @@
 //! Ошибки протокола.
 //!
-//! Различие между вариантами не косметическое: по нему `supervisor` решает,
-//! повторять ли попытку. Неверные учётные данные — [`MasqueError::AuthRejected`],
-//! и повторять их бессмысленно; обрыв связи — [`MasqueError::Disconnected`],
-//! и его нужно повторять всегда.
+//! По варианту `supervisor` решает, повторять ли: [`MasqueError::AuthRejected`]
+//! — нет, [`MasqueError::Disconnected`] — да.
 
 use penguin_proto::error::ProtocolError;
 use thiserror::Error;
@@ -38,19 +36,14 @@ pub enum MasqueError {
         status: u16,
     },
 
-    /// Сервер отказал в `CONNECT-IP`: код ответа не `101`, кроме `401`/`407`.
-    ///
-    /// Отдельный вариант от [`Self::Refused`]: у `CONNECT-IP` нет цели в
-    /// пути запроса (RFC 9484 запрашивает полный туннель, а не канал до
-    /// одного адреса), и текст «до `{target}`» здесь был бы неправдой.
+    /// Сервер отказал в `CONNECT-IP`: код не `101`, кроме `401`/`407` (цели нет, в отличие от [`Self::Refused`]).
     #[error("сервер отказал в CONNECT-IP: код {status}")]
     RefusedIp {
         /// Код ответа.
         status: u16,
     },
 
-    /// Ответ не разбирается как ожидалось: нет `capsule-protocol: ?1`,
-    /// обрезанная капсула, полезная нагрузка сверх предела.
+    /// Ответ не разбирается: нет `capsule-protocol: ?1`, обрезанная капсула, нагрузка сверх предела.
     #[error("сервер ответил не по протоколу MASQUE: {0}")]
     Malformed(String),
 
@@ -84,16 +77,11 @@ impl MasqueError {
     }
 }
 
-// Перевод в общий язык, на котором говорит остальной клиент. Здесь и
-// закрепляется обещание про повторные попытки.
 impl From<MasqueError> for ProtocolError {
     fn from(err: MasqueError) -> Self {
         match err {
             MasqueError::Config(message) => Self::InvalidConfig(message),
             MasqueError::AuthRejected { .. } => Self::AuthRejected,
-            // Не по протоколу — это признак не того сервера или не той
-            // версии, а не сети: повторять бессмысленно, пока в поле стоит
-            // не тот адрес.
             err @ MasqueError::Malformed(_) => Self::InvalidConfig(err.to_string()),
             MasqueError::Transport(message) => Self::Connect(message),
             err @ MasqueError::Refused { .. } => Self::Unreachable(err.to_string()),

@@ -17,21 +17,21 @@ use crate::error::{PlatformError, PlatformResult};
 /// Ветка автозапуска текущего пользователя.
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 
-/// Записывает путь в автозапуск.
+/// Записывает команду в автозапуск.
 pub(super) fn write(executable: &Path) -> PlatformResult<()> {
     let key = open(KEY_WRITE)?;
 
-    // Путь в кавычках: без них пробел в имени каталога превращает одну
-    // команду в две, и запускается не то. Аргументы — за кавычками, иначе
-    // командой окажется файл с таким длинным именем.
     let value: Vec<u16> = command(executable)
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
     let name = wide(ENTRY_NAME);
 
+    // SAFETY: `value` живёт до конца функции; длина в байтах вдвое больше числа `u16`.
     let bytes = unsafe { std::slice::from_raw_parts(value.as_ptr().cast::<u8>(), value.len() * 2) };
+    // SAFETY: `key` открыт, `name` завершён нулём.
     let result = unsafe { RegSetValueExW(key, PCWSTR(name.as_ptr()), 0, REG_SZ, Some(bytes)) };
+    // SAFETY: `key` открыт выше и закрывается ровно раз.
     let _ = unsafe { RegCloseKey(key) };
 
     result
@@ -39,15 +39,16 @@ pub(super) fn write(executable: &Path) -> PlatformResult<()> {
         .map_err(|e| PlatformError::Service(format!("автозапуск: {e}")))
 }
 
-/// Убирает запись.
+/// Убирает запись; отсутствующая — успех.
 pub(super) fn remove() -> PlatformResult<()> {
     let key = open(KEY_WRITE)?;
     let name = wide(ENTRY_NAME);
 
+    // SAFETY: `key` открыт, `name` завершён нулём.
     let result = unsafe { RegDeleteValueW(key, PCWSTR(name.as_ptr())) };
+    // SAFETY: закрывается ровно раз.
     let _ = unsafe { RegCloseKey(key) };
 
-    // Записи не было — снимать нечего, и это успех.
     if result == ERROR_FILE_NOT_FOUND {
         return Ok(());
     }
@@ -62,6 +63,7 @@ pub(super) fn read() -> Option<String> {
     let name = wide(ENTRY_NAME);
 
     let mut size = 0u32;
+    // SAFETY: запрос размера; `key` открыт, `name` завершён нулём.
     let probe = unsafe {
         RegQueryValueExW(
             key,
@@ -73,11 +75,13 @@ pub(super) fn read() -> Option<String> {
         )
     };
     if probe.is_err() || size == 0 {
+        // SAFETY: закрывается ровно раз.
         let _ = unsafe { RegCloseKey(key) };
         return None;
     }
 
     let mut buffer = vec![0u8; size as usize];
+    // SAFETY: буфер длиной `size` байт.
     let result = unsafe {
         RegQueryValueExW(
             key,
@@ -88,10 +92,11 @@ pub(super) fn read() -> Option<String> {
             Some(&mut size),
         )
     };
+    // SAFETY: закрывается ровно раз.
     let _ = unsafe { RegCloseKey(key) };
     result.ok().ok()?;
 
-    // Значение хранится в UTF-16; завершающий ноль в строку не входит.
+    // UTF-16; завершающий ноль в строку не входит.
     let wide: Vec<u16> = buffer
         .as_chunks::<2>()
         .0
@@ -104,6 +109,7 @@ pub(super) fn read() -> Option<String> {
 
 fn open(access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> PlatformResult<HKEY> {
     let mut key = HKEY::default();
+    // SAFETY: `key` — локальный выходной параметр.
     unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY, 0, access, &mut key) }
         .ok()
         .map_err(|e| PlatformError::Service(format!("ветка автозапуска: {e}")))?;
@@ -114,10 +120,7 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Что попадает в ветку автозапуска.
-///
-/// Свободная функция с тестом: потерянные кавычки означают запуск не того, а
-/// потерянный аргумент — окно поверх рабочего стола при каждом входе.
+/// Команда автозапуска: путь в кавычках (пробел в каталоге), аргументы — за кавычками.
 fn command(executable: &Path) -> String {
     let mut command = format!("\"{}\"", executable.display());
     for argument in super::ARGUMENTS {
@@ -134,28 +137,20 @@ mod tests {
 
     #[test]
     fn round_trips_through_the_registry() {
-        // Один тест на всё, а не несколько: запись в реестре общая для
-        // процесса, и параллельные тесты затирали бы её друг у друга.
-        //
-        // Ветка текущего пользователя — прав администратора не требует.
+        // Один тест: запись общая для процесса, параллельные затирали бы друг друга.
         let executable = std::env::current_exe().expect("свой путь известен");
 
         enable(&executable).expect("включается");
         assert!(is_enabled(), "запись не появилась");
 
         let value = read().expect("значение читается");
-        // Кавычки обязательны: без них пробел в пути превращает одну команду
-        // в две, и запускается не то.
         assert!(value.starts_with('"'), "путь без кавычек: {value}");
-        // Окно поднимается свёрнутым в значок: автозапуск включают не ради
-        // окна поверх рабочего стола при каждом входе.
         assert!(value.ends_with(" --tray"), "запуск без значка: {value}");
 
         disable().expect("выключается");
         assert!(!is_enabled(), "запись осталась");
 
-        // Повторное выключение вызывается из настроек по каждому щелчку и
-        // ошибкой быть не должно.
+        // Повторное выключение ошибкой быть не должно.
         disable().expect("повторное выключение");
     }
 }

@@ -6,23 +6,8 @@
 //!  ChaCha:  [нонс(24, случайный)] [AEAD(идентификатор сессии || счётчик || тело) + метка]
 //! ```
 //!
-//! # Почему не соль на каждой, как у обычного AEAD
-//!
-//! У 2022 своя схема защиты от повтора: один идентификатор сессии на весь
-//! срок жизни сокета и счётчик пакета, растущий на каждой посылке. Отдельная
-//! соль здесь была бы лишней платой — тело и так не расшифровать без верного
-//! идентификатора сессии.
-//!
-//! # Что упрощено против эталона
-//!
-//! `shadowsocks-rust` и `sing-shadowsocks2` держат на сервере окно
-//! антиреплея и кеш смены сессии собеседника (`sing-shadowsocks2`:
-//! `udpSession.window`, `lastRemoteSessionId`). Это защита сервера от
-//! злонамеренного клиента; клиенту, которому нужно принять свой же трафик от
-//! одного сервера, она без надобности. Здесь подключ пересчитывается заново
-//! на каждый пришедший пакет по идентификатору сессии из самого пакета, и
-//! единственная проверка — что сервер вернул **наш** идентификатор сессии
-//! (иначе ответ не на наш запрос).
+//! Окна антиреплея и кеша смены сессии (`sing-shadowsocks2`: `udpSession.window`) нет:
+//! это защита сервера. Клиент проверяет только, что ответ несёт наш идентификатор сессии.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,14 +17,14 @@ use bytes::Bytes;
 use penguin_core::address::SocketAddress;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::error::ProtocolError;
-use rand::Rng;
+use penguin_proto::random;
 use tokio::net::UdpSocket;
 
 use crate::error::{ShadowsocksError, ShadowsocksResult};
 use crate::header2022;
 use crate::kdf2022;
 use crate::method::Method2022;
-use crate::udp2022::cipher::{self, CHACHA_NONCE_LEN, HEADER_LEN};
+use crate::udp2022::cipher::{self, CHACHA_NONCE_LEN, HEADER_LEN, TAG_LEN};
 use crate::udp2022::header;
 
 /// Наибольшая датаграмма, которую вообще можно получить.
@@ -65,18 +50,14 @@ impl std::fmt::Debug for ShadowsocksDatagram2022 {
 }
 
 impl ShadowsocksDatagram2022 {
-    /// Собирает канал вокруг уже открытого сокета. Идентификатор сессии —
-    /// свой на весь срок жизни сокета, случайный.
+    /// Собирает канал вокруг открытого сокета; идентификатор сессии случайный, на весь срок жизни.
     pub fn new(socket: UdpSocket, server: SocketAddr, method: Method2022, psk: Vec<u8>) -> Self {
-        let mut session_id = [0u8; 8];
-        rand::thread_rng().fill(&mut session_id[..]);
-
         Self {
             socket,
             server,
             method,
             psk,
-            session_id: u64::from_be_bytes(session_id),
+            session_id: u64::from_be_bytes(random::array()),
             packet_id: AtomicU64::new(0),
         }
     }
@@ -93,21 +74,18 @@ impl ProxyDatagram for ShadowsocksDatagram2022 {
     }
 
     async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
+        let mut buffer = vec![0u8; MAX_DATAGRAM];
         loop {
-            let mut buffer = vec![0u8; MAX_DATAGRAM];
             let (len, from) = self.socket.recv_from(&mut buffer).await?;
-
             if from.ip() != self.server.ip() {
                 tracing::debug!(%from, "датаграмма 2022 не от сервера — отброшена");
                 continue;
             }
 
-            buffer.truncate(len);
-            match open(self.method, &self.psk, self.session_id, &buffer) {
+            match open(self.method, &self.psk, self.session_id, &mut buffer[..len]) {
                 Ok(found) => return Ok(found),
                 Err(err) => {
                     tracing::debug!(%from, %err, "датаграмма 2022 не разобралась — отброшена");
-                    continue;
                 }
             }
         }
@@ -128,29 +106,28 @@ fn seal(
         header16[8..].copy_from_slice(&packet_id.to_be_bytes());
 
         let key = kdf2022::derive(psk, &header16[..8], method.key_len());
-        let nonce12 = header16[4..16].to_vec();
+        let mut nonce12 = [0u8; 12];
+        nonce12.copy_from_slice(&header16[4..]);
 
-        let mut wire_body = body.to_vec();
-        cipher::aesgcm_seal(method, &key, &nonce12, &mut wire_body)?;
+        let mut wire = Vec::with_capacity(HEADER_LEN + body.len() + TAG_LEN);
+        wire.extend_from_slice(&header16);
+        wire.extend_from_slice(body);
+        let tag = cipher::aesgcm_seal(method, &key, &nonce12, &mut wire[HEADER_LEN..])?;
+        wire.extend_from_slice(&tag);
 
         cipher::ecb_encrypt_header(method, psk, &mut header16)?;
-
-        let mut wire = header16.to_vec();
-        wire.extend_from_slice(&wire_body);
+        wire[..HEADER_LEN].copy_from_slice(&header16);
         Ok(wire)
     } else {
-        let mut nonce24 = [0u8; CHACHA_NONCE_LEN];
-        rand::thread_rng().fill(&mut nonce24[..]);
+        let nonce24 = random::array::<CHACHA_NONCE_LEN>();
 
-        let mut plain = Vec::with_capacity(16 + body.len());
-        plain.extend_from_slice(&session_id.to_be_bytes());
-        plain.extend_from_slice(&packet_id.to_be_bytes());
-        plain.extend_from_slice(body);
-
-        let sealed = cipher::xchacha_seal(psk, &nonce24, &plain)?;
-
-        let mut wire = nonce24.to_vec();
-        wire.extend_from_slice(&sealed);
+        let mut wire = Vec::with_capacity(CHACHA_NONCE_LEN + 16 + body.len() + TAG_LEN);
+        wire.extend_from_slice(&nonce24);
+        wire.extend_from_slice(&session_id.to_be_bytes());
+        wire.extend_from_slice(&packet_id.to_be_bytes());
+        wire.extend_from_slice(body);
+        let tag = cipher::xchacha_seal(psk, &nonce24, &mut wire[CHACHA_NONCE_LEN..])?;
+        wire.extend_from_slice(&tag);
         Ok(wire)
     }
 }
@@ -160,53 +137,40 @@ fn open(
     method: Method2022,
     psk: &[u8],
     our_session_id: u64,
-    datagram: &[u8],
+    datagram: &mut [u8],
 ) -> ShadowsocksResult<(Bytes, SocketAddress)> {
-    let plain = if method.is_aes_gcm() {
-        if datagram.len() < HEADER_LEN {
+    let plain: &[u8] = if method.is_aes_gcm() {
+        let Some((header_bytes, body)) = datagram.split_first_chunk_mut::<HEADER_LEN>() else {
             return Err(ShadowsocksError::malformed(
                 "датаграмма 2022 короче заголовка",
             ));
-        }
-        let (header_bytes, body) = datagram.split_at(HEADER_LEN);
+        };
+        cipher::ecb_decrypt_header(method, psk, header_bytes)?;
 
-        let mut header16 = [0u8; HEADER_LEN];
-        header16.copy_from_slice(header_bytes);
-        cipher::ecb_decrypt_header(method, psk, &mut header16)?;
-
-        let key = kdf2022::derive(psk, &header16[..8], method.key_len());
-        let nonce12 = header16[4..16].to_vec();
-
-        let mut body = body.to_vec();
-        let plain_len = cipher::aesgcm_open(method, &key, &nonce12, &mut body)?;
-        body.truncate(plain_len);
-        body
+        let key = kdf2022::derive(psk, &header_bytes[..8], method.key_len());
+        let plain_len = cipher::aesgcm_open(method, &key, &header_bytes[4..], body)?;
+        &body[..plain_len]
     } else {
-        if datagram.len() < CHACHA_NONCE_LEN {
+        let Some((nonce24, sealed)) = datagram.split_first_chunk_mut::<CHACHA_NONCE_LEN>() else {
             return Err(ShadowsocksError::malformed("датаграмма 2022 короче нонса"));
-        }
-        let (nonce, ciphertext) = datagram.split_at(CHACHA_NONCE_LEN);
-        let nonce24: [u8; CHACHA_NONCE_LEN] = nonce
-            .try_into()
-            .map_err(|_| ShadowsocksError::malformed("нонс 2022 не той длины"))?;
-
-        let mut opened = cipher::xchacha_open(psk, &nonce24, ciphertext)?;
-        if opened.len() < 16 {
+        };
+        let opened_len = cipher::xchacha_open(psk, nonce24, sealed)?;
+        let Some(body) = sealed[..opened_len].get(16..) else {
             return Err(ShadowsocksError::malformed(
                 "датаграмма 2022 короче идентификатора сессии и счётчика",
             ));
-        }
-        opened.split_off(16)
+        };
+        body
     };
 
     let (client_session_id, source, payload) =
-        header::parse_server_body(&plain, header2022::now_unix())?;
+        header::parse_server_body(plain, header2022::now_unix())?;
     if client_session_id != our_session_id {
         return Err(ShadowsocksError::malformed(
             "датаграмма 2022: сервер подтвердил не наш идентификатор сессии",
         ));
     }
-    Ok((Bytes::from(payload), source))
+    Ok((Bytes::copy_from_slice(payload), source))
 }
 
 #[cfg(test)]
@@ -242,9 +206,9 @@ mod tests {
     #[test]
     fn a_datagram_survives_the_round_trip_aes_gcm() {
         let session_id = 42u64;
-        let wire = from_server(Method2022::Blake3Aes128Gcm, &PSK_AES, session_id, b"answer");
-        let (payload, source) =
-            open(Method2022::Blake3Aes128Gcm, &PSK_AES, session_id, &wire).expect("разбирается");
+        let mut wire = from_server(Method2022::Blake3Aes128Gcm, &PSK_AES, session_id, b"answer");
+        let (payload, source) = open(Method2022::Blake3Aes128Gcm, &PSK_AES, session_id, &mut wire)
+            .expect("разбирается");
         assert_eq!(&payload[..], b"answer");
         assert_eq!(source, target());
     }
@@ -252,7 +216,7 @@ mod tests {
     #[test]
     fn a_datagram_survives_the_round_trip_chacha() {
         let session_id = 42u64;
-        let wire = from_server(
+        let mut wire = from_server(
             Method2022::Blake3Chacha20Poly1305,
             &PSK_CHACHA,
             session_id,
@@ -262,7 +226,7 @@ mod tests {
             Method2022::Blake3Chacha20Poly1305,
             &PSK_CHACHA,
             session_id,
-            &wire,
+            &mut wire,
         )
         .expect("разбирается");
         assert_eq!(&payload[..], b"answer");
@@ -271,8 +235,8 @@ mod tests {
 
     #[test]
     fn a_response_to_someone_elses_session_is_rejected() {
-        let wire = from_server(Method2022::Blake3Aes128Gcm, &PSK_AES, 1, b"answer");
-        assert!(open(Method2022::Blake3Aes128Gcm, &PSK_AES, 2, &wire).is_err());
+        let mut wire = from_server(Method2022::Blake3Aes128Gcm, &PSK_AES, 1, b"answer");
+        assert!(open(Method2022::Blake3Aes128Gcm, &PSK_AES, 2, &mut wire).is_err());
     }
 
     #[test]
@@ -285,7 +249,7 @@ mod tests {
 
     #[test]
     fn a_datagram_from_a_different_key_does_not_open() {
-        let wire = from_server(Method2022::Blake3Aes128Gcm, &PSK_AES, 1, b"answer");
-        assert!(open(Method2022::Blake3Aes128Gcm, &[9u8; 16], 1, &wire).is_err());
+        let mut wire = from_server(Method2022::Blake3Aes128Gcm, &PSK_AES, 1, b"answer");
+        assert!(open(Method2022::Blake3Aes128Gcm, &[9u8; 16], 1, &mut wire).is_err());
     }
 }

@@ -1,34 +1,8 @@
-//! Канал датаграмм: по потоку на адресата.
+//! Канал датаграмм: поток на адресата (адрес назван один раз, в заголовке).
 //!
-//! # Откуда такая сложность
-//!
-//! У VLESS адрес назначения назван **один раз**, в заголовке запроса. Значит,
-//! поток обслуживает ровно одного адресата, а канал датаграмм приложения —
-//! это сколько угодно адресатов сразу. Приходится держать их все.
-//!
-//! ```text
-//!   send_to(A) ──► поток A ──► задача чтения ─┐
-//!   send_to(B) ──► поток B ──► задача чтения ─┼──► очередь ──► recv_from
-//!   send_to(C) ──► поток C ──► задача чтения ─┘
-//! ```
-//!
-//! У Trojan и SOCKS5 этого нет: там адрес стоит на каждой посылке, и хватает
-//! одного потока. Разница видна не в скорости, а в том, сколько всего может
-//! пойти не так, — поэтому каждая её часть названа ниже.
-//!
-//! # Что здесь решается
-//!
-//! **Кто ответил.** Ответ приходит из потока, а не с адресом внутри, — значит,
-//! адресата помнит тот, кто этот поток открыл. Задача чтения кладёт его в
-//! очередь вместе с данными.
-//!
-//! **Когда закрывать.** Приложение о конце UDP-сессии не сообщает: у неё нет
-//! конца. Потоки живут, пока живёт канал, и закрываются вместе с ним —
-//! иначе каждый запрос DNS оставлял бы за собой открытое соединение.
-//!
-//! **Сколько их.** Один заражённый узел может опросить тысячу адресов; предел
-//! [`MAX_SESSIONS`] — не оптимизация, а то, что отделяет медленный клиент от
-//! исчерпанной памяти.
+//! `send_to(X)` пишет в поток X; задача чтения каждого потока кладёт ответы с адресом потока в
+//! общую очередь для `recv_from`. Потоки живут до закрытия канала, их число ограничено
+//! [`MAX_SESSIONS`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,10 +22,7 @@ use crate::error::VlessError;
 use crate::frame::request::CMD_UDP;
 use crate::frame::udp;
 
-/// Сколько адресатов канал держит одновременно.
-///
-/// Больше — это уже не приложение, а перебор адресов: у каждого потока свой
-/// сокет, своё рукопожатие TLS и своя задача.
+/// Сколько адресатов канал держит одновременно: у каждого свой сокет, TLS и задача.
 pub const MAX_SESSIONS: usize = 256;
 
 /// Сколько ответов держать в очереди, пока их не забрали.
@@ -63,15 +34,13 @@ const CHUNK: usize = 16 * 1024;
 /// Канал датаграмм через сервер VLESS.
 pub struct VlessDatagram {
     connector: Arc<Connector>,
-    /// Потоки по адресатам: пишущая половина и задача, читающая ответы.
     sessions: Mutex<HashMap<SocketAddress, Session>>,
-    /// Ответы со всех потоков сразу.
+    /// Ответы со всех потоков.
     incoming: Mutex<mpsc::Receiver<(Bytes, SocketAddress)>>,
-    /// Его отдают задачам чтения.
     sender: mpsc::Sender<(Bytes, SocketAddress)>,
 }
 
-/// Один адресат: куда писать и кто читает.
+/// Один адресат.
 struct Session {
     send: WriteHalf<Box<dyn ProxyStream>>,
     reader: JoinHandle<()>,
@@ -86,8 +55,7 @@ impl std::fmt::Debug for VlessDatagram {
 }
 
 impl VlessDatagram {
-    /// Собирает канал. Потоков при этом не открывается: их заводит первая
-    /// посылка каждому адресату.
+    /// Потоки открывает первая посылка каждому адресату.
     pub fn new(connector: Arc<Connector>) -> Self {
         let (sender, incoming) = mpsc::channel(QUEUE);
         Self {
@@ -122,8 +90,7 @@ impl ProxyDatagram for VlessDatagram {
             return Err(VlessError::Disconnected("поток до адресата пропал".into()).into());
         };
 
-        // Обрыв одного адресата — это не конец канала: остальные живут. Поток
-        // убирается, и следующая посылка откроет его заново.
+        // Обрыв адресата убирает только его поток.
         if let Err(err) = write_frame(&mut session.send, &frame).await {
             if let Some(session) = sessions.remove(target) {
                 session.reader.abort();
@@ -135,18 +102,15 @@ impl ProxyDatagram for VlessDatagram {
 
     async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
         let mut incoming = self.incoming.lock().await;
-        incoming.recv().await.ok_or_else(|| {
-            // Отправитель жив, пока жив сам канал: пустая очередь означает,
-            // что канал закрывают.
-            VlessError::Disconnected("канал датаграмм закрыт".to_owned()).into()
-        })
+        incoming
+            .recv()
+            .await
+            .ok_or_else(|| VlessError::Disconnected("канал датаграмм закрыт".to_owned()).into())
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
         let mut sessions = self.sessions.lock().await;
         for (_, mut session) in sessions.drain() {
-            // Сначала задача, потом поток: иначе она успеет прочитать конец
-            // потока и сообщить о нём как об обрыве.
             session.reader.abort();
             let _ = session.send.shutdown().await;
         }
@@ -156,9 +120,6 @@ impl ProxyDatagram for VlessDatagram {
 
 impl Drop for VlessDatagram {
     fn drop(&mut self) {
-        // `close` зовут не всегда — например, когда направление снимают
-        // целиком. Задача чтения ждёт на сокете и сама не кончится никогда:
-        // без этого каждый запрос DNS оставлял бы за собой живую задачу.
         if let Ok(sessions) = self.sessions.try_lock() {
             for session in sessions.values() {
                 session.reader.abort();
@@ -177,9 +138,7 @@ async fn write_frame(
     Ok(())
 }
 
-/// Читает ответы одного адресата и складывает их в общую очередь.
-///
-/// Заканчивается сама, когда поток закрылся или очередь никому не нужна.
+/// Читает ответы одного адресата в общую очередь; кончается с потоком или очередью.
 async fn read_replies(
     mut io: ReadHalf<Box<dyn ProxyStream>>,
     source: SocketAddress,
@@ -192,7 +151,6 @@ async fn read_replies(
             Ok(Some((payload, used))) => {
                 let _ = buffer.split_to(used);
                 if sender.send((payload, source.clone())).await.is_err() {
-                    // Канал закрыли — читать больше некому.
                     return;
                 }
                 continue;
@@ -216,8 +174,6 @@ async fn read_replies(
         buffer.truncate(before + read);
 
         if read == 0 {
-            // Конец потока для UDP — это не ошибка: адресат просто больше не
-            // отвечает. Молчание здесь честнее выдуманной ошибки.
             tracing::debug!(%source, "поток датаграмм закрыт сервером");
             return;
         }
@@ -230,7 +186,6 @@ mod tests {
 
     #[tokio::test]
     async fn replies_carry_the_address_of_the_stream_they_came_from() {
-        // Адреса внутри ответа нет: помнит его тот, кто открыл поток.
         let (client, mut server) = tokio::io::duplex(4096);
         let (sender, mut incoming) = mpsc::channel(8);
         let source = SocketAddress::domain("dns.example.com", 53);
@@ -271,8 +226,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_closed_stream_ends_the_reader_without_an_error() {
-        // Конец потока для UDP — это не ошибка: адресат просто больше не
-        // отвечает, и выдумывать ошибку тут не о чем.
         let (client, server) = tokio::io::duplex(4096);
         let (sender, mut incoming) = mpsc::channel(8);
 

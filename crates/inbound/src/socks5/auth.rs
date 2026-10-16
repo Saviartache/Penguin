@@ -7,10 +7,7 @@
 //! сервер → 0x01 STATUS      (0x00 — пустили)
 //! ```
 //!
-//! Пароль идёт открытым текстом. Это не недосмотр реализации, а свойство
-//! протокола, и поэтому прокси с паролем имеет смысл только на петле:
-//! проверка отсекает соседние процессы, но не того, кто видит трафик. Отказ
-//! слушать чужие адреса без пароля живёт в `penguin-config::validate`.
+//! Пароль идёт открытым текстом (свойство протокола): имеет смысл только на петле.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -52,14 +49,14 @@ where
         return Err(InboundError::NotSocks5(version));
     }
 
-    let username = read_field(stream).await?;
-    let password = read_field(stream).await?;
+    let mut username = [0u8; 255];
+    let mut password = [0u8; 255];
+    let username = read_field(stream, &mut username).await?;
+    let password = read_field(stream, &mut password).await?;
 
-    // Сравнение постоянного времени: разница между «неверное имя» и
-    // «неверный пароль», выраженная временем ответа, — это подсказка тому,
-    // кто перебирает.
-    let ok = constant_time_eq(username.as_bytes(), expected.username.as_bytes())
-        & constant_time_eq(password.as_bytes(), expected.password.as_bytes());
+    // Без раннего выхода: время ответа не выдаёт, что неверно.
+    let ok = constant_time_eq(username, expected.username.as_bytes())
+        & constant_time_eq(password, expected.password.as_bytes());
 
     let status = if ok { STATUS_OK } else { STATUS_FAILED };
     stream.write_all(&[VERSION, status]).await?;
@@ -72,19 +69,17 @@ where
 }
 
 /// Читает поле «длина плюс байты».
-async fn read_field<S>(stream: &mut S) -> InboundResult<String>
+async fn read_field<'a, S>(stream: &mut S, buf: &'a mut [u8; 255]) -> InboundResult<&'a [u8]>
 where
     S: AsyncRead + Unpin + ?Sized,
 {
-    let len = stream.read_u8().await? as usize;
-    let mut bytes = vec![0u8; len];
-    stream.read_exact(&mut bytes).await?;
-    String::from_utf8(bytes).map_err(|_| InboundError::AuthFailed)
+    let len = usize::from(stream.read_u8().await?);
+    let field = &mut buf[..len];
+    stream.read_exact(field).await?;
+    Ok(field)
 }
 
-/// Сравнение, не завершающееся на первом различии.
-///
-/// Разная длина различается сразу — её и так видно по трафику.
+/// Сравнение без выхода на первом различии; разную длину видно и по трафику.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

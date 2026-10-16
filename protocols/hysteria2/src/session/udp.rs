@@ -1,27 +1,14 @@
-//! UDP-сессии поверх датаграмм QUIC.
-//!
-//! Канал датаграмм у соединения QUIC один, а UDP-сокетов у приложений много.
-//! Разделяет их номер сессии в заголовке каждого сообщения; здесь же живёт
-//! разбор этого номера обратно по сокетам.
-//!
-//! ```text
-//!                     ┌── сессия 1 ──► приложение A
-//! QUIC-датаграммы ──► разбор
-//!                     └── сессия 2 ──► приложение B
-//! ```
-//!
-//! Читает датаграммы одна фоновая задача. Иначе каждая сессия дёргала бы
-//! `read_datagram` наперегонки с остальными и получала бы чужие сообщения,
-//! которые пришлось бы куда-то передавать, — то есть тот же разбор, только
-//! размазанный по всем.
+//! UDP-сессии поверх датаграмм QUIC: одна задача читает датаграммы и
+//! раскладывает их по сессиям по номеру в заголовке.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use dashmap::DashMap;
+use parking_lot::RwLock;
 use penguin_core::address::SocketAddress;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::error::ProtocolError;
@@ -31,17 +18,16 @@ use crate::error::Hysteria2Error;
 use crate::frame::udp;
 use penguin_transport::frag::{Fragment, Reassembler};
 
-/// Сколько принятых датаграмм держать для сессии, которая их не забирает.
-///
-/// Переполнение очереди — это потеря датаграммы, то есть ровно то, что с UDP
-/// и так случается. Копить их без предела было бы хуже: приложение, забывшее
-/// про свой сокет, съело бы память клиента.
+/// Глубина очереди сессии; переполнение — потеря датаграммы, как у UDP.
 const SESSION_QUEUE: usize = 256;
+
+type Inbox = mpsc::Sender<(Bytes, SocketAddress)>;
+type Sessions = Arc<RwLock<HashMap<u32, Inbox>>>;
 
 /// Разбор датаграмм по сессиям.
 pub struct UdpManager {
     connection: quinn::Connection,
-    sessions: Arc<DashMap<u32, mpsc::Sender<(Bytes, SocketAddress)>>>,
+    sessions: Sessions,
     next_session: AtomicU32,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -49,7 +35,7 @@ pub struct UdpManager {
 impl std::fmt::Debug for UdpManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UdpManager")
-            .field("sessions", &self.sessions.len())
+            .field("sessions", &self.sessions.read().len())
             .finish()
     }
 }
@@ -57,17 +43,13 @@ impl std::fmt::Debug for UdpManager {
 impl UdpManager {
     /// Заводит разбор и фоновую задачу чтения.
     pub fn new(connection: quinn::Connection) -> Arc<Self> {
-        let sessions: Arc<DashMap<u32, mpsc::Sender<(Bytes, SocketAddress)>>> =
-            Arc::new(DashMap::new());
-
+        let sessions = Sessions::default();
         let reader = tokio::spawn(read_loop(connection.clone(), Arc::clone(&sessions)));
 
         Arc::new(Self {
             connection,
             sessions,
-            // Номер сессии начинается с единицы: ноль слишком легко получить
-            // из неинициализированного буфера, и путать его с настоящей
-            // сессией не хочется.
+            // Ноль не используется: слишком легко получить из пустого буфера.
             next_session: AtomicU32::new(1),
             reader: Mutex::new(Some(reader)),
         })
@@ -77,7 +59,7 @@ impl UdpManager {
     pub fn open(self: &Arc<Self>) -> UdpSession {
         let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(SESSION_QUEUE);
-        self.sessions.insert(session_id, tx);
+        self.sessions.write().insert(session_id, tx);
 
         UdpSession {
             session_id,
@@ -92,17 +74,12 @@ impl UdpManager {
         if let Some(reader) = self.reader.lock().await.take() {
             reader.abort();
         }
-        self.sessions.clear();
+        self.sessions.write().clear();
     }
 }
 
 /// Читает датаграммы соединения и раскладывает их по сессиям.
-async fn read_loop(
-    connection: quinn::Connection,
-    sessions: Arc<DashMap<u32, mpsc::Sender<(Bytes, SocketAddress)>>>,
-) {
-    // Собиратель живёт в задаче и никем не разделяется: только сюда приходят
-    // фрагменты, и блокировка вокруг него была бы блокировкой самой с собой.
+async fn read_loop(connection: quinn::Connection, sessions: Sessions) {
     let mut reassembler = Reassembler::new();
 
     loop {
@@ -115,16 +92,11 @@ async fn read_loop(
         };
 
         let Some(message) = udp::UdpMessage::decode(datagram) else {
-            // Повреждённая датаграмма. Жаловаться некому — на той стороне
-            // UDP, и единственное разумное действие — выбросить.
             continue;
         };
 
         let session_id = message.session_id;
         let fragment = Fragment {
-            // Номер сессии у Hysteria 2 тридцатидвухбитный, у общего
-            // собирателя шире: тесниться некуда, и разговор о том, чей
-            // номер шире, не нужен.
             session: u64::from(message.session_id),
             packet: message.packet_id,
             count: message.fragment_count,
@@ -141,13 +113,11 @@ async fn read_loop(
             continue;
         };
 
-        let Some(sender) = sessions.get(&session_id) else {
-            // Сессия уже закрыта: приложение закрыло сокет, а ответ был в
-            // пути. Обычное дело.
-            continue;
+        let sent = match sessions.read().get(&session_id) {
+            Some(sender) => sender.try_send((payload, address)),
+            None => continue,
         };
-
-        if sender.try_send((payload, address)).is_err() {
+        if sent.is_err() {
             tracing::trace!(
                 session_id,
                 "очередь сессии переполнена, датаграмма отброшена"
@@ -155,7 +125,7 @@ async fn read_loop(
         }
     }
 
-    sessions.clear();
+    sessions.write().clear();
 }
 
 /// Одна UDP-сессия: соответствует одному сокету приложения.
@@ -179,9 +149,6 @@ impl ProxyDatagram for UdpSession {
     async fn send_to(&self, payload: Bytes, target: &SocketAddress) -> Result<(), ProtocolError> {
         let connection = &self.manager.connection;
 
-        // Размер известен только у живого соединения и меняется вместе с
-        // путевым MTU. `None` означает, что собеседник датаграммы не принимает
-        // вовсе.
         let max = connection
             .max_datagram_size()
             .ok_or(Hysteria2Error::UdpDisabled)
@@ -209,16 +176,14 @@ impl ProxyDatagram for UdpSession {
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        self.manager.sessions.remove(&self.session_id);
+        self.manager.sessions.write().remove(&self.session_id);
         Ok(())
     }
 }
 
 impl Drop for UdpSession {
     fn drop(&mut self) {
-        // Забытая запись в таблице означала бы, что ответы копятся в очереди,
-        // которую никто не читает, пока соединение не закроется целиком.
-        self.manager.sessions.remove(&self.session_id);
+        self.manager.sessions.write().remove(&self.session_id);
     }
 }
 

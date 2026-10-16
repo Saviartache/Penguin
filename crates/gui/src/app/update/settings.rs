@@ -1,13 +1,8 @@
 //! Настройки приложения.
 //!
-//! Каждый переключатель уезжает демону сразу, без «Сохранить». Настройка здесь
-//! — это один флаг, а не набор, который собирают и подтверждают целиком:
-//! щелчок, после которого ничего не произошло, пока не нажата вторая кнопка,
-//! читается как несработавший, и человек щёлкает ещё раз.
-//!
-//! Правила при этом не уезжают: их берёт [`save`] из того, что уже принял
-//! демон. Иначе переключатель на этой вкладке молча сохранял бы набор правил,
-//! который человек ещё правит на соседней.
+//! Каждый переключатель уезжает демону сразу, без «Сохранить». Правила при этом
+//! не уезжают: [`save`] берёт их из принятого демоном, иначе переключатель
+//! сохранил бы набор, который правят на соседней вкладке.
 
 use iced::Task;
 use penguin_config::schema::app::LogLevel;
@@ -18,54 +13,26 @@ use crate::app::update::save;
 
 /// Разбирает экран настроек.
 pub fn handle(app: &mut App, message: SettingsMessage) -> Task<Message> {
+    let config = &mut app.state_mut().config;
     match message {
         SettingsMessage::Autostart(enabled) => {
-            app.state_mut().config.app.autostart = enabled;
-
-            // Автозапуск интерфейса — запись в ветку текущего пользователя, и
-            // делает её сам интерфейс: демону она не нужна и прав на неё у
-            // него нет.
+            config.app.autostart = enabled;
             apply_autostart(enabled);
-            save(app)
         }
-
-        SettingsMessage::Autoconnect(enabled) => {
-            app.state_mut().config.app.autoconnect = enabled;
-            save(app)
-        }
-
-        SettingsMessage::KillSwitch(enabled) => {
-            app.state_mut().config.network.kill_switch = enabled;
-            save(app)
-        }
-
-        SettingsMessage::AllowLan(enabled) => {
-            app.state_mut().config.network.allow_lan = enabled;
-            save(app)
-        }
-
+        SettingsMessage::Autoconnect(enabled) => config.app.autoconnect = enabled,
+        SettingsMessage::KillSwitch(enabled) => config.network.kill_switch = enabled,
+        SettingsMessage::AllowLan(enabled) => config.network.allow_lan = enabled,
         SettingsMessage::CaptureDefaultRoute(enabled) => {
-            app.state_mut().config.network.capture_default_route = enabled;
-            save(app)
+            config.network.capture_default_route = enabled;
         }
-
-        SettingsMessage::DnsHijack(enabled) => {
-            app.state_mut().config.dns.hijack = enabled;
-            save(app)
-        }
-
-        SettingsMessage::VerboseLog(enabled) => {
-            app.state_mut().config.app.log_level = log_level(enabled);
-            save(app)
-        }
+        SettingsMessage::DnsHijack(enabled) => config.dns.hijack = enabled,
+        SettingsMessage::VerboseLog(enabled) => config.app.log_level = log_level(enabled),
     }
+    save(app)
 }
 
-/// Уровень журнала под переключателем.
-///
-/// Из пяти уровней переключатель различает два: подробнее `debug` в окне не
-/// спрашивают, а `trace` ставят руками в файле — и, выключив переключатель,
-/// его же руками и возвращают.
+/// Уровень журнала под переключателем: `debug` или `info`; `trace` ставят руками
+/// в файле.
 fn log_level(verbose: bool) -> LogLevel {
     if verbose {
         LogLevel::Debug
@@ -74,10 +41,8 @@ fn log_level(verbose: bool) -> LogLevel {
     }
 }
 
-/// Включает или выключает автозапуск интерфейса.
-///
-/// Неудача не отменяет саму настройку: она сохранится и подействует, когда
-/// права появятся. Молча промолчать нельзя — строка попадёт в журнал.
+/// Автозапуск — запись в ветку текущего пользователя, её делает сам интерфейс
+/// (у демона прав на неё нет). Неудача настройку не отменяет, только в журнал.
 fn apply_autostart(enabled: bool) {
     let result = if enabled {
         std::env::current_exe()
@@ -103,8 +68,6 @@ mod tests {
 
     #[test]
     fn toggles_reach_the_config_and_are_saved_at_once() {
-        // Щелчок, после которого ничего не произошло, читается как
-        // несработавший, и человек щёлкает ещё раз.
         let mut app = app();
 
         let _ = handle(&mut app, SettingsMessage::KillSwitch(false));
@@ -134,8 +97,6 @@ mod tests {
 
     #[test]
     fn a_toggle_does_not_save_rules_the_user_is_still_editing() {
-        // Иначе щелчок по переключателю на этой вкладке молча сохраняет набор
-        // правил, который человек правит на соседней.
         let mut app = app();
         app.state_mut().config.routing.mode =
             penguin_config::schema::routing::TunnelMode::Allowlist;

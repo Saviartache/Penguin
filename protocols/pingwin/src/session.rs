@@ -1,10 +1,4 @@
-//! Соединение с сервером: QUIC, HTTP/3 и опознание.
-//!
-//! ```text
-//!  QUIC + TLS (сертификат)  ──►  HTTP/3  ──►  GET / authorization  ──►  204 pingwin-proof
-//! ```
-//!
-//! Опознаётся соединение, а не запрос: дальше `CONNECT` идут без токена.
+//! Соединение с сервером: QUIC, HTTP/3, опознание (один раз на соединение).
 
 use std::time::Duration;
 
@@ -111,7 +105,7 @@ impl Session {
         Ok(PingwinDatagram::new(self.h3.clone(), stream, incoming))
     }
 
-    /// Оценка оборота от QUIC: он меряет её на каждом подтверждении.
+    /// Оборот по оценке QUIC.
     pub(crate) fn rtt(&self) -> Duration {
         self.link.connection.rtt()
     }

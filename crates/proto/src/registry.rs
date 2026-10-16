@@ -1,8 +1,4 @@
 //! Реестр протоколов: строка из конфига -> фабрика.
-//!
-//! Единственное место во всей программе, где перечислены протоколы. Всё, что
-//! нужно для подключения нового, — одна строка регистрации в `penguin-engine`
-//! под своей фичей.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,11 +11,7 @@ use crate::packet::PacketFactory;
 #[derive(Default)]
 pub struct ProtocolRegistry {
     factories: HashMap<&'static str, Arc<dyn ProtocolFactory>>,
-    /// Протоколы уровня пакетов: WireGuard и родня.
-    ///
-    /// Отдельная таблица, а не флаг в общей: у них другая фабрика и другое
-    /// направление, и складывать их вместе значило бы доставать из реестра
-    /// то, что нельзя использовать, и выяснять это на месте вызова.
+    /// Протоколы уровня пакетов (другая фабрика и направление).
     packets: HashMap<&'static str, Arc<dyn PacketFactory>>,
 }
 
@@ -29,10 +21,7 @@ impl ProtocolRegistry {
         Self::default()
     }
 
-    /// Добавляет протокол.
-    ///
-    /// Повторная регистрация того же имени заменяет прежнюю запись: так
-    /// тесты подставляют поддельный протокол вместо настоящего.
+    /// Добавляет протокол; то же имя заменяет прежнюю запись.
     pub fn register(&mut self, factory: Arc<dyn ProtocolFactory>) -> &mut Self {
         self.factories.insert(factory.protocol(), factory);
         self
@@ -56,10 +45,7 @@ impl ProtocolRegistry {
         self.packets.get(protocol)
     }
 
-    /// Проверяет параметры, какого бы уровня протокол ни был.
-    ///
-    /// Общая точка входа: интерфейсу незачем знать, работает протокол на
-    /// потоках или на пакетах, — ошибку в поле он показывает одинаково.
+    /// Проверяет параметры протокола любого уровня.
     pub fn validate(
         &self,
         protocol: &str,
@@ -71,9 +57,7 @@ impl ProtocolRegistry {
         self.get(protocol)?.validate(params)
     }
 
-    /// Имена всех зарегистрированных протоколов — для интерфейса и диагностики.
-    ///
-    /// Оба уровня вперемешку: снаружи разницы между ними нет.
+    /// Имена всех зарегистрированных протоколов обоих уровней.
     pub fn protocols(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.factories.keys().chain(self.packets.keys()).copied()
     }
@@ -149,9 +133,6 @@ mod tests {
 
     #[test]
     fn both_levels_are_listed_together() {
-        // Снаружи разницы между уровнями нет: профиль называет протокол по
-        // имени, и «такого протокола нет» не должно зависеть от того, на чём
-        // он работает.
         let registry = registry();
         let mut names: Vec<&str> = registry.protocols().collect();
         names.sort_unstable();
@@ -160,8 +141,6 @@ mod tests {
 
     #[test]
     fn validation_finds_the_protocol_at_either_level() {
-        // Интерфейсу незачем знать уровень: ошибку в поле он показывает
-        // одинаково, и спрашивать он должен в одном месте.
         let registry = registry();
         let good = serde_json::json!({ "ok": true });
         let bad = serde_json::json!({});
@@ -179,9 +158,6 @@ mod tests {
 
     #[test]
     fn a_packet_protocol_is_not_mistaken_for_a_stream_one() {
-        // Достать пакетный протокол как потоковый нельзя: иначе движок
-        // получил бы направление, у которого нет `connect_tcp`, и выяснил бы
-        // это на первом же соединении.
         let registry = registry();
         assert!(registry.get("пакеты").is_err());
         assert!(registry.get_packet("пакеты").is_some());

@@ -12,21 +12,17 @@ description = "Протокол Trojan: поток внутри TLS, неотл�
 workspace = true
 
 [dependencies]
-# Протокол зависит только от контракта, общих типов и общего транспорта.
-# Ни TUN, ни правил, ни GUI он не видит — это и делает его заменяемым.
 penguin-core.workspace = true
 penguin-proto.workspace = true
-# `h2` — перенос gRPC, `quic` — перенос XHTTP.
+# `h2` — gRPC, `quic` — XHTTP.
 penguin-transport = { workspace = true, features = ["h2", "quic"] }
 
 tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
 async-trait.workspace = true
 bytes.workspace = true
-# SHA-224 — единственная криптография протокола: пароль уходит её отпечатком.
+# SHA-224 (нет в ring)
 sha2.workspace = true
 serde.workspace = true
-# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
-# разбирает их только этот крейт.
 serde_json.workspace = true
 thiserror.workspace = true
 

@@ -1,8 +1,4 @@
-//! Разбор сообщений по областям. Один общий match на всё приложение нечитаем.
-//!
-//! Верхний уровень только раскладывает сообщения по адресатам; вся работа —
-//! в файлах рядом. Так `match` остаётся коротким и не превращается в файл на
-//! тысячу строк, куда никто не заглядывает без крайней нужды.
+//! Разбор сообщений по областям; работа — в файлах рядом.
 
 pub mod connection;
 pub mod profiles;
@@ -42,63 +38,26 @@ pub fn handle(app: &mut App, message: Message) -> Task<Message> {
     }
 }
 
-/// Разбирает управление окном.
-///
-/// Своя рамка вместо системной означает, что перетаскивание и изменение
-/// размера — забота приложения. Всё состояние этого держит `WindowChrome`;
-/// здесь только передача событий.
 fn handle_window(app: &mut App, message: WindowMessage) -> Task<Message> {
     match message {
-        // Окно открылось: запоминаем его настоящий идентификатор и исходное
-        // положение. До этого команды окну уходили в никуда — настоящего id
-        // ещё не было.
         WindowMessage::Opened(id, position, size) => app.window_opened(id, position, size),
-        // Только заряжаем: тащить начнёт `on_cursor_moved`, когда курсор
-        // уедет дальше порога. Начать перетаскивание прямо на нажатии значит
-        // утащить окно при щелчке по переключателю темы в той же шапке.
+        // Только заряжаем: тащить начнёт `on_cursor_moved`, иначе щелчок по
+        // кружку в шапке утащил бы окно.
         WindowMessage::DragStarted => {
             let id = app.window();
             app.chrome_mut().arm_drag(id);
             Task::none()
         }
         WindowMessage::CursorMoved(position) => app.chrome_mut().on_cursor_moved(position),
-        // Свернуть — в значок лотка, а без значка на панель задач. Тоннель при
-        // этом остаётся как был: убрать окно с глаз и выключить тоннель — не
-        // одно и то же.
         WindowMessage::Minimize => app.hide(),
         WindowMessage::Show => app.show(),
         WindowMessage::Toggle => app.toggle_visibility(),
-        // Закрыть означает закрыть всё. Тоннель держит служба, отдельный
-        // процесс, и окно, закрывшееся само по себе, оставило бы после себя
-        // TUN-адаптер, маршруты и трафик через нас — программу, которой на
-        // экране больше нет, а в системе она есть.
-        WindowMessage::Close => {
-            // Службы и так нет — гасить нечего, и ждать ответа не от кого.
-            if !app.state().connection.online {
-                return window::close(app.window());
-            }
-            // Флаг до задачи, а не после: связь оборвётся раньше, чем человек
-            // ответит на запрос пароля, и без него окно успело бы показать
-            // «Служба не отвечает» — про службу, которую само же и гасит.
-            app.state_mut().connection.stopping = true;
-            app.state_mut().connection.push_log(
-                penguin_ipc::schema::LogLevel::Info,
-                crate::i18n::s().service_stopping.to_owned(),
-            );
-            Task::perform(connection::shutdown_service(), |()| {
-                Message::Window(WindowMessage::Stopped)
-            })
-        }
+        WindowMessage::Close => close(app),
         WindowMessage::Stopped => window::close(app.window()),
-        // Окно передвинули — `Morph` держит на месте центр и обязан знать, где
-        // окно сейчас.
         WindowMessage::Moved(x, y) => {
             app.morph_mut().on_moved(x, y);
             Task::none()
         }
-        // Кнопку отпустили: заряженное перетаскивание так им и не стало —
-        // иначе следующее движение курсора где угодно по окну утащило бы его
-        // за собой.
         WindowMessage::DragStopped => {
             app.chrome_mut().disarm_drag();
             Task::none()
@@ -106,14 +65,25 @@ fn handle_window(app: &mut App, message: WindowMessage) -> Task<Message> {
     }
 }
 
-/// Что окно делает сразу после открытия.
+/// Закрыть значит остановить и службу: иначе останутся TUN и маршруты.
+fn close(app: &mut App) -> Task<Message> {
+    if !app.state().connection.online {
+        return window::close(app.window());
+    }
+    // Флаг до задачи: связь оборвётся раньше ответа на запрос пароля.
+    app.state_mut().connection.stopping = true;
+    app.state_mut().connection.push_log(
+        penguin_ipc::schema::LogLevel::Info,
+        crate::i18n::s().service_stopping.to_owned(),
+    );
+    Task::perform(connection::shutdown_service(), |()| {
+        Message::Window(WindowMessage::Stopped)
+    })
+}
+
+/// Что окно делает после открытия: сначала служба, потом вопросы к ней.
 ///
-/// Сначала служба, потом вопросы к ней. Настройки, список профилей, состояние
-/// тоннеля — всё это у неё, и без неё окно пустое; предлагать человеку
-/// запустить её самому значит перекладывать на него нашу работу.
-///
-/// Прав это стоит один раз: служба ставится с автозапуском и дальше поднимается
-/// вместе с системой, так что при следующих запусках UAC не появится.
+/// Права нужны один раз: служба ставится с автозапуском.
 pub fn bootstrap() -> Task<Message> {
     Task::perform(connection::ensure_at_startup(), |ready| {
         Message::Home(HomeMessage::ServiceChecked(ready))
@@ -125,12 +95,8 @@ pub fn request_initial_state() -> Task<Message> {
     Task::batch([request(Request::GetConfig), request(Request::Status)])
 }
 
-/// Сохраняет то, что сохраняется сразу: профили, выбор сервера, настройки.
-///
-/// Правила при этом берутся не из окна, а из того, что уже принял демон.
-/// Настройки уезжают одним файлом со всем остальным, и без этой подмены
-/// щелчок по переключателю на вкладке настроек молча сохранял бы набор правил,
-/// который человек ещё правит на соседней вкладке.
+/// Сохраняет то, что сохраняется сразу; правила берутся из принятого демоном,
+/// чтобы не сохранить то, что ещё правится на их вкладке.
 pub fn save(app: &mut App) -> Task<Message> {
     let mut config = app.state().config.clone();
     config.routing = app.state().saved.routing.clone();
@@ -141,8 +107,7 @@ pub fn save(app: &mut App) -> Task<Message> {
     })
 }
 
-/// Сохраняет всё, включая правила, — то, чего ждут от «Сохранить» на их
-/// вкладке.
+/// Сохраняет всё, включая правила («Сохранить» на их вкладке).
 pub fn save_rules(app: &mut App) -> Task<Message> {
     let config = app.state().config.clone();
 
@@ -153,10 +118,7 @@ pub fn save_rules(app: &mut App) -> Task<Message> {
     })
 }
 
-/// Отправляет запрос демону.
-///
-/// Ошибка связи превращается в ответ об ошибке: у интерфейса один путь
-/// обработки, и разводить «отказал» и «не ответил» по разным веткам незачем.
+/// Отправляет запрос; ошибка связи становится ответом об ошибке.
 pub fn request(request: Request) -> Task<Message> {
     Task::perform(crate::ipc::client::send_or_error(request), |response| {
         Message::Ipc(IpcMessage::Response(Box::new(response)))
@@ -169,11 +131,8 @@ mod tests {
 
     #[test]
     fn initial_state_asks_for_config_and_status() {
-        // Без настроек экраны нечем наполнить, без состояния — нечего
-        // показать на главном.
         let command = request_initial_state();
-        // `Task` не разбирается снаружи; проверяем хотя бы, что он не
-        // пустой — пустой означал бы окно, которое ничего не спросило.
+        // `Task` снаружи не разобрать; пустой означал бы, что ничего не спросили.
         assert!(!format!("{command:?}").contains("None"));
     }
 }

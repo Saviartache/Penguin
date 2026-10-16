@@ -1,21 +1,11 @@
-//! Канал датаграмм: один поток на всех адресатов.
-//!
-//! # Почему потоком, а не датаграммой QUIC
-//!
-//! Ровно ради этого Juicity и написан. У TUIC датаграммы едут либо
-//! датаграммами QUIC — и тогда потерянный пакет виден приложению как молчание
-//! на несколько секунд, потому что повторяет уже оно само, — либо каждая
-//! своим односторонним потоком, и тогда на каждый запрос DNS заводится
-//! отдельный поток. Juicity возит их одним потоком с надёжной доставкой:
-//! доставка тут лишняя, но она дешевле обоих способов.
+//! Канал датаграмм: один надёжный поток на всех адресатов.
 //!
 //! ```text
 //!  заголовок потока   [3][адрес первого адресата]
 //!  каждая датаграмма  [адрес][длина][данные]
 //! ```
 //!
-//! Поток заводится **первой посылкой**, а не при создании канала: в заголовке
-//! сервер ждёт адрес, и до первой посылки его неоткуда взять.
+//! Поток открывается первой посылкой: сервер ждёт в заголовке адрес.
 
 use std::sync::Arc;
 
@@ -35,25 +25,22 @@ use crate::frame::{proxy, udp};
 use crate::link::Link;
 use crate::pool::LinkPool;
 
-/// Сколько датаграмм держать в очереди, пока их не забрали.
+/// Глубина очереди принятых датаграмм.
 const QUEUE: usize = 512;
 
 /// Канал датаграмм через сервер Juicity.
 pub struct JuicityDatagram {
     pool: Arc<LinkPool>,
-    /// Пишущая половина потока. Пусто — посылок ещё не было.
+    /// Пусто — посылок ещё не было.
     outgoing: Mutex<Option<Outgoing>>,
-    /// Что пришло.
     incoming: Mutex<mpsc::Receiver<(Bytes, SocketAddress)>>,
-    /// Его отдают задаче чтения.
+    /// Клон для задачи чтения.
     sender: mpsc::Sender<(Bytes, SocketAddress)>,
-    /// Задача чтения потока.
     reader: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// Пишущая сторона вместе с соединением, которое её держит.
+/// Пишущая сторона вместе с соединением, которое держит эндпойнт.
 struct Outgoing {
-    /// Соединение: пока живо оно, жив и эндпойнт под потоком.
     _link: Arc<Link>,
     send: quinn::SendStream,
 }
@@ -138,9 +125,6 @@ impl ProxyDatagram for JuicityDatagram {
             reader.abort();
         }
         if let Some(mut outgoing) = self.outgoing.lock().await.take() {
-            // Конец потока объявляется явно: поток, который просто перестали
-            // писать, для сервера выглядит живым, и его отображение адресов
-            // держится до срока преобразования.
             let _ = outgoing.send.finish();
         }
         Ok(())
@@ -171,24 +155,23 @@ async fn read_packets(
     }
 }
 
-/// Читает адрес датаграммы.
-///
-/// Байт за байтом, пока разбор не скажет «хватит». Разбор при этом один и тот
-/// же — тот, что проверен тестами в [`penguin_transport::addr::socks`]; своя
-/// асинхронная копия ветвлений по типу адреса рано или поздно разошлась бы с
-/// ним. Чтение идёт из буфера, а не из сети, поэтому байт за байтом стоит
-/// столько же, сколько разом.
+/// Читает адрес датаграммы: длина по типу, разбор — общий `socks::decode`.
 async fn read_address(io: &mut BufReader<quinn::RecvStream>) -> JuicityResult<SocketAddress> {
-    let mut buffer = Vec::with_capacity(udp::MAX_ADDRESS);
-    loop {
-        if let Some((address, _)) = socks::decode(&buffer)? {
-            return Ok(address);
+    let mut buf = [0_u8; udp::MAX_ADDRESS];
+    io.read_exact(&mut buf[..1]).await?;
+    let (head, tail) = match buf[0] {
+        socks::ATYP_IPV4 => (1, 4 + 2),
+        socks::ATYP_IPV6 => (1, 16 + 2),
+        socks::ATYP_DOMAIN => {
+            io.read_exact(&mut buf[1..2]).await?;
+            (2, usize::from(buf[1]) + 2)
         }
-        if buffer.len() >= udp::MAX_ADDRESS {
-            return Err(JuicityError::malformed("адрес датаграммы не кончается"));
-        }
-        let mut byte = [0_u8; 1];
-        io.read_exact(&mut byte).await?;
-        buffer.push(byte[0]);
+        // Неизвестный тип отвергнет `decode`.
+        _ => (1, 0),
+    };
+    io.read_exact(&mut buf[head..head + tail]).await?;
+    match socks::decode(&buf[..head + tail])? {
+        Some((address, _)) => Ok(address),
+        None => Err(JuicityError::malformed("адрес датаграммы обрезан")),
     }
 }

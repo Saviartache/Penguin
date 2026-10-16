@@ -1,16 +1,7 @@
-//! Wintun: загрузка драйвера, создание адаптера, сессия чтения-записи.
+//! Wintun: загрузка драйвера, адаптер, сессия чтения-записи.
 //!
-//! Wintun — тот же драйвер, что у WireGuard: подписанный, проверенный
-//! годами, и своего писать не приходится. Библиотека `wintun.dll` при этом в
-//! поставку Windows не входит и должна лежать рядом с исполняемым файлом.
-//!
-//! # Чтение
-//!
-//! У Wintun чтение блокирующее, а вокруг — асинхронный клиент. Мост между
-//! ними — отдельный поток: он читает из кольца драйвера и складывает пакеты в
-//! очередь, откуда их забирает задача. Не `spawn_blocking`: тот берёт поток
-//! из общего пула на каждый вызов, а здесь чтение идёт непрерывно всё время
-//! работы тоннеля и заняло бы место в пуле навсегда.
+//! Чтение блокирующее, поэтому идёт в отдельном потоке (не `spawn_blocking`:
+//! читает непрерывно) и отдаёт пакеты задаче через очередь.
 
 use std::sync::Arc;
 
@@ -22,12 +13,14 @@ use crate::config::TunConfig;
 use crate::device::TunDevice;
 use crate::error::{TunError, TunResult};
 
-/// Сколько пакетов держать в очереди между потоком чтения и задачей.
-///
-/// Переполнение означает, что клиент не успевает разбирать трафик; лишние
-/// пакеты отбрасываются — ровно так же, как это сделала бы перегруженная
-/// сеть, и TCP на это рассчитан.
+/// Глубина очереди; при переполнении пакеты отбрасываются.
 const QUEUE_CAPACITY: usize = 1024;
+
+/// Пакетов на одну аллокацию буфера чтения.
+const BATCH: usize = 16;
+
+/// Размер буфера на один пакет.
+const SLOT: usize = 2048;
 
 /// Тип тоннеля, под которым адаптер виден в системе.
 const TUNNEL_TYPE: &str = "Penguin";
@@ -35,23 +28,14 @@ const TUNNEL_TYPE: &str = "Penguin";
 /// Имя файла драйвера.
 const DRIVER: &str = "wintun.dll";
 
-/// Загружает драйвер.
-///
-/// Ищется он рядом с исполняемым файлом — явным путём, а не по имени. Обычный
-/// поиск нашёл бы его там же, но не сказал бы, **где** искал, а ответ на это
-/// и есть весь смысл сообщения об ошибке: тоннель поднимает служба, и «рядом»
-/// означает рядом с её файлом, а не с тем, который человек видит у себя.
-///
-/// Если своего пути узнать не удалось, остаётся обычный поиск: драйвер могли
-/// положить и в систему.
+/// Загружает драйвер из каталога исполняемого файла; нет каталога — обычный поиск.
 pub fn load_driver() -> TunResult<wintun::Wintun> {
     let directory = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
 
-    // Загрузка библиотеки — обращение к чужому коду; безопаснее сделать её
-    // нельзя, но делается она ровно один раз.
     #[allow(unsafe_code, reason = "загрузка wintun.dll")]
+    // SAFETY: загружается подписанная библиотека драйвера, один раз.
     let loaded = match &directory {
         Some(directory) => unsafe { wintun::load_from_path(directory.join(DRIVER)) },
         None => unsafe { wintun::load() },
@@ -137,43 +121,44 @@ impl WintunDevice {
 
 /// Запускает поток чтения из кольца драйвера.
 fn spawn_reader(session: Arc<wintun::Session>, tx: mpsc::Sender<BytesMut>) {
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("penguin-tun-read".to_owned())
-        .spawn(move || {
-            loop {
-                match session.receive_blocking() {
-                    Ok(packet) => {
-                        let bytes = BytesMut::from(packet.bytes());
-                        // `blocking_send` остановил бы чтение из кольца, а
-                        // кольцо у драйвера конечное: переполнив его, мы
-                        // потеряем пакеты в куда менее удобном месте.
-                        // `try_send` теряет их здесь и предсказуемо.
-                        match tx.try_send(bytes) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                tracing::trace!("очередь пакетов переполнена, пакет отброшен");
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        }
-                    }
-                    Err(err) => {
-                        tracing::debug!(%err, "чтение из адаптера прекращено");
-                        break;
-                    }
-                }
+        .spawn(move || read_loop(&session, &tx));
+    if let Err(err) = spawned {
+        tracing::error!(%err, "не удалось запустить чтение из адаптера");
+    }
+}
+
+/// Читает кольцо, пока сессия жива; `try_send`, чтобы не копить пакеты в кольце драйвера.
+fn read_loop(session: &Arc<wintun::Session>, tx: &mpsc::Sender<BytesMut>) {
+    let mut buffer = BytesMut::new();
+    loop {
+        let packet = match session.receive_blocking() {
+            Ok(packet) => packet,
+            Err(err) => {
+                tracing::debug!(%err, "чтение из адаптера прекращено");
+                return;
             }
-        })
-        // Поток не создаётся только при исчерпании системных ресурсов; тогда
-        // тоннель всё равно не поднимется.
-        .map(|_| ())
-        .unwrap_or_else(|err| tracing::error!(%err, "не удалось запустить чтение из адаптера"));
+        };
+        let bytes = packet.bytes();
+        if buffer.capacity() < bytes.len() {
+            buffer.reserve(BATCH * SLOT.max(bytes.len()));
+        }
+        buffer.extend_from_slice(bytes);
+        match tx.try_send(buffer.split()) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::trace!("очередь пакетов переполнена, пакет отброшен");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
+        }
+    }
 }
 
 /// Переводит ошибку создания адаптера в понятную пользователю.
 fn classify(name: &str, err: wintun::Error) -> TunError {
     let text = err.to_string();
-    // Разбор по тексту — не лучший способ, но единственный: библиотека
-    // возвращает код Windows завёрнутым в строку.
+    // Библиотека отдаёт код Windows строкой.
     if text.contains("Access is denied") || text.contains("отказано в доступе") {
         return TunError::PermissionDenied;
     }
@@ -200,8 +185,6 @@ impl TunDevice for WintunDevice {
     }
 
     fn try_recv(&self) -> Option<BytesMut> {
-        // `try_lock`, а не ожидание: метод неблокирующий по договору, и
-        // занятая очередь означает ровно «сейчас нечего отдать».
         self.incoming.try_lock().ok()?.try_recv().ok()
     }
 
@@ -223,8 +206,7 @@ impl TunDevice for WintunDevice {
     }
 
     async fn close(&self) -> TunResult<()> {
-        // Останавливает и чтение: поток выйдет из `receive_blocking` с
-        // ошибкой и завершится сам.
+        // Читающий поток выйдет сам: `receive_blocking` вернёт ошибку.
         self.session
             .shutdown()
             .map_err(|err| TunError::adapter(&self.name, err))?;
@@ -239,15 +221,11 @@ mod tests {
 
     #[test]
     fn queue_is_bounded() {
-        // Неограниченная очередь между драйвером и клиентом превратила бы
-        // всплеск трафика в рост памяти.
         const { assert!(QUEUE_CAPACITY > 0 && QUEUE_CAPACITY <= 8192) };
     }
 
     #[test]
     fn access_denied_becomes_a_permission_error() {
-        // Пользователь должен прочитать «нужны права администратора», а не
-        // код ошибки Windows.
         let err = classify(
             "Penguin",
             wintun::Error::from("Access is denied. (os error 5)"),
@@ -264,15 +242,12 @@ mod tests {
 
     #[tokio::test]
     async fn opening_without_privileges_fails_clearly() {
-        // Тест идёт от обычного пользователя, поэтому адаптер не создастся.
-        // Проверяем не это, а то, что ошибка объясняет причину и не паникует.
         let config = TunConfig {
             name: "PenguinTest".to_owned(),
             ..TunConfig::default()
         };
         match WintunDevice::open(&config).await {
             Ok(device) => {
-                // Права всё-таки есть — тогда адаптер обязан быть рабочим.
                 assert_eq!(device.name(), "PenguinTest");
                 device.close().await.expect("закрывается");
             }

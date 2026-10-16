@@ -1,8 +1,5 @@
 //! Параметры: адрес сервера, метод шифрования, пароль.
 //!
-//! Полей мало, и это свойство самого протокола: договариваться в Shadowsocks
-//! не о чем — ни рукопожатия, ни версий, ни возможностей. Клиент и сервер
-//! обязаны заранее знать одно и то же, иначе не сойдутся вовсе.
 
 use penguin_core::address::Address;
 use penguin_core::base64;
@@ -21,24 +18,11 @@ pub struct ShadowsocksConfig {
     /// Адрес сервера: `example.com:8388`.
     pub server: String,
 
-    /// Метод шифрования. Обязателен: угадать его нельзя.
-    ///
-    /// Умолчания здесь нет намеренно. Метод — часть договора с сервером, и
-    /// подставленный молча даёт соединение, которое открывается и ничего не
-    /// передаёт: сервер просто не сможет прочитать первый кусок.
+    /// Метод шифрования; без умолчания: подставленный молча даёт молчащее соединение.
     pub method: ShadowsocksMethod,
 
-    /// Пароль — для методов AEAD; ключ (PSK) в base64 — для методов
-    /// `2022-blake3-*`.
-    ///
-    /// У 2022 это не пароль в обычном смысле: ровно [`Method2022::key_len`]
-    /// байт в base64, и длина проверяется в [`ShadowsocksConfig::validate`]
-    /// до подключения — сервер с другой длиной ключа не пришлёт даже отказа,
-    /// он просто не сможет прочитать первый кусок.
-    ///
-    /// В `Debug` не попадает: вывод пишется вручную ниже.
-    ///
-    /// [`Method2022::key_len`]: crate::method::Method2022::key_len
+    /// Пароль для AEAD или base64-ключ (PSK) для `2022-blake3-*`; длина PSK
+    /// проверяется в [`ShadowsocksConfig::validate`]. В `Debug` не попадает.
     pub password: String,
 
     /// Пускать ли UDP через сервер.
@@ -59,7 +43,6 @@ impl ShadowsocksConfig {
             .parse()
             .map_err(|e| ShadowsocksError::config(format!("адрес сервера `{raw}`: {e}")))?;
 
-        // Диапазон портов — это смена порта на ходу, и у Shadowsocks её нет.
         if endpoint.ports.is_hopping() {
             return Err(ShadowsocksError::config(
                 "Shadowsocks не умеет смену порта: укажите один порт",
@@ -81,9 +64,6 @@ impl ShadowsocksConfig {
                     ));
                 }
             }
-            // У 2022 поле `password` несёт не пароль, а ключ в base64, и он
-            // обязан быть ровно нужной длины — до подключения, а не после
-            // молчания сервера.
             ShadowsocksMethod::Aead2022(method) => {
                 base64::decode_exact(&self.password, method.key_len(), "ключ Shadowsocks 2022")
                     .map_err(|e| ShadowsocksError::config(e.to_string()))?;
@@ -93,8 +73,7 @@ impl ShadowsocksConfig {
     }
 }
 
-// Пароль не должен попасть в журнал ни целиком, ни частями: строка «первые
-// четыре символа» — это уже утечка, если паролей у пользователя два-три.
+// Пароль в журнал не попадает ни целиком, ни частями (AGENTS §5.2)
 impl std::fmt::Debug for ShadowsocksConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShadowsocksConfig")
@@ -138,8 +117,6 @@ mod tests {
 
     #[test]
     fn refuses_an_address_without_a_port() {
-        // 8388 — обычай, а не правило; молча подставить его значит
-        // подключаться не туда.
         let config = ShadowsocksConfig {
             server: "example.com".to_owned(),
             ..config()
@@ -158,8 +135,6 @@ mod tests {
 
     #[test]
     fn the_method_has_no_default() {
-        // Подставленный молча метод даёт соединение, которое открывается и
-        // ничего не передаёт: сервер не прочитает первый кусок.
         let params = json!({ "server": "example.com:8388", "password": "x" });
         assert!(serde_json::from_value::<ShadowsocksConfig>(params).is_err());
     }
@@ -219,9 +194,6 @@ mod tests {
 
     #[test]
     fn a_2022_key_of_the_wrong_length_names_the_expected_length() {
-        // Сервер с ключом не той длины не пришлёт даже отказа — он просто не
-        // сможет прочитать первый кусок, и это должно быть видно до
-        // подключения, а не после его молчания.
         let key = penguin_core::base64::encode(&[7u8; 10]);
         let config = ShadowsocksConfig {
             method: ShadowsocksMethod::Aead2022(Method2022::Blake3Aes128Gcm),

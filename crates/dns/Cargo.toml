@@ -13,17 +13,13 @@ workspace = true
 
 [dependencies]
 penguin-core.workspace = true
-# Схема настроек DNS живёт в общем файле конфигурации.
+penguin-proto.workspace = true
 penguin-config.workspace = true
 async-trait.workspace = true
-hickory-proto.workspace = true
 rustls = { workspace = true, features = ["ring", "std"] }
 rustls-platform-verifier.workspace = true
 tokio-rustls = { workspace = true, features = ["ring"] }
-rand.workspace = true
-# `io-util` — для DoT: длина сообщения и само оно читаются из потока TLS.
-# Собранный вместе со всем крейт получал эту возможность от соседей, а
-# отдельно (`cargo test -p penguin-dns`) не собирался вовсе.
+# `io-util` нужен DoT, а отдельно (`cargo test -p penguin-dns`) он не включался.
 tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util"] }
 parking_lot.workspace = true
 ipnet.workspace = true

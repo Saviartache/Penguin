@@ -1,12 +1,7 @@
-//! Как открыть поток до сервера: сокет, TLS, перенос, заголовок.
+//! Открытие потока до сервера: сокет, TLS, перенос, заголовок.
 //!
-//! Отдельно от [`crate::outbound`], потому что зовут это двое: сам выход и
-//! канал датаграмм. У VLESS адрес назначения назван в заголовке, то есть на
-//! каждого адресата нужен свой поток со своим заголовком, — и открывать их
-//! умеет канал, а не только направление.
-//!
-//! Держать ради этого ссылку на направление значило бы завести цикл; вместо
-//! него оба держат один [`Connector`].
+//! Адрес назван в заголовке, поэтому потоки открывает и [`crate::outbound`], и канал датаграмм;
+//! оба держат один [`Connector`].
 
 use std::sync::Arc;
 
@@ -30,25 +25,20 @@ use crate::vision::VisionStream;
 
 /// Всё, что нужно, чтобы открыть поток до сервера.
 pub struct Connector {
-    /// Хост сервера, разобранный один раз при сборке.
     host: Address,
-    /// Порт сервера.
     port: u16,
     uuid: Uuid,
-    /// Собранный слой TLS. `None` — `security` не `"tls"`.
+    /// `None` — `security` не `"tls"`.
     tls: Option<TlsClient>,
-    /// Настройки Reality. `None` — `security` не `"reality"`.
+    /// `None` — `security` не `"reality"`.
     reality: Option<RealityConfig>,
-    /// `flow` — `xtls-rprx-vision`. `config.validate()` уже отказала бы на
-    /// любой другой комбинации, так что здесь это просто «включать ли
-    /// Vision», без своего разбора значения.
+    /// Включён `flow = xtls-rprx-vision`.
     vision: bool,
     transport: Transport,
     /// Путь `xhttp` или `serviceName` у `grpc`.
     path: String,
     /// `:authority` для них же.
     http_host: String,
-    /// Клиент XHTTP — только у `transport = "xhttp"`.
     xhttp: Option<XhttpClient>,
     dialer: Arc<dyn Dialer>,
 }
@@ -81,10 +71,6 @@ impl Connector {
             ),
             Security::None => (None, None),
             Security::Reality => {
-                // `config.validate()` (позвана раньше, в `VlessOutbound::new`)
-                // уже отказала бы на отсутствующем блоке — здесь всё равно
-                // не `unwrap`, а явная ошибка: разбор конфигурации и подъём
-                // направления не обязаны быть одним и тем же вызовом.
                 let reality = config.reality.clone().ok_or_else(|| {
                     VlessError::config("`security = \"reality\"` без блока `reality`")
                 })?;
@@ -157,14 +143,6 @@ impl Connector {
         let secure: Box<dyn ProxyStream> = if let Some(tls) = &self.tls {
             Box::new(tls.connect(plain).await.map_err(VlessError::from)?)
         } else if let Some(reality) = &self.reality {
-            // Рукопожатие доводится до прикладных ключей TLS 1.3
-            // (`crate::reality::handshake::connect`) — байты VLESS дальше
-            // идут внутри уже зашифрованного канала, вторым слоем поверх
-            // TLS 1.3. `flow = "xtls-rprx-vision"` (`self.vision`,
-            // `config.validate()` уже проверила, что тогда `security` —
-            // именно `reality`, а `transport` — `tcp`) снимает этот второй
-            // слой, как только увидит подходящее условие (`crate::vision`);
-            // без него канал остаётся двойным, как и был.
             let stream = deadline::handshake::<_, VlessError>("рукопожатие Reality", async {
                 Ok(reality::connect(plain, reality).await?)
             })
@@ -185,22 +163,8 @@ impl Connector {
         )
     }
 
-    /// Проверяет, что сервер на месте и предъявляет ожидаемый сертификат
-    /// (`security = "tls"`/`"none"`) либо подтверждает себя как Reality
-    /// (`security = "reality"`).
-    ///
-    /// UUID здесь не проверяется, и проверить его нечем: сервер, не узнавший
-    /// его, закрывает соединение молча — как и Trojan. Заголовок при этом не
-    /// отправляется: соединение до чужого адреса, о котором никто не просил,
-    /// в журнале сервера выглядит чужим трафиком.
-    ///
-    /// У Reality эта проверка дешевле [`Self::open`]: она останавливается на
-    /// HMAC-подтверждении сертификата (`crate::reality::handshake::verify`)
-    /// и не доводит рукопожатие до прикладных ключей — соединение, на
-    /// котором она работает, потом просто закрывается, а не становится
-    /// каналом. Честная и самостоятельная (не только открытие сокета), но
-    /// дешевле полного [`crate::reality::connect`], которым пользуется
-    /// [`Self::open`].
+    /// Сервер на месте с ожидаемым сертификатом (TLS) или подтверждает себя как Reality
+    /// (до HMAC сертификата, дешевле [`Self::open`]). UUID не проверяется, заголовок не шлётся.
     pub async fn verify(&self) -> Result<(), ProtocolError> {
         if let Some(config) = &self.reality {
             let mut plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
@@ -211,7 +175,6 @@ impl Connector {
             .await?;
             return Ok(());
         }
-        // Без запроса: только QUIC и сертификат.
         if let Some(xhttp) = &self.xhttp {
             return Ok(xhttp.verify().await.map_err(VlessError::from)?);
         }

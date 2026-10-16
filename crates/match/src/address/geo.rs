@@ -1,13 +1,4 @@
-//! GeoIP и geosite. За фичей: база весит десятки мегабайт.
-//!
-//! Правило «весь российский трафик мимо тоннеля» иначе пришлось бы записывать
-//! тысячами префиксов, которые ещё и устаревают. База GeoIP отвечает на тот же
-//! вопрос одним запросом.
-//!
-//! Цена — десятки мегабайт на диске и в памяти, поэтому база не входит в
-//! поставку и подгружается отдельно. Пока файла нет, правила по странам просто
-//! не совпадают ни с чем: это лучше, чем отказ поднимать тоннель из-за
-//! ненайденного файла.
+//! GeoIP за фичей `geo`. Пока базы нет, правила по странам ни с чем не совпадают.
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -18,9 +9,7 @@ use maxminddb::{Reader, geoip2};
 use crate::matcher::Matcher;
 use crate::target::MatchTarget;
 
-/// База GeoIP.
-///
-/// В `Arc`, потому что её открывают один раз, а спрашивают из десятков задач.
+/// База GeoIP, общая для задач.
 #[derive(Clone)]
 pub struct GeoIpDatabase {
     reader: Arc<Reader<Vec<u8>>>,
@@ -33,10 +22,7 @@ impl std::fmt::Debug for GeoIpDatabase {
 }
 
 impl GeoIpDatabase {
-    /// Открывает базу.
-    ///
-    /// Файл читается целиком, а не отображается в память: отображённый файл
-    /// нельзя обновить, не остановив клиент, — Windows держит его занятым.
+    /// Открывает базу, читая файл целиком (отображённый на Windows не обновить).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let reader = Reader::open_readfile(path)
@@ -83,10 +69,10 @@ impl GeoIpSet {
 
 impl Matcher for GeoIpSet {
     fn matches(&self, target: &MatchTarget<'_>) -> bool {
-        // Запрос идёт по числовому адресу назначения. Домен здесь не помог бы:
-        // разрешать его ради определения страны означало бы поход в DNS на
-        // каждое соединение.
-        let Some(country) = self.database.country_of(target.destination.ip()) else {
+        let Some(country) = target
+            .destination_ip
+            .and_then(|ip| self.database.country_of(ip))
+        else {
             return false;
         };
         self.countries.iter().any(|wanted| *wanted == country)
@@ -103,16 +89,12 @@ mod tests {
 
     #[test]
     fn missing_database_is_reported_not_panicking() {
-        // Отсутствие базы не должно валить клиент: правила по странам просто
-        // не будут совпадать.
         let err = GeoIpDatabase::open("такого-файла-нет.mmdb").expect_err("файла нет");
         assert!(err.contains("такого-файла-нет.mmdb"));
     }
 
     #[test]
     fn country_codes_are_normalized() {
-        // Пользователь пишет `ru`, база отвечает `RU` — сравнение должно
-        // сойтись.
         let normalized: Vec<String> = [" ru ", "De"]
             .iter()
             .map(|c| c.trim().to_ascii_uppercase())

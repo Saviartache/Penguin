@@ -1,9 +1,4 @@
-//! Проверки, которые serde не выражает: непротиворечивость правил, диапазоны,
-//! ссылки на несуществующие профили.
-//!
-//! Проверка идёт и при чтении, и при записи. При чтении — чтобы клиент не
-//! поднялся с настройками, которые он всё равно не сможет применить; при
-//! записи — чтобы интерфейс не сохранил то, что сам же потом не прочитает.
+//! Проверки сверх serde: правила, диапазоны, ссылки на профили. Идут при чтении и записи.
 
 use std::collections::HashSet;
 
@@ -27,9 +22,6 @@ fn validate_profiles(config: &RootConfig) -> ConfigResult<()> {
         if profile.id.as_str().is_empty() {
             return Err(ConfigError::invalid("profiles.id", "пустой идентификатор"));
         }
-        // Имя прямого выхода занято движком: профиль превращается в
-        // направление один в один, и профиль с таким именем сделал бы
-        // невозможным правило «напрямую».
         if profile.id.as_str() == OutboundId::DIRECT {
             return Err(ConfigError::invalid(
                 "profiles.id",
@@ -49,13 +41,9 @@ fn validate_profiles(config: &RootConfig) -> ConfigResult<()> {
             ));
         }
         if let Some(path) = first_null(&profile.outbound.params, "") {
-            // Настройки лежат в TOML, а в нём пустого значения не существует
-            // вовсе. Без этой проверки профиль сохраняется, `toml` отвечает
-            // `unsupported unit type`, и человек читает эту фразу вместо
-            // «незаполненное поле уберите, а не оставляйте пустым».
             return Err(ConfigError::invalid(
                 format!("profiles.{}.outbound{path}", profile.id),
-                "пустое значение: в настройках его быть не может — поле либо                  заполняют, либо не пишут вовсе",
+                "пустое значение: в настройках его быть не может — поле либо заполняют, либо не пишут вовсе",
             ));
         }
     }
@@ -72,11 +60,7 @@ fn validate_profiles(config: &RootConfig) -> ConfigResult<()> {
     Ok(())
 }
 
-/// Путь до первого пустого значения в параметрах протокола.
-///
-/// Свободная функция с тестом: параметры протокола окно не разбирает, и
-/// пустое значение внутри них — единственное, что может сломать запись всех
-/// настроек целиком.
+/// Путь до первого `null` в параметрах протокола (TOML его не выражает).
 fn first_null(value: &serde_json::Value, path: &str) -> Option<String> {
     match value {
         serde_json::Value::Null => Some(path.to_owned()),
@@ -108,8 +92,6 @@ fn validate_rules(config: &RootConfig) -> ConfigResult<()> {
                 format!("повторяется идентификатор `{}`", rule.id),
             ));
         }
-        // Правило, ссылающееся на удалённый профиль, — самая обидная ошибка:
-        // оно молча перестаёт работать, и трафик уходит по умолчанию режима.
         if let RuleAction::Tunnel {
             profile: Some(profile),
         } = &rule.action
@@ -128,9 +110,6 @@ fn validate_rules(config: &RootConfig) -> ConfigResult<()> {
 fn validate_network(config: &RootConfig) -> ConfigResult<()> {
     let tun = &config.network.tun;
 
-    // Нижняя граница — обязательный минимум IPv6; верхняя — обычный кадр
-    // Ethernet. За этими пределами пакеты либо не пройдут по пути, либо
-    // будут дробиться на каждом узле.
     if !(1280..=1500).contains(&tun.mtu) {
         return Err(ConfigError::invalid(
             "network.tun.mtu",
@@ -156,8 +135,6 @@ fn validate_network(config: &RootConfig) -> ConfigResult<()> {
         ));
     }
 
-    // Прокси, слушающий не на петле и без пароля, открыт всей сети — включая
-    // ту, от которой пользователь и прячется.
     for (field, inbound) in [
         ("network.socks", &config.network.socks),
         ("network.http", &config.network.http),

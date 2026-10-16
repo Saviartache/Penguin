@@ -1,12 +1,5 @@
-//! Таблицы соединений из `/proc/net`.
-//!
-//! Ядро не отвечает на вопрос «чей этот порт» напрямую: в таблице лежит номер
-//! inode сокета, а по нему владелец ищется уже обходом `/proc/*/fd`
-//! ([`super::fd`]). Отсюда и устройство файла — здесь только первая половина.
-//!
-//! Адреса записаны шестнадцатеричным числом в порядке байт **машины**, а не
-//! сети: файл пишет то же ядро, что и читает наш процесс, поэтому разбор идёт
-//! через `to_ne_bytes` и остаётся верным на любой архитектуре.
+//! Таблицы соединений из `/proc/net` (адрес и inode; владельца ищет [`super::fd`]).
+//! Адреса записаны в порядке байт машины, поэтому разбор через `to_ne_bytes`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -21,10 +14,7 @@ pub(super) struct Entry {
     pub(super) inode: u64,
 }
 
-/// Снимок таблицы соединений.
-///
-/// Читаются обе таблицы, IPv4 и IPv6: сокет, открытый как двухсемейный,
-/// система показывает только во второй, а трафик по нему идёт и по IPv4.
+/// Снимок таблицы соединений: читаются IPv4 и IPv6 (двухсемейный сокет виден только в IPv6).
 pub(super) fn snapshot(network: Network) -> Vec<Entry> {
     let files: [&str; 2] = match network {
         Network::Tcp => ["/proc/net/tcp", "/proc/net/tcp6"],
@@ -33,7 +23,6 @@ pub(super) fn snapshot(network: Network) -> Vec<Entry> {
 
     let mut entries = Vec::new();
     for file in files {
-        // Файла может не быть вовсе: ядро без IPv6 не создаёт `tcp6`.
         if let Ok(text) = std::fs::read_to_string(file) {
             entries.extend(parse(&text));
         }
@@ -41,10 +30,7 @@ pub(super) fn snapshot(network: Network) -> Vec<Entry> {
     entries
 }
 
-/// Разбирает таблицу.
-///
-/// Первая строка — заголовок столбцов, и пропускается она по месту: имена
-/// столбцов ядро не переводит, но и опираться на них незачем.
+/// Разбирает таблицу, пропуская заголовок.
 fn parse(text: &str) -> Vec<Entry> {
     text.lines().skip(1).filter_map(parse_line).collect()
 }
@@ -78,17 +64,13 @@ fn parse_address(field: &str) -> Option<SocketAddr> {
             }
             IpAddr::V6(Ipv6Addr::from(octets))
         }
-        // Строка не той длины — не адрес, а мусор или чужой формат.
         _ => return None,
     };
 
     Some(SocketAddr::new(address, port))
 }
 
-/// Четыре байта адреса из восьми шестнадцатеричных цифр.
-///
-/// Ядро печатает их числом в порядке байт машины, поэтому обратно они
-/// раскладываются `to_ne_bytes`, а не `to_be_bytes`.
+/// Четыре байта адреса из восьми hex-цифр (порядок байт машины).
 fn word(hex: &str) -> Option<[u8; 4]> {
     Some(u32::from_str_radix(hex, 16).ok()?.to_ne_bytes())
 }
@@ -113,8 +95,6 @@ mod tests {
 
     #[test]
     fn a_port_is_hexadecimal() {
-        // `1F90` — это 8080, а не 1990: десятичный разбор увёл бы правило к
-        // чужому соединению.
         let address = parse_address("0100007F:1F90").expect("адрес");
         assert_eq!(address.port(), 8080);
     }
@@ -128,8 +108,6 @@ mod tests {
 
     #[test]
     fn an_ipv6_address_is_read_by_groups() {
-        // Каждая четвёрка байт записана отдельным числом; разбор всей строки
-        // одним числом дал бы адрес с переставленными половинами.
         let address = parse_address("00000000000000000000000001000000:0050").expect("адрес");
         assert_eq!(address.ip(), "::1".parse::<IpAddr>().expect("адрес"));
     }
@@ -142,7 +120,6 @@ mod tests {
 
     #[test]
     fn a_truncated_line_is_skipped() {
-        // Таблица читается на ходу и может оборваться на середине строки.
         assert!(parse_line("   0: 0100007F:0035 00000000:0000 0A").is_none());
         assert!(parse_line("").is_none());
     }

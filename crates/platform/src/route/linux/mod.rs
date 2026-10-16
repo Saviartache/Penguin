@@ -85,9 +85,7 @@ pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
         }
     }
 
-    // Адрес интерфейса ядро называет не всегда — например, у маршрута,
-    // поставленного вручную. Тогда его спрашивают у сокета: он выбирает тот
-    // же самый, потому что смотрит в ту же таблицу.
+    // Ядро называет адрес не всегда; сокет выбирает тот же, глядя в ту же таблицу.
     let address = source
         .or_else(|| crate::interface::source_address_towards(destination))
         .ok_or_else(|| {
@@ -97,7 +95,6 @@ pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
     Ok(DefaultRoute {
         interface_index,
         address,
-        // Маршрут «на интерфейс» шлюза не имеет: следующего узла за ним нет.
         gateway: gateway.unwrap_or(address),
         metric,
     })
@@ -105,15 +102,10 @@ pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
 
 /// Общая часть описания маршрута.
 fn header(route: &Route) -> RouteHeader {
-    /// Кто поставил маршрут: не ядро и не протокол маршрутизации, а мы.
     const RTPROT_STATIC: u8 = 4;
-    /// Обычный маршрут «куда-то», а не отбрасывание и не запрет.
     const RTN_UNICAST: u8 = 1;
-    /// Основная таблица.
     const RT_TABLE_MAIN: u8 = 254;
-    /// Дальше следующего узла.
     const RT_SCOPE_UNIVERSE: u8 = 0;
-    /// Не дальше провода.
     const RT_SCOPE_LINK: u8 = 253;
 
     RouteHeader {
@@ -123,9 +115,7 @@ fn header(route: &Route) -> RouteHeader {
         tos: 0,
         table: RT_TABLE_MAIN,
         protocol: RTPROT_STATIC,
-        // Маршрут «на интерфейс» дальше провода не ведёт, и сказать об этом
-        // ядру обязательно: с областью «дальше следующего узла» оно ждёт
-        // шлюза, которого у нас нет, и отвечает `EINVAL`.
+        // Без шлюза нужна область «link»: иначе ядро ждёт шлюз и отвечает `EINVAL`.
         scope: if route.gateway.is_some() {
             RT_SCOPE_UNIVERSE
         } else {
@@ -162,7 +152,7 @@ fn family(address: IpAddr) -> u8 {
     }
 }
 
-/// Адрес в том виде, в каком его ждёт netlink: только байты, без семейства.
+/// Адрес в виде netlink: только байты, семейство лежит в заголовке.
 fn address_bytes(address: IpAddr) -> Vec<u8> {
     match address {
         IpAddr::V4(v4) => v4.octets().to_vec(),
@@ -170,12 +160,11 @@ fn address_bytes(address: IpAddr) -> Vec<u8> {
     }
 }
 
-/// Адрес из свойства ответа.
+/// Адрес из свойства ответа; свойство не той длины — не адрес.
 fn to_address(value: &[u8]) -> Option<IpAddr> {
     match value.len() {
         4 => Some(IpAddr::from(<[u8; 4]>::try_from(value).ok()?)),
         16 => Some(IpAddr::from(<[u8; 16]>::try_from(value).ok()?)),
-        // Свойство не той длины — чужие данные, а не адрес.
         _ => None,
     }
 }
@@ -193,8 +182,6 @@ mod tests {
 
     #[test]
     fn a_route_without_a_gateway_stays_on_the_wire() {
-        // С областью «дальше следующего узла» ядро ждёт шлюза, которого за
-        // TUN нет, и отвечает `EINVAL`.
         let route = Route::via_interface("0.0.0.0/1".parse::<IpNet>().expect("подсеть"), 7);
         assert_eq!(header(&route).scope, 253);
 
@@ -214,7 +201,6 @@ mod tests {
 
     #[test]
     fn addresses_travel_without_their_family() {
-        // netlink кладёт семейство в заголовок, а в свойство — только байты.
         assert_eq!(
             address_bytes("203.0.113.5".parse().expect("адрес")),
             vec![203, 0, 113, 5]
@@ -224,8 +210,6 @@ mod tests {
 
     #[test]
     fn a_property_of_the_wrong_length_is_not_an_address() {
-        // Ответ ядра — чужие данные: принять пять байт за адрес значит
-        // поставить маршрут неизвестно куда.
         assert!(to_address(&[1, 2, 3]).is_none());
         assert!(to_address(&[]).is_none());
         assert_eq!(

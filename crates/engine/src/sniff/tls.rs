@@ -1,9 +1,6 @@
 //! SNI из TLS ClientHello.
 //!
-//! Разбирается ровно столько, сколько нужно, чтобы достать имя, — и ни байтом
-//! больше. Это не TLS-реализация: подпись не проверяется, состояние не
-//! ведётся, расшифровка не делается. Прочитали имя и отдали байты дальше
-//! нетронутыми.
+//! Разбирается только путь до имени; это не реализация TLS.
 //!
 //! ```text
 //! TLSPlaintext
@@ -34,10 +31,7 @@ const EXTENSION_SERVER_NAME: u16 = 0x0000;
 /// Тип имени: обычное доменное имя.
 const NAME_TYPE_HOST: u8 = 0x00;
 
-/// Достаёт имя сервера из первых байт соединения.
-///
-/// `None` — это не TLS, данных пока мало или расширения `server_name` нет.
-/// Вызывающий в таком случае просто идёт дальше без имени.
+/// Достаёт имя сервера; `None` — не TLS, мало данных или нет `server_name`.
 pub fn extract_sni(data: &[u8]) -> Option<&str> {
     let mut reader = Reader::new(data);
 
@@ -93,8 +87,6 @@ fn parse_server_name(body: &[u8]) -> Option<&str> {
         let name = list.take(len)?;
 
         if name_type == NAME_TYPE_HOST {
-            // Имя обязано быть текстом; двоичный мусор здесь — признак того,
-            // что мы разобрали не то.
             return std::str::from_utf8(name)
                 .ok()
                 .filter(|name| is_plausible_host(name));
@@ -103,10 +95,7 @@ fn parse_server_name(body: &[u8]) -> Option<&str> {
     None
 }
 
-/// Похоже ли это на доменное имя.
-///
-/// Проверка не про строгость RFC, а про то, чтобы случайно разобранный мусор
-/// не уехал в правила и в журнал как имя хоста.
+/// Похоже ли на доменное имя (отсекает случайно разобранный мусор).
 fn is_plausible_host(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 253
@@ -116,10 +105,7 @@ fn is_plausible_host(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
-/// Чтение из буфера с проверкой границ на каждом шаге.
-///
-/// Данные пришли из сети; любое чтение без проверки — это чтение за границей
-/// буфера по чужому числу.
+/// Чтение с проверкой границ: длины приходят из сети.
 struct Reader<'a> {
     data: &'a [u8],
     position: usize,
@@ -217,8 +203,6 @@ mod tests {
 
     #[test]
     fn truncated_input_yields_nothing() {
-        // Первые байты соединения приходят по частям; на неполном
-        // ClientHello разбор обязан вернуть `None`, а не выйти за границы.
         let hello = client_hello("example.com");
         for cut in 0..hello.len() {
             let _ = extract_sni(&hello[..cut]);
@@ -235,7 +219,6 @@ mod tests {
 
     #[test]
     fn garbage_lengths_do_not_panic() {
-        // Длины пришли с той стороны — доверять им нельзя.
         let mut hello = client_hello("example.com");
         for index in 0..hello.len().min(200) {
             let original = hello[index];
@@ -247,8 +230,6 @@ mod tests {
 
     #[test]
     fn implausible_names_are_rejected() {
-        // Разобрали не то — лучше не отдавать ничего, чем отдать мусор в
-        // правила и в журнал.
         assert!(!is_plausible_host(""));
         assert!(!is_plausible_host("без-точки"));
         assert!(!is_plausible_host("про бел.ы"));
@@ -259,7 +240,6 @@ mod tests {
     #[test]
     fn hello_without_sni_yields_nothing() {
         let mut hello = client_hello("example.com");
-        // Портим номер расширения: имя есть, но расширение уже не то.
         let position = hello.len() - 20;
         hello[position] = 0xAB;
         let _ = extract_sni(&hello);

@@ -1,10 +1,4 @@
-//! Соединение QUIC до сервера поверх сокета от `Dialer`.
-//!
-//! Общее для протоколов, которым QUIC нужен как есть — без своей
-//! обфускации и своего управления перегрузкой (у Hysteria 2 и TUIC они свои,
-//! и соединение они поднимают сами). Сокет берётся у [`Dialer::bind_udp`]:
-//! открытый напрямую, он отправил бы рукопожатие в собственный, ещё не
-//! поднятый тоннель.
+//! Соединение QUIC поверх сокета от [`Dialer::bind_udp`] (мимо собственного тоннеля).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -19,22 +13,20 @@ use crate::deadline;
 use crate::error::{TransportError, TransportResult};
 use crate::tls::{TlsConfig, client_config};
 
-/// Проба живости. Без неё простаивающий профиль теряет соединение по
-/// тишине (у quinn — через 30 секунд), а NAT провайдера забывает его раньше.
+/// Проба живости: NAT забывает простаивающее соединение раньше тайм-аута quinn.
 const KEEP_ALIVE: Duration = Duration::from_secs(10);
 
 /// Поднятое соединение QUIC.
 #[derive(Debug)]
 pub struct QuicLink {
-    /// Эндпойнт. Владеет задачей ввода-вывода: без него соединение мертво.
+    /// Эндпойнт; без него соединение мертво.
     pub endpoint: Endpoint,
     /// Соединение.
     pub connection: quinn::Connection,
 }
 
 impl QuicLink {
-    /// Закрывает соединение и ждёт, пока прощальный пакет уйдёт: иначе
-    /// сервер продержит сессию до тайм-аута.
+    /// Закрывает соединение и ждёт отправки прощального пакета.
     pub async fn close(&self, code: u64, reason: &[u8]) {
         let code = quinn::VarInt::from_u64(code).unwrap_or(quinn::VarInt::MAX);
         self.connection.close(code, reason);
@@ -68,8 +60,7 @@ pub async fn connect(
     })
 }
 
-/// Первый адрес сервера. Разрешается через `Dialer`: QUIC поднимается над
-/// голым UDP-сокетом, и адрес нужен раньше соединения.
+/// Первый адрес сервера через `Dialer`.
 async fn resolve(dialer: &dyn Dialer, host: &Address, port: u16) -> TransportResult<SocketAddr> {
     penguin_proto::connect::resolve(dialer, host, port)
         .await

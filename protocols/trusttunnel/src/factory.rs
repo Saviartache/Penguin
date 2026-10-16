@@ -33,8 +33,6 @@ impl ProtocolFactory for TrustTunnelFactory {
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
-        // Проверка без сети: интерфейс должен показать ошибку в поле сразу,
-        // а не через минуту неудачного подключения.
         self.parse(params)?.validate().map_err(Into::into)
     }
 
@@ -44,9 +42,6 @@ impl ProtocolFactory for TrustTunnelFactory {
         params: &serde_json::Value,
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = self.parse(params)?;
-        // Соединение поднимается сразу и держится открытым на весь профиль:
-        // у HTTP/2 есть мультиплексирование, и поднимать TLS заново на
-        // каждый поток значило бы платить за то, ради чего он выбран.
         let outbound = TrustTunnelOutbound::connect(ctx.id, config, ctx.dialer).await?;
         Ok(Arc::new(outbound))
     }
@@ -88,7 +83,6 @@ mod tests {
 
     #[test]
     fn the_protocol_name_is_stable() {
-        // Имя стоит в конфигурациях пользователей — менять его нельзя.
         assert_eq!(TrustTunnelFactory::new().protocol(), "trusttunnel");
     }
 }

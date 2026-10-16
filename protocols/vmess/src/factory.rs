@@ -45,10 +45,6 @@ impl ProtocolFactory for VmessFactory {
         let config = Self::parse(params)?;
         let outbound = VmessOutbound::new(ctx.id, config, ctx.dialer)?;
 
-        // Проверка доходит до сертификата (или до открытого TCP при
-        // `security = "none"`) и там останавливается: идентичность сервер не
-        // подтверждает и не отвергает без заголовка. Без неё «Подключено»
-        // загоралось бы и на сервере, которого нет.
         outbound.verify().await?;
         Ok(Arc::new(outbound))
     }

@@ -8,10 +8,7 @@
 //! +------+----------+----------+
 //! ```
 //!
-//! Придумана она для SOCKS5, но ею пользуются и те, кто к SOCKS5 отношения не
-//! имеет: Trojan повторяет её после пароля, Shadowsocks — в начале
-//! зашифрованного потока, Snell и Brook — в своих заголовках. Поэтому она
-//! лежит здесь, а не в крейте SOCKS5.
+//! Её же используют Trojan, Shadowsocks, Snell и Brook.
 
 use std::net::IpAddr;
 
@@ -27,9 +24,6 @@ pub const ATYP_DOMAIN: u8 = 0x03;
 pub const ATYP_IPV6: u8 = 0x04;
 
 /// Сколько байт займёт адрес в этой записи.
-///
-/// Нужен тем, кто пишет длину перед адресом или дополняет запрос до
-/// круглого размера, — считать её повторным разбором накладно.
 pub fn encoded_len(address: &SocketAddress) -> usize {
     match &address.host {
         Address::Ip(IpAddr::V4(_)) => 1 + 4 + 2,
@@ -40,8 +34,7 @@ pub fn encoded_len(address: &SocketAddress) -> usize {
 
 /// Дописывает адрес в буфер.
 ///
-/// `Err` — домен длиннее 255 байт или пустой: его длина пишется одним байтом,
-/// и такой адрес в запрос не поместится.
+/// `Err` — домен пустой или длиннее 255 байт.
 pub fn encode(address: &SocketAddress, out: &mut Vec<u8>) -> TransportResult<()> {
     match &address.host {
         Address::Ip(IpAddr::V4(ip)) => {
@@ -63,11 +56,7 @@ pub fn encode(address: &SocketAddress, out: &mut Vec<u8>) -> TransportResult<()>
 
 /// Читает адрес с начала среза.
 ///
-/// Возвращает адрес и число съеденных байт: за адресом в датаграмме идут
-/// данные, и звать длину заново пришлось бы тем же разбором.
-///
-/// `Ok(None)` — байт пока не хватает. Это не ошибка: заголовок мог прийти не
-/// целиком, и отличать «неполно» от «сломано» обязан тот, кто читает.
+/// Возвращает адрес и число съеденных байт; `Ok(None)` — данных пока не хватает.
 pub fn decode(bytes: &[u8]) -> TransportResult<Option<(SocketAddress, usize)>> {
     let Some((&atyp, rest)) = bytes.split_first() else {
         return Ok(None);
@@ -86,10 +75,7 @@ pub fn decode(bytes: &[u8]) -> TransportResult<Option<(SocketAddress, usize)>> {
     )))
 }
 
-/// Хост по типу и хвосту. Число съеденных байт — без байта типа.
-///
-/// Свободная функция, потому что тот же разбор нужен записи [`v2ray`], где
-/// типы пронумерованы иначе, а хосты те же.
+/// Хост по типу и хвосту; число съеденных байт — без байта типа. Общий с [`v2ray`].
 ///
 /// [`v2ray`]: super::v2ray
 pub(crate) fn read_host(atyp: u8, rest: &[u8]) -> TransportResult<Option<(Address, usize)>> {
@@ -159,8 +145,6 @@ mod tests {
 
     #[test]
     fn the_bytes_are_the_ones_the_rfc_names() {
-        // Запись проверяется по байтам, а не только круговым прогоном: свой
-        // разбор согласится сам с собой при любой ошибке в номерах типов.
         let mut out = Vec::new();
         encode(
             &SocketAddress::ip("203.0.113.5".parse().unwrap(), 443),
@@ -184,8 +168,6 @@ mod tests {
 
     #[test]
     fn a_half_read_header_is_not_an_error() {
-        // Заголовок мог прийти не целиком: «неполно» и «сломано» — разные
-        // ответы, и путать их значит рвать живое соединение.
         let mut out = Vec::new();
         encode(&SocketAddress::domain("example.com", 443), &mut out).unwrap();
 
@@ -199,8 +181,6 @@ mod tests {
 
     #[test]
     fn trailing_bytes_are_left_alone() {
-        // За адресом в датаграмме идут данные: съесть их значит потерять
-        // первый пакет каждой UDP-сессии.
         let mut out = Vec::new();
         encode(&SocketAddress::domain("example.com", 443), &mut out).unwrap();
         let header = out.len();
@@ -217,8 +197,6 @@ mod tests {
 
     #[test]
     fn a_domain_too_long_to_fit_is_refused() {
-        // Длина пишется одним байтом: то, что длиннее, молча обрезалось бы в
-        // другое имя.
         let long = "a".repeat(256);
         let mut out = Vec::new();
         assert!(encode(&SocketAddress::domain(&long, 443), &mut out).is_err());

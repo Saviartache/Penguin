@@ -45,9 +45,6 @@ impl ProtocolFactory for VlessFactory {
         let config = Self::parse(params)?;
         let outbound = VlessOutbound::new(ctx.id, config, ctx.dialer)?;
 
-        // Проверка доходит до сертификата и там останавливается: UUID сервер
-        // не подтверждает и не отвергает. Без неё «Подключено» загоралось бы
-        // и на сервере, которого нет.
         outbound.verify().await?;
         Ok(Arc::new(outbound))
     }
@@ -90,7 +87,6 @@ mod tests {
 
     #[test]
     fn rejects_something_that_is_not_a_uuid() {
-        // В это поле вставляют пароль — обычная ошибка.
         let params = json!({ "server": "example.com:443", "uuid": "пароль" });
         assert!(VlessFactory::new().validate(&params).is_err());
     }

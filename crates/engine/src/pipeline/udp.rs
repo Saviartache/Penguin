@@ -1,24 +1,14 @@
-//! UDP: то же для сессий без установления соединения.
+//! UDP: сессия на сокет приложения, умирает от тишины.
 //!
-//! Отличий от TCP три, и все существенные.
-//!
-//! **Нет закрытия.** Приложение не сообщает, что закончило: сокет просто
-//! перестаёт использоваться. Сессия живёт по таймеру и умирает от тишины.
-//!
-//! **Адрес назначения у каждой датаграммы свой.** Один сокет приложения шлёт
-//! куда угодно, поэтому маршрутизатор спрашивается при каждом новом адресе —
-//! с кэшем это дёшево.
-//!
-//! **Запросы к порту 53 не уходят наружу вовсе.** Их обслуживает перехват
-//! DNS, и ответ приходит из клиента. Без этого система пошла бы к своим
-//! серверам мимо тоннеля — и провайдер увидел бы все имена, которые
-//! спрашивает пользователь.
+//! Назначение у каждой датаграммы своё; запросы к порту 53 обслуживает
+//! перехват DNS и наружу не уходят.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use dashmap::DashMap;
+use parking_lot::RwLock;
 use penguin_core::address::{Address, SocketAddress};
 use penguin_core::network::Network;
 use penguin_dns::FakeIpMap;
@@ -35,21 +25,15 @@ use crate::pipeline::Pipeline;
 pub const DNS_PORT: u16 = 53;
 
 /// Сколько сессия живёт без единой датаграммы.
-///
-/// Тридцать секунд — компромисс, к которому пришли все: меньше рвёт долгие
-/// DNS-ожидания и игровые сессии, больше держит мёртвые сокеты и таблицу
-/// трансляции адресов у провайдера.
 pub const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Наибольшая датаграмма, которую имеет смысл принимать.
 pub const MAX_DATAGRAM: usize = 65_535;
 
-/// Ключ сессии: чей сокет.
-///
-/// Только источник, без назначения: один сокет приложения шлёт куда угодно, и
-/// заводить под каждый адрес отдельный канал наружу значило бы плодить их
-/// сотнями.
+/// Ключ сессии: сокет приложения (без назначения).
 type SessionKey = std::net::SocketAddr;
+
+type Sessions = Arc<RwLock<HashMap<SessionKey, Arc<dyn ProxyDatagram>>>>;
 
 /// Обслуживает UDP из тоннеля.
 pub async fn pump(
@@ -60,7 +44,7 @@ pub async fn pump(
     fake_ip: Option<Arc<FakeIpMap>>,
     cancel: CancellationToken,
 ) {
-    let sessions: Arc<DashMap<SessionKey, Arc<dyn ProxyDatagram>>> = Arc::new(DashMap::new());
+    let sessions = Sessions::default();
 
     loop {
         let datagram = tokio::select! {
@@ -71,7 +55,6 @@ pub async fn pump(
 
         let Some(datagram) = datagram else { break };
 
-        // Запрос к DNS обслуживается на месте и наружу не уходит.
         if datagram.destination.port() == DNS_PORT
             && let Some(hijacker) = &dns
         {
@@ -79,19 +62,19 @@ pub async fn pump(
             continue;
         }
 
-        let session = match session_for(&sessions, &datagram, &pipeline, &outgoing, &cancel).await {
-            Some(session) => session,
-            None => continue,
+        let Some(session) = session_for(&sessions, &datagram, &pipeline, &outgoing, &cancel).await
+        else {
+            continue;
         };
 
         let target = resolve_target(datagram.destination, fake_ip.as_ref());
         if let Err(err) = session.send_to(datagram.payload, &target).await {
             tracing::debug!(%target, %err, "датаграмма не отправлена");
-            sessions.remove(&datagram.source);
+            sessions.write().remove(&datagram.source);
         }
     }
 
-    sessions.clear();
+    sessions.write().clear();
 }
 
 /// Отвечает на запрос DNS, не выпуская его наружу.
@@ -104,33 +87,27 @@ fn spawn_dns_answer(
         match hijacker.handle(&datagram.payload).await {
             Ok(response) => {
                 let answer = Datagram {
-                    // Ответ идёт «наоборот»: отправителем становится тот, кого
-                    // спрашивали.
                     source: datagram.source,
                     destination: datagram.destination,
                     payload: Bytes::from(response),
                 };
                 let _ = outgoing.send(answer).await;
             }
-            Err(err) => {
-                // Молча: приложение перепошлёт запрос само, а журнал из
-                // неудачных разрешений читать невозможно.
-                tracing::debug!(%err, "запрос DNS не обслужен");
-            }
+            Err(err) => tracing::debug!(%err, "запрос DNS не обслужен"),
         }
     });
 }
 
 /// Находит или открывает канал наружу для этого сокета приложения.
 async fn session_for(
-    sessions: &Arc<DashMap<SessionKey, Arc<dyn ProxyDatagram>>>,
+    sessions: &Sessions,
     datagram: &Datagram,
     pipeline: &Arc<Pipeline>,
     outgoing: &mpsc::Sender<Datagram>,
     cancel: &CancellationToken,
 ) -> Option<Arc<dyn ProxyDatagram>> {
-    if let Some(existing) = sessions.get(&datagram.source) {
-        return Some(Arc::clone(&existing));
+    if let Some(existing) = sessions.read().get(&datagram.source) {
+        return Some(Arc::clone(existing));
     }
 
     let request = InboundRequest {
@@ -147,7 +124,9 @@ async fn session_for(
         }
     };
 
-    sessions.insert(datagram.source, Arc::clone(&channel));
+    sessions
+        .write()
+        .insert(datagram.source, Arc::clone(&channel));
     spawn_reader(
         Arc::clone(&channel),
         datagram.source,
@@ -163,7 +142,7 @@ fn spawn_reader(
     channel: Arc<dyn ProxyDatagram>,
     app: SessionKey,
     outgoing: mpsc::Sender<Datagram>,
-    sessions: Arc<DashMap<SessionKey, Arc<dyn ProxyDatagram>>>,
+    sessions: Sessions,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -171,8 +150,6 @@ fn spawn_reader(
             let received = tokio::select! {
                 biased;
                 () = cancel.cancelled() => break,
-                // Тишина дольше срока означает, что приложение забыло про
-                // свой сокет: закрытия у UDP нет, и узнать иначе неоткуда.
                 received = tokio::time::timeout(SESSION_TIMEOUT, channel.recv_from()) => received,
             };
 
@@ -180,9 +157,8 @@ fn spawn_reader(
                 break;
             };
 
+            // Ответ с именем вместо адреса в IP-пакет не собрать.
             let Some(source) = from.as_socket_addr() else {
-                // Сервер ответил с именем вместо адреса — собрать из этого
-                // IP-пакет для приложения нечем.
                 continue;
             };
 
@@ -196,7 +172,7 @@ fn spawn_reader(
             }
         }
 
-        sessions.remove(&app);
+        sessions.write().remove(&app);
         let _ = channel.close().await;
     });
 }
@@ -220,8 +196,6 @@ mod tests {
 
     #[test]
     fn timeout_is_reasonable() {
-        // Слишком короткий рвёт игровые сессии, слишком длинный копит мёртвые
-        // сокеты.
         assert!(SESSION_TIMEOUT >= Duration::from_secs(15));
         assert!(SESSION_TIMEOUT <= Duration::from_secs(120));
     }
@@ -233,8 +207,6 @@ mod tests {
 
     #[test]
     fn fake_address_becomes_a_name() {
-        // Ради этого fake-IP и существует: правило по домену должно
-        // сработать и на UDP.
         let map = Arc::new(FakeIpMap::new("198.18.0.0/15").expect("подсеть"));
         let address = map.address_for("dns.example").expect("адрес выдан");
 
@@ -261,8 +233,6 @@ mod tests {
 
     #[test]
     fn session_key_is_the_application_socket() {
-        // Один сокет приложения шлёт куда угодно; заводить канал на каждый
-        // адрес значило бы плодить их сотнями.
         let first: SessionKey = "10.0.0.2:50000".parse().expect("адрес");
         let second: SessionKey = "10.0.0.2:50001".parse().expect("адрес");
         assert_ne!(first, second);

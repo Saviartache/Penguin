@@ -7,23 +7,10 @@ use crate::forms::link::Link;
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 
 /// Порт, если в ссылке его не указали.
-///
-/// 8388 — обычай, а не правило, но именно он стоит в примерах на сервере.
 const DEFAULT_PORT: u16 = 8388;
 
-/// Методы шифрования в порядке показа.
-///
-/// Первый становится умолчанием нового профиля. `aes-256-gcm` сверху не
-/// потому, что он лучший, а потому что его настраивают чаще всего: на нём
-/// стоит большинство серверов.
-///
-/// Потоковых шифров прежних версий (`aes-256-cfb`, `rc4-md5`) в списке нет, и
-/// крейт протокола их тоже не принимает: они не заверяют данные, то есть
-/// правку по дороге не заметит ни клиент, ни сервер.
-///
-/// Три метода `2022-blake3-*` — снизу: у них поле «пароль» несёт не пароль, а
-/// закодированный в base64 ключ (PSK), и это стоит увидеть по имени метода, а
-/// не только в подсказке поля.
+/// Методы по порядку показа; первый — умолчание. Потоковых шифров нет: они не
+/// заверяют данные. У `2022-blake3-*` поле «пароль» несёт base64-ключ (PSK).
 const METHODS: &[&str] = &[
     "aes-256-gcm",
     "aes-128-gcm",
@@ -33,12 +20,9 @@ const METHODS: &[&str] = &[
     "2022-blake3-chacha20-poly1305",
 ];
 
-/// Длина ключа (PSK) в байтах для метода 2022. `None` — метод не из 2022, у
-/// него в этом поле обычный пароль, а не ключ фиксированной длины.
+/// Длина PSK метода 2022; `None` — обычный пароль.
 ///
-/// Список продублирован с `penguin_shadowsocks::method::Method2022`, а не
-/// взят оттуда: `gui` не имеет права зависеть от `protocols/*` (`AGENTS.md`
-/// §1), и три строки дешевле, чем зависимость ради них.
+/// Дубль `penguin_shadowsocks::method::Method2022`: `gui` не зависит от `protocols/*`.
 fn method2022_key_len(method: &str) -> Option<usize> {
     match method {
         "2022-blake3-aes-128-gcm" => Some(16),
@@ -47,15 +31,12 @@ fn method2022_key_len(method: &str) -> Option<usize> {
     }
 }
 
-/// Поля формы в том порядке, в каком они показываются.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
         .required(|s| s.need_server)
         .check(check::server_address),
-    // Список, а не строка: метод — часть договора с сервером, и опечатка в
-    // нём означает не «сервер отказал», а соединение, которое открывается и
-    // ничего не передаёт.
+    // Список: опечатка в методе даёт соединение, которое ничего не передаёт.
     FieldSpec::choice("method", &["method"], |s| s.method, METHODS).required(|s| s.need_method),
     FieldSpec::secret("password", &["password"], |s| s.password).required(|s| s.need_password),
     FieldSpec::flag("udp", &["udp"], |s| s.proxy_udp).on(),
@@ -71,33 +52,18 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     note: None,
 };
 
-/// Как ссылка ложится в поля.
-///
-/// Записей у `ss://` две, и обе встречаются:
+/// Как ссылка ложится в поля. Записей две, обе в ходу:
 ///
 /// ```text
-///  ss://base64(метод:пароль)@хост:порт#имя     сегодняшняя (SIP002)
-///  ss://base64(метод:пароль@хост:порт)#имя     прежняя, целиком в base64
+///  ss://base64(метод:пароль)@хост:порт#имя     SIP002
+///  ss://base64(метод:пароль@хост:порт)#имя     прежняя
 /// ```
 ///
-/// Отличаются они наличием `@` **снаружи** base64. Разобрать надо обе: ссылки
-/// рассылают до сих пор в обеих, и отвергнутая ссылка выглядит как поломка
-/// клиента, а не как устаревший формат.
-///
-/// # 2022 несёт ключ, а не пароль
-///
-/// У методов `2022-blake3-*` поле после двоеточия — не пароль, а
-/// закодированный в base64 предварительный общий ключ (PSK) ровно нужной
-/// длины: 16 байт для AES-128-GCM, 32 — для остальных двух. Разбор строки на
-/// «метод» и «пароль» тем же `split_once(':')` работает и здесь без изменений
-/// — base64 двоеточий не содержит, — но длину ключа стоит проверить сразу:
-/// сервер с ключом не той длины не пришлёт даже отказа, он просто не сможет
-/// прочитать первый кусок, и ссылка, принятая молча, выглядела бы рабочей до
-/// первой попытки подключиться.
+/// У методов 2022 длина ключа проверяется сразу: сервер с ключом не той длины
+/// молчит, и принятая ссылка выглядела бы рабочей до первого подключения.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let userinfo = link.userinfo();
     let (credentials, server) = if userinfo.is_empty() {
-        // Прежняя запись: в base64 лежит всё вместе с адресом.
         let decoded = decode(&link.host)?;
         let (credentials, server) = decoded
             .rsplit_once('@')
@@ -125,17 +91,12 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     ])
 }
 
-/// Разбирает base64 или отдаёт понятную ошибку.
 fn decode(raw: &str) -> Result<String, String> {
     let bytes = base64::decode(raw).map_err(|_| crate::i18n::s().link_not_a_link.to_owned())?;
     String::from_utf8(bytes).map_err(|_| crate::i18n::s().link_not_a_link.to_owned())
 }
 
-/// Разбирает base64, а если это не он — оставляет как есть.
-///
-/// В сегодняшней записи userinfo обязан быть base64, но пишут туда и открытым
-/// текстом: `ss://aes-256-gcm:пароль@хост:порт`. Отвергать такую ссылку
-/// незачем — разобрать её можно однозначно.
+/// Base64, а если это не он — как есть: userinfo иногда пишут открытым текстом.
 fn decode_or_keep(userinfo: &str) -> String {
     match decode(userinfo) {
         Ok(decoded) if decoded.contains(':') => decoded,
@@ -143,26 +104,16 @@ fn decode_or_keep(userinfo: &str) -> String {
     }
 }
 
-/// Дописывает порт по умолчанию, если в адресе его нет.
-///
-/// Тонкость здесь одна и вся про IPv6. Порт от адреса отделяется двоеточием, а
-/// в IPv6 двоеточий и так полно — ровно поэтому его берут в скобки. Значит:
-///
-/// - `[2001:db8::1]:9000` — скобки и порт, всё ясно;
-/// - `[2001:db8::1]` — скобки без порта, порт дописывается;
-/// - `2001:db8::1` — **порта здесь нет и быть не может**, и адрес надо ещё и
-///   взять в скобки, иначе он не разберётся ни у нас, ни у сервера;
-/// - `example.com:9000` и `example.com` — обычный случай.
+/// Дописывает порт по умолчанию. Голый IPv6 (`2001:db8::1`) порта не несёт и
+/// берётся в скобки, иначе он не разберётся.
 fn with_port(server: &str) -> String {
     if let Some(rest) = server.strip_prefix('[') {
-        // В скобках: порт — то, что после закрывающей.
         return match rest.split_once(']') {
             Some((_, tail)) if tail.starts_with(':') && tail.len() > 1 => server.to_owned(),
             _ => format!("{server}:{DEFAULT_PORT}"),
         };
     }
 
-    // Два двоеточия и больше без скобок — это голый IPv6: порта в нём нет.
     if server.matches(':').count() > 1 {
         return format!("[{server}]:{DEFAULT_PORT}");
     }
@@ -181,20 +132,12 @@ fn with_port(server: &str) -> String {
 mod tests {
     use super::*;
     use crate::forms::link;
+    use crate::forms::protocol::testing::{self, Values, value};
 
-    fn parse(raw: &str) -> Vec<(&'static str, String)> {
-        let link = link::split(raw).expect("ссылка разбирается");
-        from_link(&link).expect("поля заполняются")
+    fn parse(raw: &str) -> Values {
+        testing::parse(from_link, raw)
     }
 
-    fn value<'a>(values: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
-        values
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, value)| value.as_str())
-    }
-
-    /// Собирает ссылку сегодняшней записи.
     fn sip002(credentials: &str, server: &str) -> String {
         format!(
             "ss://{}@{server}",
@@ -202,7 +145,6 @@ mod tests {
         )
     }
 
-    /// Собирает ссылку прежней записи.
     fn legacy(all: &str) -> String {
         format!("ss://{}", base64::encode_url(all.as_bytes()))
     }
@@ -217,8 +159,6 @@ mod tests {
 
     #[test]
     fn the_older_form_is_read_too() {
-        // Их рассылают до сих пор; отвергнутая ссылка выглядит поломкой
-        // клиента, а не устаревшим форматом.
         let values = parse(&legacy("chacha20-ietf-poly1305:secret@example.com:9000"));
         assert_eq!(value(&values, "server"), Some("example.com:9000"));
         assert_eq!(value(&values, "method"), Some("chacha20-ietf-poly1305"));
@@ -227,8 +167,6 @@ mod tests {
 
     #[test]
     fn plain_credentials_are_accepted() {
-        // Записывать userinfo открытым текстом не по правилам, но так пишут,
-        // и разобрать это можно однозначно.
         let values = parse("ss://aes-128-gcm:secret@example.com:8388");
         assert_eq!(value(&values, "method"), Some("aes-128-gcm"));
         assert_eq!(value(&values, "password"), Some("secret"));
@@ -236,7 +174,6 @@ mod tests {
 
     #[test]
     fn a_colon_in_the_password_stays_in_the_password() {
-        // Метод отделяется первым двоеточием: остальные принадлежат паролю.
         let values = parse(&sip002("aes-256-gcm:раз:два", "example.com:8388"));
         assert_eq!(value(&values, "password"), Some("раз:два"));
     }
@@ -249,7 +186,7 @@ mod tests {
 
     #[test]
     fn an_at_sign_in_the_password_does_not_confuse_the_older_form() {
-        // Адрес отделяется **последним** `@`: всё до него — пароль.
+        // Адрес отделяется последним `@`.
         let values = parse(&legacy("aes-256-gcm:па@роль@example.com:8388"));
         assert_eq!(value(&values, "password"), Some("па@роль"));
         assert_eq!(value(&values, "server"), Some("example.com:8388"));
@@ -288,8 +225,6 @@ mod tests {
 
     #[test]
     fn a_2022_link_with_a_key_of_the_wrong_length_is_not_silently_accepted() {
-        // Сервер с ключом не той длины не пришлёт даже отказа: ссылка,
-        // принятая молча, выглядела бы рабочей до первой попытки подключиться.
         let short_key = base64::encode(&[7u8; 10]);
         let link = link::split(&sip002(
             &format!("2022-blake3-aes-128-gcm:{short_key}"),
@@ -311,8 +246,6 @@ mod tests {
 
     #[test]
     fn a_plain_aead_password_is_not_held_to_the_2022_key_length() {
-        // Обычный пароль — произвольная строка; проверка длины ключа его не
-        // касается вовсе.
         let values = parse(&sip002("aes-256-gcm:любой пароль", "example.com:8388"));
         assert_eq!(value(&values, "password"), Some("любой пароль"));
     }
@@ -333,8 +266,6 @@ mod tests {
 
     #[test]
     fn a_bare_ipv6_gets_its_brackets_back() {
-        // Порта в нём нет и быть не может: двоеточие занято самим адресом.
-        // Без скобок такой адрес не разберётся ни у нас, ни на сервере.
         assert_eq!(with_port("2001:db8::1"), "[2001:db8::1]:8388");
         check::server_address(&with_port("2001:db8::1")).expect("разбирается");
     }

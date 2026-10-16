@@ -4,10 +4,7 @@
 //!  Context ID (i) = 0 ‖ адрес SOCKS5 ‖ данные
 //! ```
 //!
-//! Context ID — как в RFC 9298; адрес — куда от клиента и откуда от сервера.
-//! Номер потока перед этим (Quarter Stream ID) — дело HTTP/3:
-//! [`datagram`] собирает и разбирает его для сервера, у клиента это делает
-//! соединение HTTP/3.
+//! Context ID — как в RFC 9298; Quarter Stream ID — дело HTTP/3 ([`datagram`] для сервера).
 
 use bytes::Bytes;
 use penguin_core::address::SocketAddress;
@@ -30,14 +27,20 @@ const CONTEXT: u8 = 0;
 /// Собирает содержимое датаграммы.
 pub fn encode(target: &SocketAddress, data: &[u8]) -> PingwinResult<Vec<u8>> {
     let mut out = Vec::with_capacity(1 + socks::encoded_len(target) + data.len());
-    out.push(CONTEXT);
-    socks::encode(target, &mut out)?;
-    out.extend_from_slice(data);
+    encode_into(target, data, &mut out)?;
     Ok(out)
 }
 
-/// Разбирает содержимое. `None` — чужой контекст или нет адреса: такая
-/// датаграмма отбрасывается.
+/// Как [`encode`], но в переиспользуемый буфер (очищается).
+pub fn encode_into(target: &SocketAddress, data: &[u8], out: &mut Vec<u8>) -> PingwinResult<()> {
+    out.clear();
+    out.push(CONTEXT);
+    socks::encode(target, out)?;
+    out.extend_from_slice(data);
+    Ok(())
+}
+
+/// Разбирает содержимое; `None` — чужой контекст или нет адреса.
 pub fn decode(mut payload: Bytes) -> Option<(SocketAddress, Bytes)> {
     let (context, used) = varint::try_decode(&payload)?;
     if context != u64::from(CONTEXT) {

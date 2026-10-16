@@ -1,27 +1,15 @@
 //! Прямой выход в обход тоннеля: сокет, привязанный к физическому интерфейсу.
 //!
-//! Два потребителя, и оба важны.
-//!
-//! **Правило `direct`.** Приложение, которому пользователь велел ходить мимо
-//! тоннеля, получает соединение отсюда.
-//!
-//! **Сам протокол.** Клиент Hysteria 2 открывает сокет к своему серверу через
-//! этот же выход — иначе его пакеты попали бы в тоннель, который он и должен
-//! поднять, и подключение не состоялось бы никогда. Это и есть реализация
-//! [`penguin_proto::dialer::Dialer`].
-//!
-//! Привязка к интерфейсу нужна не всегда. Пока TUN не поднят — в режиме
-//! прокси и до подключения — обычный сокет и так уходит наружу правильно.
-//! Как только TUN становится маршрутом по умолчанию, сокет надо привязывать
-//! к адресу физического интерфейса, иначе он уедет в тоннель.
+//! Нужен правилу `direct` и самим протоколам ([`penguin_proto::dialer::Dialer`]):
+//! пока TUN — маршрут по умолчанию, их сокеты иначе уехали бы в тоннель.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use penguin_core::address::SocketAddress;
+use bytes::{Bytes, BytesMut};
+use penguin_core::address::{Address, SocketAddress};
 use penguin_core::id::OutboundId;
 use penguin_dns::resolver::Resolver;
 use penguin_proto::capabilities::Capabilities;
@@ -32,16 +20,13 @@ use penguin_proto::outbound::Outbound;
 use penguin_proto::stream::ProxyStream;
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
-/// Как система называет открытый сокет.
-///
-/// На unix это дескриптор, на Windows — своё число, и общего типа у них нет.
-/// Привязка нужна обоим, а разводить её по `cfg` в каждом месте, где сокет
-/// открывается, — значит написать её дважды.
+/// Наибольшая датаграмма UDP: меньший буфер портил бы данные молча.
+const MAX_DATAGRAM: usize = 65_535;
+
+/// Системное число сокета (дескриптор на unix, `SOCKET` на Windows).
 trait SocketHandle {
-    /// Число, которым сокет известен системе.
     #[cfg(unix)]
     fn handle(&self) -> std::os::fd::RawFd;
-    /// Число, которым сокет известен системе.
     #[cfg(windows)]
     fn handle(&self) -> std::os::windows::io::RawSocket;
 }
@@ -62,25 +47,13 @@ impl<T: std::os::windows::io::AsRawSocket> SocketHandle for T {
 
 /// Выход наружу мимо тоннеля.
 pub struct SystemDialer {
-    /// Адрес физического интерфейса, к которому привязываются сокеты.
-    ///
-    /// `None` — привязка не нужна: TUN не поднят, и маршрут по умолчанию
-    /// ведёт наружу сам.
+    /// Адрес физического интерфейса; `None` — привязка не нужна.
     bind_to: Option<IpAddr>,
-
-    /// Номер физического интерфейса. Ноль — тоннеля нет, защищать не от чего.
-    ///
-    /// Адреса мало: он выбирает обратный адрес в пакете, а куда пакет поедет,
-    /// решает таблица маршрутизации — и после подъёма тоннеля она отправляет
-    /// в TUN всё подряд, включая сокет до самого сервера. Привязка к
-    /// интерфейсу таблицу обходит (см. [`penguin_platform::bind`]).
-    ///
-    /// Число, а не поле в конструкторе: тоннель поднимается и опускается, а
-    /// набиратель живёт всё это время один и тот же — он лежит в пуле
-    /// направлений, и подменить его там некому.
+    /// Номер физического интерфейса; ноль — тоннеля нет. Адреса мало: маршрут
+    /// выбирает таблица, привязка к интерфейсу её обходит
+    /// ([`penguin_platform::bind`]).
     interface: AtomicU32,
-
-    /// Разрешатель имён, работающий мимо тоннеля.
+    /// Разрешатель имён мимо тоннеля.
     resolver: Arc<dyn Resolver>,
 }
 
@@ -109,20 +82,12 @@ impl SystemDialer {
         self
     }
 
-    /// Защищает исходящие сокеты этим интерфейсом — на время жизни тоннеля.
-    ///
-    /// Ноль снимает защиту: тоннеля больше нет, и обычный сокет снова уходит
-    /// наружу сам.
+    /// Защищает сокеты интерфейсом на время тоннеля; ноль снимает защиту.
     pub fn protect_with(&self, interface: u32) {
         self.interface.store(interface, Ordering::Relaxed);
     }
 
-    /// Привязывает сокет к физическому интерфейсу, если тоннель поднят.
-    ///
-    /// Отказ не прерывает набор. Привязка — защита от собственного тоннеля, и
-    /// без неё соединение либо пройдёт (тоннеля ещё нет), либо не пройдёт и
-    /// так; оборвать здесь попытку значило бы отказать и в тех случаях, где
-    /// хватило бы маршрута до сервера.
+    /// Привязывает сокет к физическому интерфейсу; отказ набор не прерывает.
     fn protect(&self, socket: &impl SocketHandle, ipv6: bool) {
         let interface = self.interface.load(Ordering::Relaxed);
         if interface == 0 {
@@ -133,17 +98,10 @@ impl SystemDialer {
         }
     }
 
-    /// Локальный адрес для привязки под семейство удалённого.
-    ///
-    /// Привязать сокет IPv4 к адресу IPv6 нельзя, и наоборот: если семейства
-    /// не совпадают, привязка просто пропускается.
+    /// Локальный адрес для привязки; другое семейство — без привязки.
     fn local_for(&self, remote: SocketAddr) -> Option<SocketAddr> {
         let bind = self.bind_to?;
-        if bind.is_ipv4() == remote.is_ipv4() {
-            Some(SocketAddr::new(bind, 0))
-        } else {
-            None
-        }
+        (bind.is_ipv4() == remote.is_ipv4()).then(|| SocketAddr::new(bind, 0))
     }
 }
 
@@ -158,21 +116,15 @@ impl Dialer for SystemDialer {
         if let Some(local) = self.local_for(addr) {
             socket.bind(local)?;
         }
-        // До `connect`: маршрут для сокета система выбирает в нём, и параметр,
-        // выставленный после, опоздал бы ровно на то соединение, ради которого
-        // он и нужен.
+        // До `connect`: маршрут выбирается в нём.
         self.protect(&socket, addr.is_ipv6());
 
         let stream = socket.connect(addr).await?;
-        // Прокси гоняет мелкие записи — заголовки, подтверждения. Задержка
-        // Нейгла копит их и добавляет к каждому запросу лишние миллисекунды.
         let _ = stream.set_nodelay(true);
         Ok(stream)
     }
 
     async fn bind_udp(&self, local: SocketAddr) -> Result<UdpSocket, ProtocolError> {
-        // Привязка к физическому интерфейсу важнее запрошенного адреса:
-        // вызывающий указывает семейство, а не конкретный интерфейс.
         let local = self.local_for(local).unwrap_or(local);
         let socket = UdpSocket::bind(local).await?;
         self.protect(&socket, local.is_ipv6());
@@ -194,12 +146,24 @@ impl Dialer for SystemDialer {
     }
 }
 
-/// Прямой выход как исходящее направление.
-///
-/// Оформлен таким же `Outbound`, как любой протокол, и лежит в том же пуле.
-/// Благодаря этому у движка нет отдельной ветки «а если напрямую»: решение
-/// маршрутизатора всегда превращается в поиск направления по имени, а
-/// `direct` — просто одно из имён.
+/// Числовой адрес назначения; имя разрешается набирателем.
+async fn socket_addr(
+    dialer: &dyn Dialer,
+    target: &SocketAddress,
+) -> Result<SocketAddr, ProtocolError> {
+    match &target.host {
+        Address::Ip(ip) => Ok(SocketAddr::new(*ip, target.port)),
+        Address::Domain(domain) => dialer
+            .resolve(domain)
+            .await?
+            .into_iter()
+            .next()
+            .map(|ip| SocketAddr::new(ip, target.port))
+            .ok_or_else(|| ProtocolError::Unreachable(domain.clone())),
+    }
+}
+
+/// Прямой выход как обычное направление пула: ветки «напрямую» в движке нет.
 pub struct DirectOutbound {
     dialer: Arc<dyn Dialer>,
 }
@@ -214,21 +178,6 @@ impl DirectOutbound {
     /// Создаёт прямой выход поверх этого набирателя.
     pub fn new(dialer: Arc<dyn Dialer>) -> Self {
         Self { dialer }
-    }
-
-    /// Превращает адрес назначения в числовой, разрешая имя при необходимости.
-    async fn resolve(&self, target: &SocketAddress) -> Result<SocketAddr, ProtocolError> {
-        match &target.host {
-            penguin_core::address::Address::Ip(ip) => Ok(SocketAddr::new(*ip, target.port)),
-            penguin_core::address::Address::Domain(domain) => {
-                let addresses = self.dialer.resolve(domain).await?;
-                addresses
-                    .into_iter()
-                    .next()
-                    .map(|ip| SocketAddr::new(ip, target.port))
-                    .ok_or_else(|| ProtocolError::Unreachable(domain.clone()))
-            }
-        }
     }
 }
 
@@ -247,8 +196,6 @@ impl Outbound for DirectOutbound {
             udp: true,
             multiplex: false,
             port_hopping: false,
-            // Имя разрешается здесь, локально, а не «на той стороне»: та
-            // сторона — это и есть сам целевой сервер.
             remote_dns: false,
         }
     }
@@ -257,14 +204,12 @@ impl Outbound for DirectOutbound {
         &self,
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
-        let addr = self.resolve(target).await?;
+        let addr = socket_addr(&*self.dialer, target).await?;
         Ok(Box::new(self.dialer.dial_tcp(addr).await?))
     }
 
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
-        // IPv6-сокет с двойным стеком принял бы и IPv4, но включать его
-        // приходится вручную и не везде одинаково. Проще и надёжнее взять
-        // IPv4: подавляющее большинство UDP-трафика приложений — он.
+        // Только IPv4: двойной стек включается не везде одинаково.
         let local = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
         let socket = self.dialer.bind_udp(local).await?;
         Ok(Box::new(DirectDatagram {
@@ -283,28 +228,16 @@ struct DirectDatagram {
 #[async_trait]
 impl ProxyDatagram for DirectDatagram {
     async fn send_to(&self, payload: Bytes, target: &SocketAddress) -> Result<(), ProtocolError> {
-        let addr = match &target.host {
-            penguin_core::address::Address::Ip(ip) => SocketAddr::new(*ip, target.port),
-            penguin_core::address::Address::Domain(domain) => {
-                let addresses = self.dialer.resolve(domain).await?;
-                addresses
-                    .into_iter()
-                    .next()
-                    .map(|ip| SocketAddr::new(ip, target.port))
-                    .ok_or_else(|| ProtocolError::Unreachable(domain.clone()))?
-            }
-        };
+        let addr = socket_addr(&*self.dialer, target).await?;
         self.socket.send_to(&payload, addr).await?;
         Ok(())
     }
 
     async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
-        // 65 535 — наибольшая датаграмма, которую вообще можно получить.
-        // Обрезать её было бы порчей данных: приложение не узнает о потере.
-        let mut buf = vec![0u8; 65_535];
-        let (len, from) = self.socket.recv_from(&mut buf).await?;
-        buf.truncate(len);
-        Ok((Bytes::from(buf), SocketAddress::from(from)))
+        // Без обнуления буфера; наружу уходит копия точного размера.
+        let mut buf = BytesMut::with_capacity(MAX_DATAGRAM);
+        let (_, from) = self.socket.recv_buf_from(&mut buf).await?;
+        Ok((Bytes::copy_from_slice(&buf), SocketAddress::from(from)))
     }
 }
 
@@ -341,8 +274,6 @@ mod tests {
 
     #[test]
     fn skips_binding_across_families() {
-        // Привязать сокет IPv4 к адресу IPv6 нельзя; вместо ошибки соединение
-        // просто уходит без привязки.
         let dialer = dialer().bound_to(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)));
         assert!(
             dialer
@@ -375,9 +306,27 @@ mod tests {
             }
         }
 
-        // Пустой список — это «имени нет», и вызывающий обязан узнать об этом
-        // как об ошибке, а не получить успешный ответ без адресов.
         let dialer = SystemDialer::new(Arc::new(Empty));
         assert!(dialer.resolve("nowhere.invalid").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn datagram_roundtrip_keeps_exact_size() {
+        let direct = DirectOutbound::new(Arc::new(dialer()));
+        let channel = direct.bind_udp().await.expect("сокет");
+        let peer = UdpSocket::bind("127.0.0.1:0").await.expect("сокет");
+        let peer_addr = peer.local_addr().expect("адрес");
+
+        channel
+            .send_to(Bytes::from_static(b"ping"), &SocketAddress::from(peer_addr))
+            .await
+            .expect("отправлено");
+        let mut buf = [0u8; 16];
+        let (len, from) = peer.recv_from(&mut buf).await.expect("получено");
+        assert_eq!(&buf[..len], b"ping");
+
+        peer.send_to(b"pong", from).await.expect("отправлено");
+        let (payload, _) = channel.recv_from().await.expect("получено");
+        assert_eq!(&payload[..], b"pong");
     }
 }

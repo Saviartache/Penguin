@@ -1,12 +1,7 @@
 //! `AsyncRead`/`AsyncWrite` поверх сокета smoltcp.
 //!
-//! Сокеты smoltcp живут внутри цикла опроса и наружу не выдаются: у них нет
-//! ни собственного пробуждения, ни владения, а трогать их из другой задачи
-//! нельзя — весь стек однопоточный по построению.
-//!
-//! Поэтому наружу выдаётся пара очередей, а цикл перекладывает между ними и
-//! сокетом. Приложение видит обычный поток, цикл — обычный сокет, и никто из
-//! них не знает про другого.
+//! Сокеты живут внутри цикла опроса; наружу выдаётся пара очередей, между
+//! которыми и сокетом данные перекладывает цикл.
 //!
 //! ```text
 //!   приложение ──► сокет smoltcp ──► [очередь] ──► TcpConnection ──► движок
@@ -16,19 +11,15 @@
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::PollSender;
 
-/// Сколько блоков держать в очереди в каждую сторону.
-///
-/// Очередь — это единственное, что стоит между приложением и медленной
-/// стороной; когда она заполняется, обратное давление доходит до окна TCP, и
-/// приложение притормаживает само. Без предела оно бы просто копило данные в
-/// памяти клиента.
+/// Глубина очереди в каждую сторону; заполнение даёт обратное давление до окна TCP.
 pub const QUEUE_DEPTH: usize = 32;
 
 /// Принятое соединение.
@@ -39,6 +30,8 @@ pub struct TcpConnection {
     outgoing: PollSender<Bytes>,
     /// Непрочитанный остаток последнего блока.
     pending: Bytes,
+    /// Будит цикл стека, когда у соединения появилась работа.
+    wake: Option<Arc<Notify>>,
     source: SocketAddr,
     destination: SocketAddr,
 }
@@ -70,6 +63,7 @@ impl TcpConnection {
             incoming,
             outgoing: PollSender::new(to_app),
             pending: Bytes::new(),
+            wake: None,
             source,
             destination,
         };
@@ -82,6 +76,12 @@ impl TcpConnection {
         )
     }
 
+    /// Подключает пробуждение цикла стека.
+    pub(crate) fn with_wake(mut self, wake: Arc<Notify>) -> Self {
+        self.wake = Some(wake);
+        self
+    }
+
     /// Откуда соединение пришло.
     pub fn source(&self) -> SocketAddr {
         self.source
@@ -90,6 +90,18 @@ impl TcpConnection {
     /// Куда оно идёт.
     pub fn destination(&self) -> SocketAddr {
         self.destination
+    }
+
+    fn wake(&self) {
+        if let Some(wake) = &self.wake {
+            wake.notify_one();
+        }
+    }
+}
+
+impl Drop for TcpConnection {
+    fn drop(&mut self) {
+        self.wake();
     }
 }
 
@@ -101,12 +113,15 @@ impl AsyncRead for TcpConnection {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
 
-        // Блок мог не поместиться в буфер целиком — остаток лежит до
-        // следующего чтения. Терять его нельзя: это данные приложения.
         if this.pending.is_empty() {
             match ready!(this.incoming.poll_recv(cx)) {
-                Some(chunk) => this.pending = chunk,
-                // Очередь закрыта — приложение закрыло соединение.
+                Some(chunk) => {
+                    this.pending = chunk;
+                    // Очередь была полна: цикл держит блок и ждёт места.
+                    if this.incoming.len() + 1 >= QUEUE_DEPTH {
+                        this.wake();
+                    }
+                }
                 None => return Poll::Ready(Ok(())),
             }
         }
@@ -130,20 +145,19 @@ impl AsyncWrite for TcpConnection {
         this.outgoing
             .send_item(Bytes::copy_from_slice(buf))
             .map_err(|_| closed())?;
+        this.wake();
         Poll::Ready(Ok(buf.len()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Отправленное уже в очереди; дальше его двигает цикл опроса, и
-        // ждать здесь нечего.
         Poll::Ready(Ok(()))
     }
 
+    // Закрытие очереди цикл видит как конец данных и шлёт `FIN`.
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        // Закрытие очереди цикл увидит как конец данных и закроет сокет на
-        // запись — это и есть `FIN` для приложения.
         this.outgoing.close();
+        this.wake();
         Poll::Ready(Ok(()))
     }
 }
@@ -183,7 +197,6 @@ mod tests {
 
     #[tokio::test]
     async fn large_chunk_is_read_across_calls() {
-        // Блок, не поместившийся в буфер, обязан дочитаться, а не пропасть.
         let (source, destination) = addresses();
         let (mut connection, ends) = TcpConnection::new(source, destination);
 
@@ -217,9 +230,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn writes_wake_the_loop() {
+        let (source, destination) = addresses();
+        let (connection, _ends) = TcpConnection::new(source, destination);
+        let wake = Arc::new(Notify::new());
+        let mut connection = connection.with_wake(Arc::clone(&wake));
+
+        connection.write_all(b"x").await.expect("записано");
+        tokio::time::timeout(std::time::Duration::from_secs(1), wake.notified())
+            .await
+            .expect("цикл не разбужен");
+    }
+
+    #[tokio::test]
     async fn shutdown_closes_the_outgoing_queue() {
-        // Закрытие очереди — это `FIN` для приложения; без него оно будет
-        // ждать данных, которых больше не будет.
         let (source, destination) = addresses();
         let (mut connection, mut ends) = TcpConnection::new(source, destination);
 

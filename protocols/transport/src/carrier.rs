@@ -1,11 +1,5 @@
-//! Чем поток протокола переносится до сервера — общее для Trojan, VLESS и
-//! VMess: значения те же, что `network` у Xray.
-//!
-//! - `tcp` — голый поток внутри TLS (или REALITY).
-//! - `grpc` — вызов gRPC `Tun` по HTTP/2 поверх того же TLS.
-//! - `xhttp` — XHTTP `stream-one` по HTTP/3; TLS у него свой, в QUIC.
-//!
-//! HTTP/1.1 нет ни в одном: WebSocket и `httpupgrade` убраны.
+//! Перенос потока протокола (как `network` у Xray): `tcp` — голый поток в TLS,
+//! `grpc` — `Tun` по HTTP/2, `xhttp` — `stream-one` по HTTP/3.
 
 use serde::{Deserialize, Serialize};
 
@@ -35,12 +29,7 @@ impl Carrier {
         matches!(self, Self::Xhttp)
     }
 
-    /// Что объявлять в ALPN, если человек не задал своё.
-    ///
-    /// У голого потока — то же, что у браузера на обычном сайте: сервер
-    /// обязан выглядеть этим сайтом. Это объявление в TLS, а не разговор
-    /// по HTTP/1.1. У gRPC — `h2`, иначе сервер не поймёт HTTP/2; у XHTTP —
-    /// `h3`.
+    /// ALPN по умолчанию: у `tcp` как у браузера, иначе `h2` / `h3`.
     pub fn default_alpn(self) -> &'static [&'static [u8]] {
         match self {
             Self::Tcp => &[ALPN_H2, ALPN_HTTP11],
@@ -50,10 +39,7 @@ impl Carrier {
     }
 }
 
-/// Надевает перенос на уже открытое соединение (TLS, REALITY или TCP).
-///
-/// XHTTP так не умеет — у него своё соединение QUIC, и вызывать это для него
-/// — ошибка вызывающего, она возвращается как ошибка настроек.
+/// Надевает перенос на открытое соединение; для XHTTP (свой QUIC) — ошибка настроек.
 #[cfg(feature = "h2")]
 pub async fn wrap<S>(
     secure: S,

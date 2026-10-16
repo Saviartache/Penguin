@@ -3,12 +3,7 @@
 use crate::matcher::Matcher;
 use crate::target::MatchTarget;
 
-/// Набор портов и диапазонов.
-///
-/// Отдельные порты в отсортированном списке, диапазоны — рядом. Портов в
-/// правиле редко бывает больше десятка, и заводить под них хеш-таблицу или
-/// битовую карту на 65 536 значений незачем: двоичный поиск по короткому
-/// массиву быстрее обоих за счёт кэша.
+/// Набор портов и диапазонов: отсортированный список и двоичный поиск.
 #[derive(Debug, Default)]
 pub struct PortSet {
     singles: Vec<u16>,
@@ -34,19 +29,12 @@ impl PortSet {
 
     /// Набор из диапазонов, включительно с обеих сторон.
     pub fn from_ranges<I: IntoIterator<Item = (u16, u16)>>(ranges: I) -> Self {
-        let ranges = ranges
-            .into_iter()
-            // Границы приводятся в порядок: `443-80` пользователь пишет по
-            // невнимательности, и это не повод отказывать.
-            .map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
-            .collect();
-        Self {
-            singles: Vec::new(),
-            ranges,
-        }
+        let mut set = Self::new();
+        set.add_ranges(ranges);
+        set
     }
 
-    /// Добавляет диапазоны.
+    /// Добавляет диапазоны; перевёрнутые (`443-80`) выравниваются.
     pub fn add_ranges<I: IntoIterator<Item = (u16, u16)>>(&mut self, ranges: I) {
         self.ranges.extend(
             ranges
@@ -106,8 +94,6 @@ mod tests {
 
     #[test]
     fn reversed_range_is_accepted() {
-        // Пользователь пишет `443-80` по невнимательности; отказывать из-за
-        // этого не за что.
         let set = PortSet::from_ranges([(443, 80)]);
         assert!(set.contains(100));
         assert!(!set.contains(500));

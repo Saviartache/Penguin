@@ -1,5 +1,4 @@
-//! Устанавливает транспорт `CONNECT-IP`: расширенный `CONNECT` поверх
-//! HTTP/3. Дальше — поток капсул.
+//! Транспорт `CONNECT-IP`: расширенный `CONNECT` поверх HTTP/3, дальше поток капсул.
 
 use std::io;
 use std::pin::Pin;
@@ -27,8 +26,6 @@ pub(super) async fn open(
     let server_name = config.server_name()?;
     let authority = SocketAddress::new(host.clone(), port).to_wire();
     let link = quic::connect(dialer, &host, port, &server_name, &config.tls, &[ALPN_H3]).await?;
-    // IP-пакеты идут капсулами по потоку: датаграммы не объявляются, и
-    // сервер обязан говорить капсулами же (RFC 9297, §3.5).
     let connection = h3::Connection::new(link.connection.clone(), h3::Options::default())
         .await
         .map_err(|e| MasqueError::transport(format!("HTTP/3 не поднялся: {e}")))?;
@@ -52,8 +49,7 @@ pub(super) async fn open(
     }))
 }
 
-/// Поток `CONNECT-IP` вместе с соединением, которое его несёт: пока жив
-/// поток, живо и оно.
+/// Поток `CONNECT-IP` вместе с несущим соединением.
 struct Tunnel {
     stream: h3::RequestStream,
     _connection: h3::Connection,

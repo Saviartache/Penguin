@@ -3,14 +3,11 @@
 use crate::forms::check;
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 
-/// Чем несётся `CONNECT`. Первое — умолчание нового профиля: HTTP/2
-/// проходит там, где UDP режут.
+/// Чем несётся `CONNECT`; HTTP/2 первым: проходит там, где UDP режут.
 const TRANSPORTS: &[&str] = &["h2", "h3"];
 
-/// Поля формы в том порядке, в каком они показываются.
-///
-/// Имя и пароль обязательны: они уходят заголовком `proxy-authorization` в
-/// каждом запросе, и пустые означают отказ `407` на первом же соединении.
+/// Имя и пароль обязательны: уходят в `proxy-authorization` каждого запроса,
+/// пустые дают `407`.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -23,10 +20,7 @@ static FIELDS: &[FieldSpec] = &[
     FieldSpec::flag("insecure", &["tls", "insecure"], |s| s.insecure),
 ];
 
-/// Описание протокола.
-///
-/// Ссылок нет: своей записи `схема://` у протокола не сложилось — профиль
-/// задаётся файлом настроек.
+/// Описание протокола. Ссылок нет: своей записи `схема://` у протокола не сложилось.
 pub static SPEC: ProtocolSpec = ProtocolSpec {
     id: "trusttunnel",
     label: "TrustTunnel",
@@ -42,8 +36,6 @@ mod tests {
 
     #[test]
     fn the_credentials_are_required_because_they_go_in_every_request() {
-        // Пустые означают `407` на первом же соединении, а не «сервер без
-        // пароля»: у этого протокола пароль обязателен по спецификации.
         for key in ["username", "password"] {
             let field = FIELDS
                 .iter()
@@ -64,8 +56,6 @@ mod tests {
 
     #[test]
     fn the_transports_match_the_ones_the_protocol_knows() {
-        // Значения уходят в настройки дословно: опечатка здесь — профиль,
-        // который не читается.
         assert_eq!(TRANSPORTS, ["h2", "h3"]);
         assert!(FIELDS.iter().any(|field| field.key == "transport"));
     }

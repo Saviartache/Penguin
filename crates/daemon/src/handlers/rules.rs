@@ -12,8 +12,7 @@ use penguin_router::context::FlowContext;
 
 /// Объясняет, что случится с таким соединением.
 ///
-/// Настоящего соединения не открывается: разбирается тот же набор правил тем
-/// же кодом, что и на горячем пути, просто по выдуманному соединению.
+/// Соединение не открывается: правила применяются тем же кодом к выдуманному.
 pub fn explain(
     engine: &Arc<Engine>,
     destination: &str,
@@ -25,13 +24,12 @@ pub fn explain(
     };
 
     let network = if udp { Network::Udp } else { Network::Tcp };
-    // Источник в правилах не участвует; подставляется что угодно осмысленное.
+    // Источник в правилах не участвует
     let source = SocketAddr::from(([127, 0, 0, 1], 0));
     let mut flow = FlowContext::to_target(network, source, target);
 
     if let Some(path) = process {
-        // Пользователь пишет и полный путь, и просто имя файла: личность
-        // строится из того, что дали — имя выведется из пути само.
+        // Дают и путь, и просто имя; имя выводится из пути
         flow = flow.with_process(ProcessIdentity::new(0, path));
     }
 
@@ -112,7 +110,6 @@ mod tests {
 
     #[test]
     fn explaining_does_not_pollute_the_decision_cache() {
-        // Проверка — вопрос «что было бы», а не настоящее соединение.
         let engine = engine_with_rules(json!([]));
         explain(&engine, "example.com:443", None, false);
         assert!(engine.router().cache_is_empty());

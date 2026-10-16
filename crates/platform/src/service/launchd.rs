@@ -1,4 +1,4 @@
-//! Serialization and state parsing for Penguin-owned launchd jobs; no OS calls.
+//! Описание и разбор состояния задания launchd; без обращений к ОС.
 
 use std::path::PathBuf;
 
@@ -6,19 +6,15 @@ use super::ServiceStatus;
 use crate::error::{PlatformError, PlatformResult};
 
 pub(super) const TARGET: &str = "system/com.penguin.vpn";
+#[cfg(target_os = "macos")]
 pub(super) const PLIST_PATH: &str = "/Library/LaunchDaemons/com.penguin.vpn.plist";
 
-/// Where the copy launchd actually executes lives.
-///
-/// launchd refuses to bootstrap a system daemon whose program sits where the
-/// system does not vouch for its owner: a build tree, a user directory, an
-/// external volume that is not even mounted when the machine boots. Shipped
-/// clients answer this the same way — a root-owned copy under
-/// `PrivilegedHelperTools`, registered instead of the original.
+/// Каталог копии, которую исполняет launchd: он не берёт программу из дерева сборки, домашнего
+/// каталога или с тома, не смонтированного при загрузке.
 pub(super) const HELPER_DIR: &str = "/Library/PrivilegedHelperTools/Penguin";
 pub(super) const HELPER_PATH: &str = "/Library/PrivilegedHelperTools/Penguin/penguin";
 
-/// The job definition. Its program path is fixed, so nothing needs escaping.
+/// Описание задания; путь фиксирован, экранировать нечего.
 pub(super) const PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -35,6 +31,7 @@ pub(super) const PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 "#;
 
+/// Путь программы из описания; `None` — формат не наш или роль не `--service`.
 pub(super) fn executable_from(plist: &str) -> Option<PathBuf> {
     let arguments = plist
         .split_once("<key>ProgramArguments</key>")?
@@ -65,6 +62,7 @@ fn string(input: &mut &str) -> Option<String> {
     )
 }
 
+/// Состояние службы из отчёта `launchctl print`.
 pub(super) fn state_from(report: &str) -> PlatformResult<ServiceStatus> {
     let state = report
         .lines()
@@ -77,12 +75,12 @@ pub(super) fn state_from(report: &str) -> PlatformResult<ServiceStatus> {
         }
         Some(_) => Ok(ServiceStatus::Stopped),
         None => Err(PlatformError::Service(
-            "launchctl returned no service state".into(),
+            "launchctl не вернул состояние службы".into(),
         )),
     }
 }
 
-/// Service-not-found exit codes: bootout uses ESRCH (3), print uses 113.
+/// Коды «службы нет»: `bootout` — ESRCH (3), `print` — 113.
 pub(super) fn absent(code: Option<i32>) -> bool {
     matches!(code, Some(3 | 113))
 }
@@ -102,14 +100,11 @@ mod tests {
         assert!(HELPER_PATH.starts_with(HELPER_DIR));
         assert!(PLIST.contains("<key>RunAtLoad</key><true/>"));
         assert!(PLIST.contains("<key>SuccessfulExit</key><false/>"));
-        // Без него launchd выбрасывает поток ошибок целиком, и демон, упавший
-        // до того, как открыл свой журнал, не оставляет ни строчки.
         assert!(PLIST.contains("<key>StandardErrorPath</key>"));
     }
 
     #[test]
     fn the_managed_target_names_the_job_label() {
-        // Разошедшись, они дают задание, которое ставится и не управляется.
         let label = TARGET.strip_prefix("system/").expect("system domain");
         assert!(PLIST.contains(&format!("<string>{label}</string>")));
     }
@@ -130,7 +125,6 @@ mod tests {
 
     #[test]
     fn an_escaped_legacy_path_is_read_back_whole() {
-        // Прежние описания писались с путём внутри, и путь этот экранировался.
         let legacy = "<key>ProgramArguments</key><array><string>/opt/&amp;&lt;&gt;/penguin</string><string>--service</string></array>";
         assert_eq!(
             executable_from(legacy),

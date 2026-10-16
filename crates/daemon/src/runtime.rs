@@ -1,8 +1,7 @@
 //! Сборка зависимостей и жизненный цикл процесса.
 //!
-//! Один порядок действий на оба способа запуска — как службы и как обычного
-//! процесса. Разница между ними только в том, откуда приходит сигнал
-//! остановки: от диспетчера служб или от Ctrl+C.
+//! Один порядок для запуска службой и обычным процессом; отличается источник
+//! сигнала остановки.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,14 +25,13 @@ async fn run_with_paths(paths: Option<Paths>, cancel: CancellationToken) -> Resu
     }
     let result = run_inner(paths, cancel).await;
     if let Err(err) = &result {
-        // Service callers still own their logging guard here.
         tracing::error!(error = %format_args!("{err:#}"), "daemon startup or runtime failed");
     }
     result
 }
 
 async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()> {
-    // Claim singleton ownership before configuration writes or network recovery.
+    // Единственность занимаем до записи настроек и восстановления сети
     let listener = penguin_ipc::transport::listen().context("could not bind control transport")?;
     let paths = paths
         .map_or_else(Paths::discover, Ok)
@@ -41,12 +39,9 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
     let store = ConfigStore::new(paths);
     let config = match store.load() {
         Ok(config) => config,
-        // Опечатка в настройках не должна оставлять пользователя без службы:
-        // починить её нечем — интерфейс тоже не работает без демона. Прежнее
-        // содержимое при этом не пропадёт: первая же запись настроек кладёт
-        // его рядом в `.bak` (см. `ConfigStore::save`).
+        // Без демона интерфейс не починит настройки; старый файл уйдёт в `.bak`
         Err(_) => {
-            // Parse errors may quote configuration secrets.
+            // Ошибка разбора может цитировать секреты
             tracing::error!(
                 path = %store.paths().config_file().display(),
                 "настройки не читаются, работаем на умолчаниях"
@@ -55,33 +50,22 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
         }
     };
 
-    // Журнал завёлся раньше настроек — иначе отказ на их чтении было бы
-    // некуда записать. Отсюда и до конца работы уровень берётся из них.
     crate::logging::set_level(config.app.log_level);
 
-    // Файл создаётся при первом запуске: пустой каталог настроек и файл с
-    // умолчаниями — разные вещи для того, кто захочет посмотреть, что вообще
-    // можно настроить.
+    // Файл с умолчаниями виден пользователю как образец
     if store.init_if_missing().unwrap_or(false) {
         tracing::info!(path = %store.paths().config_file().display(), "создан файл настроек");
     }
 
-    // До движка и до первого подключения: убитый прошлый запуск оставляет
-    // запрет трафика, поднятый адаптер и подменённый DNS. Первое переживает
-    // перезагрузку, а два других не дают клиенту даже узнать адрес своего
-    // сервера — сколько его ни перезапускай (см. [`penguin_platform::leftovers`]).
-    //
-    // Адрес адаптера берётся из тех же настроек, по которым он и поднимался:
-    // так свой след отличается от чужого интерфейса.
+    // Убрать следы убитого запуска (запрет трафика, адаптер, DNS) до движка;
+    // свой адаптер узнаём по адресу из настроек
     penguin_platform::leftovers::recover(config.network.tun.ipv4);
 
     let autoconnect = config.app.autoconnect;
     let engine = Engine::new(config).context("не удалось собрать движок")?;
     let handler = DaemonHandler::new(Arc::clone(&engine), Arc::new(store), cancel.clone());
 
-    // Автоподключение — после того, как канал управления открыт: иначе
-    // интерфейс, запущенный одновременно, не достучится до демона, пока тот
-    // поднимает тоннель.
+    // В фоне, чтобы канал управления открылся сразу
     if autoconnect {
         let engine = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -94,9 +78,7 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
     let server = Server::new(handler);
     let result = server.serve_with_listener(listener, cancel.clone()).await;
 
-    // Тоннель опускается в любом случае, включая аварийный выход: маршруты и
-    // правила брандмауэра, оставшиеся от упавшего демона, — это машина без
-    // сети.
+    // Всегда: остатки маршрутов и правил оставляют машину без сети
     if let Err(err) = engine.disconnect().await {
         tracing::error!(%err, "тоннель опущен не полностью");
     }
@@ -106,18 +88,13 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
 
 /// Запускает демона на переднем плане.
 ///
-/// Так его запускают при отладке: журнал идёт в терминал, остановка — по
-/// Ctrl+C.
+/// Журнал идёт в терминал, остановка по Ctrl+C.
 pub fn run_foreground(config_dir: Option<PathBuf>, verbose: bool) -> Result<()> {
     crate::logging::init_console(verbose);
     run_blocking(config_dir)
 }
 
-/// Собирает среду выполнения и крутит демона, пока не придёт сигнал остановки.
-///
-/// Журнал настраивает вызывающий, и это не мелочь: у запуска на переднем плане
-/// есть терминал, а у службы нет — ей писать в файл (см. `crate::service`;
-/// модуль там свой на каждую систему, поэтому ссылкой сюда не сошлёшься).
+/// Крутит демона до сигнала остановки. Журнал настраивает вызывающий.
 pub fn run_blocking(config_dir: Option<PathBuf>) -> Result<()> {
     run_blocking_paths(config_dir.map(Paths::rooted))
 }
@@ -147,14 +124,7 @@ pub(crate) fn run_blocking_paths(paths: Option<Paths>) -> Result<()> {
     })
 }
 
-/// Ждёт сигнала остановки. `false` — разобрать сигналы не удалось, и ждать
-/// больше нечего.
-///
-/// Сигналов два, и второй не менее важен первого: Ctrl+C приходит от человека
-/// в терминале, `SIGTERM` — от systemd и launchd, когда службу останавливают
-/// (`systemctl stop`, `launchctl bootout`). Не разобрать `SIGTERM` значит
-/// умереть по умолчанию системы, не сняв ни TUN-адаптера, ни маршрутов, ни
-/// правил брандмауэра, — то есть оставить машину без сети.
+/// Ждёт Ctrl+C или `SIGTERM` (останов службой). `false` — сигналы не разобрать.
 #[cfg(unix)]
 async fn wait_for_stop() -> bool {
     use tokio::signal::unix::{SignalKind, signal};
@@ -170,11 +140,7 @@ async fn wait_for_stop() -> bool {
     }
 }
 
-/// Ждёт Ctrl+C. `false` — разобрать его не удалось.
-///
-/// Об остановке службы Windows узнаёт не сигналом, а от диспетчера
-/// ([`crate::service::windows`]); здесь остаётся только запуск на переднем
-/// плане.
+/// Ждёт Ctrl+C; службу Windows останавливает диспетчер.
 #[cfg(not(unix))]
 async fn wait_for_stop() -> bool {
     tokio::signal::ctrl_c().await.is_ok()
@@ -188,11 +154,7 @@ pub fn open_store(config_dir: Option<PathBuf>) -> Result<ConfigStore> {
     }
 }
 
-/// Настройки по умолчанию — на случай, когда файл не читается.
-///
-/// Демон обязан подняться и с испорченным файлом: иначе опечатка в настройках
-/// оставляет пользователя без службы, а починить её нечем — интерфейс тоже не
-/// работает без демона.
+/// Умолчания на случай нечитаемого файла: демон обязан подняться.
 pub fn fallback_config() -> RootConfig {
     RootConfig::default()
 }
@@ -209,8 +171,6 @@ mod tests {
 
     #[test]
     fn fallback_is_valid() {
-        // Опечатка в настройках не должна оставлять пользователя без службы:
-        // починить её нечем, интерфейс тоже не работает без демона.
         penguin_config::validate::validate(&fallback_config()).expect("умолчания корректны");
     }
 

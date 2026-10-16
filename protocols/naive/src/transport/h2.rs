@@ -11,38 +11,19 @@ use tokio::task::JoinHandle;
 use crate::config::NaiveConfig;
 use crate::error::{NaiveError, NaiveResult};
 
-/// Отправитель запросов HTTP/2.
-///
-/// Клонируется — им и открывается несколько потоков `CONNECT` на одном
-/// соединении: `multiplex: true` в возможностях направления означает именно
-/// это (`AGENTS.md`, договор [`penguin_proto::capabilities::Capabilities`]).
+/// Отправитель запросов HTTP/2; клонируется на каждый поток `CONNECT`.
 pub type H2SendRequest = SendRequest<Bytes>;
 
 /// Установленное соединение HTTP/2.
 pub struct Http2Transport {
     /// Отправитель запросов. Клонируется на каждый вызов `connect_tcp`.
     pub send_request: H2SendRequest,
-    /// Задача, качающая кадры соединения.
-    ///
-    /// `h2` не продвигает соединение сам по себе — без опроса `Connection`
-    /// оно не увидит ни исходящих, ни входящих кадров. Держится живой ровно
-    /// столько же, сколько сам `Http2Transport`, и обязана быть остановлена
-    /// явно в [`Http2Transport::shutdown`] — простое падение значения
-    /// `JoinHandle` задачу не останавливает, она продолжает крутиться
-    /// отдельно от всего, что на неё ссылалось.
+    /// Задача, качающая кадры соединения; останавливается в [`Http2Transport::shutdown`].
     driver: JoinHandle<()>,
 }
 
 impl Http2Transport {
-    /// Останавливает задачу, качающую соединение, и вместе с ней — само
-    /// соединение: она единственная держит TLS-поток, и без неё сокет
-    /// закрывается сам.
-    ///
-    /// У `h2` нет отдельного «закрой всё» без объекта `Connection`, а мы его
-    /// не храним — он нужен только этой задаче. Обрыв через `abort` здесь
-    /// настолько же корректен, насколько был бы явный `shutdown` сокета: то,
-    /// что не отправилось, всё равно не должно было отправиться после того,
-    /// как направление закрыто.
+    /// Останавливает задачу, а с ней и соединение (`abort`: она одна держит TLS-поток).
     pub fn shutdown(&self) {
         self.driver.abort();
     }
@@ -59,9 +40,6 @@ pub async fn connect(
         .await
         .map_err(|e| NaiveError::Disconnected(e.to_string()))?;
 
-    // ALPN `h2` обязателен: сервер понимает, что за протокол ждать в TLS,
-    // только по нему, — а маскировка держится ровно на том, что снаружи это
-    // неотличимо от обычного браузера, договорившегося на HTTP/2.
     let tls = TlsClient::new(&config.tls, host, &[ALPN_H2])?;
     let io = tls.connect(tcp).await?;
 
@@ -91,8 +69,6 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_stops_the_driver_task() {
-        // Настоящего сервера здесь нет: важно только то, что задача не
-        // крутится вечно после `shutdown`, а не то, что отвечает пир.
         let (client_io, _server_io) = duplex(4096);
         let (send_request, connection) =
             h2::client::handshake(client_io).await.expect("рукопожатие");

@@ -49,9 +49,7 @@ const fn yes() -> bool {
     true
 }
 
-// Написано руками, а не выведено: производный `Default` дал бы `udp: false`,
-// то есть настройки, собранные в коде, вели бы себя не так, как ровно те же
-// настройки, прочитанные из файла. Расходиться этим двум нельзя.
+// Руками: производный `Default` дал бы `udp: false`, в отличие от разбора файла.
 impl Default for JuicityConfig {
     fn default() -> Self {
         Self {
@@ -184,8 +182,7 @@ mod tests {
 
     #[test]
     fn the_chain_fingerprint_comes_in_under_its_own_name_too() {
-        // Так это поле называется в настройках эталона; человек копирует
-        // строку оттуда, и переименовывать её ему не с чего.
+        // Имя поля из настроек эталона.
         let params = json!({
             "server": "a.io:443",
             "uuid": TEXT,
@@ -206,8 +203,6 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_same_whether_they_come_from_code_or_from_a_file() {
-        // Производный `Default` дал бы `udp: false`, и настройки, собранные в
-        // коде, вели бы себя не так, как ровно те же настройки из файла.
         let params = json!({ "server": "a.io:443", "uuid": TEXT, "password": "x" });
         let parsed: JuicityConfig = serde_json::from_value(params).expect("разбирается");
         let built = JuicityConfig::default();

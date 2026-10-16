@@ -1,4 +1,4 @@
-//! Filesystem-only preparation tests; never invoke service management or IPC.
+//! Тесты подготовки только на ФС, без службы и IPC.
 
 #![allow(clippy::expect_used)]
 

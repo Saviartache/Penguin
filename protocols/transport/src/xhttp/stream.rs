@@ -1,8 +1,6 @@
 //! Поток `stream-one`: тело запроса туда, тело ответа обратно.
 //!
-//! Ответа поток не ждёт: писать можно сразу, ответ ждёт первое чтение. Так
-//! делает и Xray (`client.go`, `OpenStream` ждёт соединения, а не ответа), и
-//! открытие не платит лишний оборот.
+//! Писать можно сразу; ответ ждёт первое чтение (как Xray `OpenStream`).
 
 use std::future::Future;
 use std::io;
@@ -44,7 +42,6 @@ impl XhttpStream {
         if let Recv::Waiting(waiting) = &mut self.recv {
             let (recv, response) = ready!(waiting.as_mut().poll(cx));
             let status = response?.status();
-            // Сервер Xray отвечает `200`; остальное — не тот путь или отступ.
             if status != 200 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::ConnectionRefused,

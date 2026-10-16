@@ -17,8 +17,6 @@ penguin-config.workspace = true
 penguin-engine.workspace = true
 penguin-ipc.workspace = true
 penguin-platform.workspace = true
-# Обработчики отвечают на запросы о правилах, процессах и задержке — это
-# три разных крейта, и тонкий слой перевода в формат провода живёт здесь.
 penguin-router.workspace = true
 penguin-process.workspace = true
 penguin-proto.workspace = true
@@ -26,15 +24,13 @@ penguin-proto.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time", "macros"] }
 tokio-util.workspace = true
-clap.workspace = true
+thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-# У службы нет терминала: журнал пишется в файл с ежедневной ротацией.
-tracing-appender.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-service.workspace = true
@@ -43,8 +39,7 @@ windows-service.workspace = true
 libc.workspace = true
 
 [features]
-# Набор протоколов задаётся движком; перечисление здесь нужно только затем,
-# чтобы `--no-default-features` собирал демона без единого протокола.
+# Нужны, чтобы `--no-default-features` собирал демона без протоколов.
 default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "trusttunnel", "socks5"]
 pingwin = ["penguin-engine/pingwin"]
 dpi = ["penguin-engine/dpi"]

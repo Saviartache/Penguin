@@ -37,10 +37,7 @@ impl std::fmt::Debug for NaiveHttp3Outbound {
 }
 
 impl NaiveHttp3Outbound {
-    /// Устанавливает соединение с сервером и держит его открытым.
-    ///
-    /// Соединение одно на весь профиль: каждый `connect_tcp` открывает свой
-    /// поток `CONNECT` внутри него, а не поднимает QUIC заново.
+    /// Устанавливает соединение; каждый `connect_tcp` — свой поток `CONNECT` в нём.
     pub async fn connect(
         id: OutboundId,
         config: NaiveConfig,
@@ -65,8 +62,6 @@ impl NaiveHttp3Outbound {
                 .await
                 .map_err(TransportError::from)?;
             let response = stream.response().await.map_err(TransportError::from)?;
-            // Тип дополнения решается по ответу на этот конкретный CONNECT,
-            // как и у HTTP/2 (см. `crate::padding`).
             let mode = padding::negotiate_h3(&response);
             Ok((response.status(), PaddedStream::new(stream, mode)))
         })
@@ -87,12 +82,9 @@ impl Outbound for NaiveHttp3Outbound {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // У CONNECT нет датаграмм — ни поверх HTTP/2, ни поверх HTTP/3.
             udp: false,
-            // Потоки CONNECT делят одно соединение QUIC.
             multiplex: true,
             port_hopping: false,
-            // Имя уезжает на сервер в `:authority` и разрешается там.
             remote_dns: true,
         }
     }
@@ -109,7 +101,6 @@ impl Outbound for NaiveHttp3Outbound {
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        // Фоновая задача HTTP/3 останавливается вместе с соединением.
         self.transport.link.close(H3_NO_ERROR, b"").await;
         Ok(())
     }

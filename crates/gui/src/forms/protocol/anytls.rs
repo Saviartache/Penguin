@@ -7,10 +7,7 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
-/// Поля формы в том порядке, в каком они показываются.
-///
-/// Схемы дополнения здесь нет, и это не пропуск: её задаёт сервер и присылает
-/// клиенту сам. Поле в форме затиралось бы первым же подключением.
+/// Схемы дополнения нет: её присылает сервер, поле затиралось бы при подключении.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -19,7 +16,7 @@ static FIELDS: &[FieldSpec] = &[
     FieldSpec::secret("password", &["password"], |s| s.password).required(|s| s.need_password),
     FieldSpec::text("sni", &["tls", "sni"], |s| s.sni).example(|s| s.sni_example),
     FieldSpec::flag("insecure", &["tls", "insecure"], |s| s.insecure),
-    // Датаграммы идут внутри той же сессии — значит, и запросы DNS защищены.
+    // Датаграммы идут внутри той же сессии, DNS защищён.
     FieldSpec::flag("udp", &["udp"], |s| s.proxy_udp).on(),
 ];
 
@@ -33,15 +30,8 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     note: None,
 };
 
-/// Как ссылка ложится в поля.
-///
-/// ```text
-///  anytls://пароль@хост:порт/?sni=…&insecure=1#имя
-/// ```
-///
-/// В userinfo стоит **весь** пароль целиком, вместе с двоеточиями, если они в
-/// нём есть: имени пользователя у AnyTLS нет. Этим ссылка похожа на
-/// `trojan://` и не похожа на `tuic://`, где двоеточие — разделитель.
+/// Как ссылка ложится в поля: `anytls://пароль@хост:порт/?sni=…&insecure=1#имя`.
+/// Имени пользователя нет, userinfo — весь пароль, включая двоеточия.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let password = link.userinfo();
     if password.is_empty() {
@@ -56,7 +46,6 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if let Some(sni) = link.query.get("sni") {
         values.push(("sni", sni));
     }
-    // Оба написания встречаются; смысл один — проверки сертификата не будет.
     if link.query.flag("insecure") || link.query.flag("allowInsecure") {
         values.push(("insecure", "1".to_owned()));
     }
@@ -68,17 +57,10 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
 mod tests {
     use super::*;
     use crate::forms::link;
+    use crate::forms::protocol::testing::{self, Values, value};
 
-    fn parse(raw: &str) -> Vec<(&'static str, String)> {
-        let link = link::split(raw).expect("ссылка разбирается");
-        from_link(&link).expect("поля заполняются")
-    }
-
-    fn value<'a>(values: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
-        values
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, value)| value.as_str())
+    fn parse(raw: &str) -> Values {
+        testing::parse(from_link, raw)
     }
 
     #[test]
@@ -96,8 +78,6 @@ mod tests {
 
     #[test]
     fn a_colon_in_the_password_is_part_of_the_password() {
-        // Имени пользователя у AnyTLS нет: делить строку не на что, и разрез
-        // по двоеточию дал бы пароль, который не подойдёт.
         let values = parse("anytls://раз:два@example.com:443");
         assert_eq!(value(&values, "password"), Some("раз:два"));
     }

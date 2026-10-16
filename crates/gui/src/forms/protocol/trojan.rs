@@ -5,28 +5,22 @@ use crate::forms::link::Link;
 use crate::forms::protocol::carrier::{self, TRANSPORTS};
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 
-/// Порт, если в ссылке его не указали.
-///
-/// 443 — не обычай, а часть замысла: сервер обязан выглядеть обычным сайтом,
-/// а сайт стоит на 443.
+/// Порт, если в ссылке его не указали: сервер выглядит сайтом, а сайт на 443.
 const DEFAULT_PORT: u16 = 443;
 
-/// Поля формы в том порядке, в каком они показываются.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
         .required(|s| s.need_server)
         .check(check::server_address),
     FieldSpec::secret("password", &["password"], |s| s.password).required(|s| s.need_password),
-    // Список, а не строка: опечатка в имени переноса означала бы не «сервер
-    // отказал», а «сервер молчит», и искали бы её в сети.
+    // Список: опечатка в переносе даёт молчащий сервер.
     FieldSpec::choice("transport", &["transport"], |s| s.transport, TRANSPORTS),
     FieldSpec::text("path", &["path"], |s| s.path).example(|s| s.path_example),
     FieldSpec::text("host", &["host"], |s| s.http_host).example(|s| s.optional_hint),
     FieldSpec::text("sni", &["tls", "sni"], |s| s.sni).example(|s| s.sni_example),
     FieldSpec::flag("insecure", &["tls", "insecure"], |s| s.insecure),
-    // В отличие от SOCKS5 под TLS, датаграммы идут внутри того же потока —
-    // значит, и запросы DNS защищены. Подпись поэтому обычная.
+    // Датаграммы идут внутри того же потока, DNS защищён.
     FieldSpec::flag("udp", &["udp"], |s| s.proxy_udp).on(),
 ];
 
@@ -40,11 +34,8 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     note: None,
 };
 
-/// Как ссылка ложится в поля.
-///
-/// В userinfo стоит **весь** пароль целиком, вместе с двоеточиями, если они в
-/// нём есть: имени пользователя у Trojan нет вовсе, делить строку не на что.
-/// Этим ссылка отличается от `socks5://`, где двоеточие — разделитель.
+/// Как ссылка ложится в поля. Имени пользователя нет, userinfo — весь пароль,
+/// включая двоеточия.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let password = link.userinfo();
     if password.is_empty() {
@@ -56,13 +47,11 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
         ("password", password),
     ];
 
-    // `peer` — то же самое имя для TLS под старым названием; конфигурации от
-    // провайдеров приходят и с тем, и с другим.
+    // `peer` — старое имя `sni`.
     if let Some(sni) = link.query.get("sni").or_else(|| link.query.get("peer")) {
         values.push(("sni", sni));
     }
     values.extend(carrier::from_link(link)?);
-    // Оба написания встречаются; смысл один — проверки сертификата не будет.
     if link.query.flag("allowInsecure") || link.query.flag("insecure") {
         values.push(("insecure", "1".to_owned()));
     }
@@ -74,17 +63,10 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
 mod tests {
     use super::*;
     use crate::forms::link;
+    use crate::forms::protocol::testing::{self, Values, value};
 
-    fn parse(raw: &str) -> Vec<(&'static str, String)> {
-        let link = link::split(raw).expect("ссылка разбирается");
-        from_link(&link).expect("поля заполняются")
-    }
-
-    fn value<'a>(values: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
-        values
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, value)| value.as_str())
+    fn parse(raw: &str) -> Values {
+        testing::parse(from_link, raw)
     }
 
     #[test]
@@ -96,15 +78,12 @@ mod tests {
 
     #[test]
     fn the_port_defaults_to_the_one_a_site_would_use() {
-        // Сервер обязан выглядеть обычным сайтом, а сайт стоит на 443.
         let values = parse("trojan://secret@example.com");
         assert_eq!(value(&values, "server"), Some("example.com:443"));
     }
 
     #[test]
     fn a_colon_in_the_password_is_part_of_the_password() {
-        // Имени пользователя у Trojan нет: делить строку не на что, и разрез
-        // по двоеточию дал бы пароль, который не подойдёт.
         let values = parse("trojan://раз:два@example.com:443");
         assert_eq!(value(&values, "password"), Some("раз:два"));
     }
@@ -117,7 +96,7 @@ mod tests {
 
     #[test]
     fn the_grpc_settings_are_carried_over() {
-        // У gRPC путь в ссылке Xray зовётся `serviceName`.
+        // Путь gRPC в ссылке Xray зовётся `serviceName`.
         let values =
             parse("trojan://secret@example.com:443?type=grpc&serviceName=svc&host=cdn.example.com");
         assert_eq!(value(&values, "transport"), Some("grpc"));
@@ -134,7 +113,6 @@ mod tests {
 
     #[test]
     fn both_names_of_the_tls_name_are_understood() {
-        // Конфигурации от провайдеров приходят и с тем, и с другим.
         let values = parse("trojan://secret@example.com:443?sni=cdn.example.com");
         assert_eq!(value(&values, "sni"), Some("cdn.example.com"));
 
@@ -154,8 +132,6 @@ mod tests {
 
     #[test]
     fn a_link_without_extras_leaves_the_defaults_alone() {
-        // Пустое поле не пишется вовсе, и перенос остаётся тем, что стоит в
-        // описании: `tcp`.
         let values = parse("trojan://secret@example.com:443");
         assert!(value(&values, "transport").is_none());
         assert!(value(&values, "path").is_none());

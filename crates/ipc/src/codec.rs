@@ -1,20 +1,4 @@
-//! Кадрирование сообщений: длина и тело.
-//!
-//! Канал управления потоковый: границ сообщений в нём нет, и без явной длины
-//! получатель не знает, где кончается один запрос и начинается следующий.
-//!
-//! ```text
-//!   ┌──────────┬─────────────────────┐
-//!   │ длина u32│ тело JSON           │
-//!   │  4 байта │ длина байт          │
-//!   └──────────┴─────────────────────┘
-//! ```
-//!
-//! Тело в JSON, а не в двоичном формате. Причина не в лени: канал управления
-//! — не горячий путь, сообщений по нему единицы в секунду, зато отладка
-//! глазами и совместимость между версиями стоят дорого. Двоичный формат
-//! сэкономил бы микросекунды и отнял бы возможность прочитать, что пошло не
-//! так.
+//! Кадр: длина u32 (big-endian) и тело JSON. Канал не горячий, а JSON читается глазами.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -22,35 +6,28 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{IpcError, IpcResult};
 
-/// Наибольший размер сообщения.
-///
-/// Самое крупное, что ходит по каналу, — настройки целиком: десятки
-/// килобайт. Мегабайт с запасом, и он же не даёт чужому процессу заказать
-/// выделение памяти произвольного размера одним числом в заголовке.
+/// Наибольший размер сообщения; ограничивает выделение по числу из заголовка.
 pub const MAX_MESSAGE: usize = 1024 * 1024;
 
-/// Отправляет сообщение.
+/// Отправляет сообщение одной записью.
 pub async fn write<W, T>(writer: &mut W, message: &T) -> IpcResult<()>
 where
     W: AsyncWrite + Unpin + ?Sized,
     T: Serialize,
 {
-    let body = serde_json::to_vec(message)?;
+    let mut frame = vec![0u8; 4];
+    serde_json::to_writer(&mut frame, message)?;
 
-    if body.len() > MAX_MESSAGE {
+    let size = frame.len() - 4;
+    if size > MAX_MESSAGE {
         return Err(IpcError::TooLarge {
-            size: body.len(),
+            size,
             limit: MAX_MESSAGE,
         });
     }
+    frame[..4].copy_from_slice(&(size as u32).to_be_bytes());
 
-    // Длина и тело одной записью: две отдельные записи разошлись бы по
-    // пакетам, и получатель ждал бы тело, которое ещё в пути.
-    let mut framed = Vec::with_capacity(4 + body.len());
-    framed.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    framed.extend_from_slice(&body);
-
-    writer.write_all(&framed).await?;
+    writer.write_all(&frame).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -65,8 +42,6 @@ where
     reader.read_exact(&mut length).await?;
     let length = u32::from_be_bytes(length) as usize;
 
-    // Длина пришла с той стороны; выделять по ней память без проверки —
-    // приглашение исчерпать её одним числом.
     if length > MAX_MESSAGE {
         return Err(IpcError::TooLarge {
             size: length,
@@ -112,8 +87,6 @@ mod tests {
 
     #[tokio::test]
     async fn several_messages_do_not_run_together() {
-        // Ради этого длина и нужна: без неё второе сообщение слилось бы с
-        // первым.
         let (mut ours, mut theirs) = tokio::io::duplex(8192);
         for value in 0..5u32 {
             write(
@@ -135,8 +108,6 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_declaration_is_refused() {
-        // Число в заголовке приходит с той стороны; выделять по нему память
-        // без проверки нельзя.
         let (mut ours, mut theirs) = tokio::io::duplex(64);
         ours.write_all(&u32::MAX.to_be_bytes())
             .await

@@ -1,17 +1,10 @@
-//! Трассировка решения: какое правило сработало и почему. То же самое видит
-//! пользователь в GUI.
-//!
-//! Без этого набор из тридцати правил — чёрный ящик, и единственный способ
-//! понять, почему трафик пошёл не туда, — выключать правила по одному.
-//!
-//! Экран проверки принимает приложение и адрес и показывает не только
-//! сработавшее правило, но и те, что сработали бы без него: чаще всего
-//! неожиданный исход объясняется правилом, стоящим выше по порядку.
+//! Трассировка решения для экрана проверки: сработавшее правило и те, что
+//! сработали бы без него.
 
 use serde::{Deserialize, Serialize};
 
 use crate::context::FlowContext;
-use crate::engine::{Router, default_decision};
+use crate::engine::Router;
 
 /// Разбор одного правила при проверке.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,18 +32,11 @@ pub struct Explanation {
     pub rules: Vec<RuleTrace>,
 }
 
-/// Объясняет, что случится с таким соединением.
-///
-/// Кэш при этом не трогается ни на чтение, ни на запись: проверка — это
-/// вопрос «что было бы», а не настоящее соединение, и засорять им кэш
-/// решений нельзя.
+/// Объясняет, что случится с таким соединением; кэш не трогается.
 pub fn explain(router: &Router, flow: &FlowContext) -> Explanation {
     let verdict = router.evaluate(flow);
     let target = flow.as_match_target();
-    let active = router.active();
 
-    // Сработавшее правило — первое подошедшее; остальные подошедшие
-    // показываются как «сработало бы, не будь предыдущего».
     let mut decisive_found = false;
     let mut rules = Vec::new();
 
@@ -69,13 +55,11 @@ pub fn explain(router: &Router, flow: &FlowContext) -> Explanation {
         });
     }
 
-    let fallback = default_decision(router.mode(), &active);
     let reason = if decisive_found {
         verdict.reason.to_string()
     } else {
         format!("{} (режим `{}`)", verdict.reason, router.mode().as_str())
     };
-    let _ = fallback;
 
     Explanation {
         decision: verdict.decision.to_string(),
@@ -133,7 +117,6 @@ mod tests {
         assert_eq!(explanation.decision, "direct");
         assert_eq!(explanation.reason, "правило «Локальная сеть»");
 
-        // Оба правила подошли, но решающим было первое — и это видно.
         let matched: Vec<&RuleTrace> = explanation.rules.iter().filter(|r| r.matched).collect();
         assert_eq!(matched.len(), 2);
         assert!(matched[0].decisive);
@@ -169,7 +152,6 @@ mod tests {
 
     #[test]
     fn explaining_does_not_pollute_the_cache() {
-        // Проверка — вопрос «что было бы», а не настоящее соединение.
         let router = router(json!([]));
         explain(&router, &flow("1.2.3.4:443", None));
         assert!(router.cache_is_empty());

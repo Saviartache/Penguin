@@ -8,18 +8,10 @@ use crate::error::{MasqueError, MasqueResult};
 /// Значение `:protocol` расширенного `CONNECT` (§4.4).
 const PROTOCOL_CONNECT_IP: &str = "connect-ip";
 
-/// Путь по умолчанию: полный туннель, без ограничения на цель или протокол.
-///
-/// RFC 9484, §3 задаёт шаблон по умолчанию
-/// `/.well-known/masque/ip/{target}/{ipproto}/`; §4.6 — что `*` в каждой
-/// переменной значит «без ограничения». Этот крейт не даёт настройки под
-/// произвольный шаблон или под ограничение цели — так же, как и у
-/// CONNECT-UDP ([`crate::request`]), только здесь ограничивать и нечего:
-/// весь смысл направления уровня пакетов — пропускать любой адрес.
+/// Путь по умолчанию: полный туннель (RFC 9484, §3; `*` — без ограничения, §4.6).
 const PATH_FULL_TUNNEL: &str = "/.well-known/masque/ip/*/*/";
 
-/// Значение заголовка, которым обе стороны включают протокол капсул
-/// (RFC 9297, §3.2).
+/// Значение `capsule-protocol` (RFC 9297, §3.2).
 const CAPSULE_PROTOCOL_CONFIRMED: &str = "?1";
 
 /// Собирает запрос (§4.4, Figure 4).
@@ -46,7 +38,7 @@ pub(super) fn check_response(response: &h3::Response) -> MasqueResult<()> {
     Ok(())
 }
 
-/// Ошибка, соответствующая коду ответа, когда прокси отказал.
+/// Ошибка по коду отказа.
 fn outcome(status: u16) -> MasqueError {
     match status {
         401 | 407 => MasqueError::AuthRejected { status },
@@ -87,7 +79,6 @@ mod tests {
 
     #[test]
     fn the_request_matches_figure_4() {
-        // RFC 9484, §4.4, Figure 4.
         let fields = fields(&request("example.org", None));
         let expected = [
             (":method", "CONNECT"),
@@ -120,7 +111,6 @@ mod tests {
             check_response(&response("407", true)),
             Err(MasqueError::AuthRejected { status: 407 })
         ));
-        // 3xx — тоже отказ (§4.5).
         assert!(matches!(
             check_response(&response("302", true)),
             Err(MasqueError::RefusedIp { status: 302 })

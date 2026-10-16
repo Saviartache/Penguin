@@ -1,26 +1,8 @@
 //! Направление уровня пакетов как устройство для стека.
 //!
-//! Тот самый шов, ради которого `PacketOutbound` и объявлен так, как объявлен.
-//! У него `mtu`, `send`, `recv` — ровно то же, что у [`penguin_tun::TunDevice`].
-//! Значит направление подставляется исходящему стеку **как устройство**, и
-//! `netstack` про WireGuard и `CONNECT-IP` по-прежнему не знает
-//! ничего.
-//!
-//! ```text
-//!  приложение ──► TUN ──► netstack::stack ──► router ──┬─► Outbound ──────────► сервер
-//!                          (принимает)                 │
-//!                                                      └─► PacketOutbound
-//!                                                            │ здесь переходник
-//!                                                            ▼
-//!                                            netstack::outgoing (открывает)
-//! ```
-//!
-//! # Почему переходник здесь, а не в стеке или в протоколе
-//!
-//! В стеке нельзя: `netstack` не зависит от `penguin-proto` и не должен —
-//! иначе он узнает про протоколы. В протоколе нельзя: крейт протокола не
-//! зависит от `penguin-tun` (`AGENTS.md` §1.1), да и `smoltcp` ему не нужен.
-//! В движке можно: он и так держит оба.
+//! Подставляется исходящему стеку как [`penguin_tun::TunDevice`]. Переходник
+//! живёт в движке: `netstack` не знает про `proto`, протокол — про `tun`
+//! (AGENTS §1).
 
 use std::sync::Arc;
 
@@ -39,11 +21,7 @@ pub struct PacketDevice {
 }
 
 impl PacketDevice {
-    /// Надевает переходник.
-    ///
-    /// Имя и MTU спрашиваются один раз и запоминаются: интерфейс внутри
-    /// тоннеля не меняется, пока направление живо, а `name` обязан вернуть
-    /// ссылку.
+    /// Надевает переходник; имя и MTU запоминаются (`name` возвращает ссылку).
     pub fn new(outbound: Arc<dyn PacketOutbound>) -> Self {
         let interface = outbound.interface();
         Self {
@@ -53,10 +31,8 @@ impl PacketDevice {
         }
     }
 
-    /// Настройки стека по интерфейсу, который выдал сервер.
-    ///
-    /// Адреса берутся у направления, а не из настроек профиля: у WireGuard они
-    /// в конфигурации, а у `CONNECT-IP` приходят капсулами после подключения.
+    /// Настройки стека по интерфейсу направления (у `CONNECT-IP` адреса
+    /// приходят после подключения).
     pub fn stack_config(&self) -> StackConfig {
         let interface = self.outbound.interface();
         StackConfig {
@@ -87,18 +63,17 @@ impl TunDevice for PacketDevice {
         self.mtu
     }
 
-    /// Индекса у виртуального интерфейса нет: маршруты на него не ставят —
-    /// он живёт внутри клиента, а не в системе.
+    /// Виртуальный интерфейс живёт внутри клиента: индекса и маршрутов нет.
     fn index(&self) -> Option<u32> {
         None
     }
 
     async fn recv(&self) -> TunResult<BytesMut> {
         match self.outbound.recv().await {
-            Ok(packet) => Ok(BytesMut::from(&packet[..])),
-            // Стек различает только «закрыто» и «ошибка чтения», а причина
-            // отказа направления нужна выше — там, где решают, повторять ли.
-            // Здесь она уже записана в журнал самим направлением.
+            // Без копии, если буфер не разделён.
+            Ok(packet) => Ok(packet
+                .try_into_mut()
+                .unwrap_or_else(|shared| BytesMut::from(&shared[..]))),
             Err(err) => {
                 tracing::debug!(%err, "направление больше не отдаёт пакеты");
                 Err(TunError::Closed)
@@ -176,7 +151,6 @@ mod tests {
             let next = self.incoming.lock().expect("замок").pop();
             match next {
                 Some(packet) => Ok(packet),
-                // Пакеты кончились: ведём себя как закрывшееся направление.
                 None => Err(ProtocolError::Disconnected("пакеты кончились".to_owned())),
             }
         }
@@ -184,8 +158,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_interface_the_server_gave_becomes_the_stack_settings() {
-        // Адреса приходят от сервера, а не из настроек профиля: у
-        // `CONNECT-IP` они выдаются капсулами после подключения.
         let device = PacketDevice::new(Fake::new(Vec::new()));
         let config = device.stack_config();
 
@@ -212,16 +184,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_direction_that_stopped_reads_as_a_closed_adapter() {
-        // Иначе цикл стека принял бы это за случайный сбой чтения и продолжил
-        // крутиться на мёртвом направлении.
         let device = PacketDevice::new(Fake::new(Vec::new()));
         assert!(matches!(device.recv().await.unwrap_err(), TunError::Closed));
     }
 
     #[tokio::test]
     async fn the_mtu_is_the_one_from_inside_the_tunnel() {
-        // У WireGuard это 1420 при внешних 1500: соврать здесь — значит
-        // объявить приложению MSS, который не проходит.
         let device = PacketDevice::new(Fake::new(Vec::new()));
         assert!(
             device.mtu() < 1500,

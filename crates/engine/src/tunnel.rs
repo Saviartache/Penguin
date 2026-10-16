@@ -1,20 +1,13 @@
 //! Поднятый тоннель: адаптер, стек, маршруты, kill switch.
 //!
-//! Всё, что тоннель делает с системой, он обязан уметь отменить — и отменить
-//! **в обратном порядке**. Порядок здесь не педантизм: снять маршруты до
-//! того, как остановлен стек, значит на несколько миллисекунд выпустить
-//! трафик мимо тоннеля; снять kill switch последним — значит гарантировать,
-//! что в этот промежуток наружу не уйдёт ничего.
+//! Откат идёт в обратном порядке и до конца даже после ошибки:
 //!
 //! ```text
 //!   запуск:   kill switch ─► адаптер ─► маршруты ─► DNS ─► стек
 //!   останов:  стек ─► DNS ─► маршруты ─► адаптер ─► kill switch
 //! ```
-//!
-//! Отмена идёт до конца даже после ошибки. Недоснятый маршрут — не повод
-//! оставить в системе ещё и правила брандмауэра: пользователь получит машину
-//! без сети и не свяжет это с закрытым клиентом.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use penguin_config::RootConfig;
@@ -26,7 +19,6 @@ use penguin_platform::firewall::{FirewallRules, KillSwitch};
 use penguin_platform::route::RouteGuard;
 use penguin_platform::{DnsOverrideHandle, PlatformResult};
 use penguin_tun::TunConfig;
-use std::net::IpAddr;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{EngineError, EngineResult};
@@ -39,9 +31,8 @@ pub struct TunnelSession {
     routes: RouteGuard,
     kill_switch: KillSwitch,
     dns_settings: DnsOverrideHandle,
-    /// Локальные прокси, поднятые вместе с тоннелем.
+    /// Локальные прокси и насосы стека.
     inbounds: Vec<tokio::task::JoinHandle<()>>,
-    /// Перехват DNS, если он включён.
     dns: Option<Arc<DnsHijacker>>,
 }
 
@@ -73,20 +64,15 @@ impl TunnelSession {
             dns: None,
         };
 
-        // Локальные прокси поднимаются всегда, когда заданы: они не требуют
-        // прав и работают независимо от того, поднялся ли адаптер.
+        // Прокси не требуют прав и не зависят от адаптера.
         session.start_inbounds(config, pipeline).await?;
 
-        // Перехват DNS готовится до адаптера: собрать его — чистая работа с
-        // настройками, и падать на ней после того, как система уже тронута,
-        // незачем.
+        // Готовим до того, как система тронута: падать после неё незачем.
         if config.dns.hijack {
             session.dns = Some(Arc::new(DnsHijacker::new(&config.dns)?));
         }
 
-        // Адаптер и всё остальное — только там, где есть права. Без них
-        // клиент остаётся рабочим прокси, а не превращается в неработающий
-        // тоннель.
+        // Без прав клиент остаётся рабочим прокси.
         if penguin_platform::is_elevated() {
             session.start_tunnel(config, &outbound).await?;
         } else {
@@ -147,10 +133,7 @@ impl TunnelSession {
     ) -> EngineResult<()> {
         let tun_config = TunConfig::from_schema(&config.network.tun);
 
-        // Адреса сервера и путь наружу спрашиваются до того, как что-либо
-        // тронуто. Позже будет поздно: своё же разрешение имён перекроет kill
-        // switch, а на вопрос «как машина выходит наружу» ответом станет сам
-        // тоннель.
+        // До любых изменений: позже kill switch и сам тоннель исказят ответ.
         let servers = server_addresses(config, outbound).await;
         let outside = penguin_platform::default_route().ok();
 
@@ -158,13 +141,9 @@ impl TunnelSession {
             tracing::warn!("адрес сервера не найден — тоннель может заглушить сам себя");
         }
 
-        // Kill switch включается **до** адаптера: пока тоннеля нет, наружу не
-        // должно уйти ничего, даже в те доли секунды, что занимает запуск.
+        // Подсеть адаптера известна заранее, поэтому запрет включается до него.
         if config.network.kill_switch {
             let rules = FirewallRules {
-                // Подсеть адаптера известна из настроек — до того, как он
-                // создан. Это и позволяет включить запрет заранее, не оставив
-                // мига, когда наружу уже можно, а тоннеля ещё нет.
                 tunnel_subnet: Some(tun_config.subnet()),
                 allow_lan: config.network.allow_lan,
                 allow_addresses: servers.clone(),
@@ -176,16 +155,9 @@ impl TunnelSession {
         let index = device.index().unwrap_or_default();
         tracing::info!(name = device.name(), index, "адаптер поднят");
 
-        // Сервер выводится мимо тоннеля — раньше, чем ставятся маршруты по
-        // умолчанию. Иначе пакеты до него заворачиваются в собственный
-        // адаптер, и клиент разговаривает сам с собой: не работает ни тоннель,
-        // ни даже проверка задержки.
+        // Сервер выводится мимо тоннеля до маршрутов по умолчанию.
         match &outside {
             Some(outside) => {
-                // Чужой тоннель, забравший маршрут по умолчанию, — единственная
-                // причина отказа, которую нашей стороной не исправить вовсе:
-                // соединение с сервером уйдёт внутрь него, и молчание оттуда
-                // выглядит как недоступный сервер.
                 if let Some(foreign) = penguin_platform::interface::foreign_tunnel(outside) {
                     tracing::warn!(
                         interface = %foreign,
@@ -199,8 +171,7 @@ impl TunnelSession {
             None => tracing::warn!("путь наружу неизвестен — трафик до сервера уйдёт в тоннель"),
         }
 
-        // Маршруты — двумя половинами вместо `0.0.0.0/0`: их префикс длиннее,
-        // и система выбирает их раньше любого маршрута по умолчанию.
+        // Две половины вместо `0.0.0.0/0`: префикс длиннее.
         if config.network.capture_default_route {
             self.routes.capture_all(index)?;
         } else {
@@ -210,12 +181,10 @@ impl TunnelSession {
             );
         }
 
-        // Свой адрес объявляется единственным DNS: перехвата порта 53 из TUN
-        // хватает не всегда — часть системных служб обходит таблицу
-        // маршрутизации.
+        // Часть служб обходит таблицу маршрутов — нужен единственный DNS.
         if config.dns.hijack {
             self.dns_settings
-                .apply(index, std::net::IpAddr::V4(tun_config.ipv4.0))?;
+                .apply(index, IpAddr::V4(tun_config.ipv4.0))?;
         }
 
         let stack_config = penguin_netstack::StackConfig::from_tun(&tun_config);
@@ -225,14 +194,8 @@ impl TunnelSession {
         Ok(())
     }
 
-    /// Запускает перекладывание между стеком и конвейером.
-    ///
-    /// Две задачи, потому что TCP и UDP приходят из стека по разным каналам и
-    /// живут по разным правилам: у первого есть состояние и закрытие, у
-    /// второго нет ни того ни другого.
+    /// Запускает перекладывание между стеком и конвейером (TCP и UDP отдельно).
     fn spawn_stack_pumps(&mut self, handles: penguin_netstack::StackHandles, config: &RootConfig) {
-        // Соответствие подставных адресов и имён общее для обоих направлений:
-        // приложение спрашивает имя один раз, а ходит и по TCP, и по UDP.
         let fake_ip = self.dns.as_ref().and_then(|dns| dns.fake_ip().cloned());
 
         self.inbounds.push(tokio::spawn(crate::pipeline::tcp::pump(
@@ -253,12 +216,8 @@ impl TunnelSession {
         )));
     }
 
-    /// Опускает всё в обратном порядке.
-    ///
-    /// Продолжает после ошибки: недоснятый маршрут — не повод оставить в
-    /// системе ещё и правила брандмауэра.
+    /// Опускает всё в обратном порядке, не останавливаясь на ошибках.
     pub async fn stop(mut self) -> EngineResult<()> {
-        // 1. Стек и входящие точки. Отмена доходит до всех задач разом.
         self.cancel.cancel();
         for task in self.inbounds.drain(..) {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
@@ -274,15 +233,9 @@ impl TunnelSession {
             }
         };
 
-        // 2. Настройки DNS. Оставленный адрес указывает на исчезнувший
-        //    адаптер, и у пользователя перестают открываться сайты.
         note(self.dns_settings.restore(), "настройки DNS");
-
-        // 3. Маршруты. Оставленный маршрут ведёт в несуществующий адаптер.
         note(self.routes.restore(), "маршруты");
-
-        // 4. Kill switch — последним: до этого момента наружу ничего не
-        //    уходит, и промежутка без защиты не возникает.
+        // Последним: до этого наружу ничего не уходит.
         note(self.kill_switch.disengage(), "kill switch");
 
         match first_error {
@@ -297,10 +250,7 @@ impl TunnelSession {
     }
 }
 
-/// Заглушка запроса для проверки конвейера.
-///
-/// Отдельная функция, потому что собрать её правильно — вопрос порядка полей,
-/// который легко перепутать местами.
+/// Запрос для проверки конвейера.
 pub fn request_from(
     source: std::net::SocketAddr,
     target: penguin_core::address::SocketAddress,
@@ -313,11 +263,8 @@ pub fn request_from(
     }
 }
 
-/// Адреса сервера, до которых kill switch обязан пропускать.
-///
-/// Трафик тоннеля идёт до сервера **напрямую**, мимо адаптера: он и есть тот
-/// самый трафик, ради которого всё поднимается. Под общий запрет он попадает
-/// первым, и тогда тоннель глушит сам себя.
+/// Адреса сервера, которые kill switch обязан пропускать: тоннель ходит к ним
+/// напрямую, мимо адаптера.
 async fn server_addresses(config: &RootConfig, outbound: &OutboundId) -> Vec<IpAddr> {
     let Some(profile) = config
         .profiles
@@ -335,11 +282,7 @@ async fn server_addresses(config: &RootConfig, outbound: &OutboundId) -> Vec<IpA
         return Vec::new();
     };
 
-    // Загрузочным разрешателем, а не системным. Системный на имя сервера
-    // отвечает подставным адресом — своим, оставшимся от прошлого запуска, или
-    // чужого клиента с тем же диапазоном. Вывести наружу подставной адрес
-    // значит завернуть собственное соединение в тоннель, которого ещё нет:
-    // снаружи это «рукопожатие не завершилось: timed out»
+    // Загрузочный разрешатель: системный вернул бы подставной fake-IP
     // (см. [`penguin_dns::bootstrap`]).
     penguin_dns::bootstrap::resolver_for(&config.dns)
         .resolve(host_of(server))
@@ -347,18 +290,12 @@ async fn server_addresses(config: &RootConfig, outbound: &OutboundId) -> Vec<IpA
         .unwrap_or_default()
 }
 
-/// Имя сервера без порта.
-///
-/// Разрешателю нужно имя, а в настройках сервер стоит и с портом, и без.
-/// Свободная функция с тестом: адрес IPv6 сам полон двоеточий, и проверка
-/// «после двоеточия — порт» на нём ломается.
+/// Имя сервера без порта; IPv6 полон двоеточий, поэтому отдельная функция.
 fn host_of(server: &str) -> &str {
     let server = server.trim();
-    // Скобки и есть граница адреса — и в `[::1]:443`, и в `[::1]`.
     if let Some(rest) = server.strip_prefix('[') {
         return rest.split_once(']').map_or(rest, |(host, _)| host);
     }
-    // Голый адрес IPv6: двоеточий много, и последнее — часть адреса.
     if server.parse::<IpAddr>().is_ok() {
         return server;
     }
@@ -379,9 +316,6 @@ mod tests {
 
     #[test]
     fn an_ipv6_address_is_not_mistaken_for_a_port() {
-        // Двоеточий в нём много, а порта нет: проверка «после двоеточия —
-        // порт» отрезала бы кусок адреса, и kill switch перекрыл бы сам
-        // тоннель.
         assert_eq!(host_of("2001:db8::1"), "2001:db8::1");
         assert_eq!(host_of("[2001:db8::1]"), "2001:db8::1");
         assert_eq!(host_of("[2001:db8::1]:3478"), "2001:db8::1");
@@ -389,8 +323,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_profile_without_a_server_yields_nothing() {
-        // Пустой список означает kill switch, который заглушит тоннель;
-        // молчать об этом нельзя, но и падать здесь нечем.
         let config = RootConfig::default();
         let addresses = server_addresses(&config, &OutboundId::direct()).await;
         assert!(addresses.is_empty());
@@ -398,8 +330,6 @@ mod tests {
 
     #[test]
     fn request_keeps_the_fields_apart() {
-        // Источник и назначение перепутать легко, а последствие — трафик,
-        // уехавший не туда.
         let request = request_from(
             "127.0.0.1:50000".parse().expect("адрес"),
             "example.com:443".parse().expect("адрес"),

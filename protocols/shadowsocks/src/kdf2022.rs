@@ -5,35 +5,20 @@
 //!  UDP:  ключ (PSK) || идентификатор сессии (u64, BE)  (только AES-GCM)
 //! ```
 //!
-//! Метка контекста одна и та же в обоих случаях — так делает и
-//! `shadowsocks-rust` (`shadowsocks-crypto`, `src/v2/mod.rs`:
-//! `BLAKE3_KEY_DERIVE_CONTEXT`, используется и в `v2/tcp/mod.rs`, и в
-//! `v2/udp/aes_gcm.rs`), и независимо `sing-shadowsocks2`
-//! (`shadowaead_2022/protocol.go::SessionKey`, дословно та же строка).
-//!
-//! У ChaCha20-Poly1305 в UDP этой функции нет вовсе: там PSK идёт в шифр как
-//! есть, без вывода (`crate::udp2022::cipher`), и это тоже видно по обоим
-//! источникам — `v2/udp/chacha20_poly1305.rs` получает ключ параметром, не
-//! трогая соль; `shadowaead_2022/method.go` строит `udpCipher` из
-//! `pskList[0]` один раз при создании метода, до всякой сессии.
+//! Метка контекста общая: `shadowsocks-rust` (`v2/mod.rs`: `BLAKE3_KEY_DERIVE_CONTEXT`),
+//! `sing-shadowsocks2` (`shadowaead_2022/protocol.go::SessionKey`). У UDP ChaCha вывода
+//! нет: PSK идёт в шифр как есть.
 
-/// Метка контекста BLAKE3. Часть договора с сервером: другая метка — другой
-/// ключ, и сервер такой подключ не примет.
+/// Метка контекста BLAKE3; другая метка даёт другой ключ, сервер его не примет.
 pub const CONTEXT: &str = "shadowsocks 2022 session subkey";
 
-/// Выводит подключ нужной длины из PSK и материала (соли или идентификатора
-/// сессии).
-///
-/// `key_len` — 16 или 32 (см. [`crate::method::Method2022::key_len`]);
-/// `blake3::derive_key` выдаёт 32 байта, длины хватает всегда.
+/// Выводит подключ длиной `key_len` (16 или 32) из PSK и материала (соль или id сессии).
 pub fn derive(psk: &[u8], material: &[u8], key_len: usize) -> Vec<u8> {
     debug_assert!(key_len <= 32, "ключ 2022 длиннее выхода BLAKE3");
 
-    let mut input = Vec::with_capacity(psk.len() + material.len());
-    input.extend_from_slice(psk);
-    input.extend_from_slice(material);
-
-    blake3::derive_key(CONTEXT, &input)[..key_len].to_vec()
+    let mut hasher = blake3::Hasher::new_derive_key(CONTEXT);
+    hasher.update(psk).update(material);
+    hasher.finalize().as_bytes()[..key_len].to_vec()
 }
 
 #[cfg(test)]

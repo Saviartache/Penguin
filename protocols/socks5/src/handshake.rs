@@ -1,6 +1,6 @@
 //! Разговор с прокси до того, как по соединению пойдут данные приложения.
 //!
-//! Три шага, и все три обязательны в этом порядке (RFC 1928, §3–4):
+//! Порядок обязателен (RFC 1928, §3–4):
 //!
 //! ```text
 //!  клиент ──► приветствие: какие способы проверки я умею
@@ -11,8 +11,7 @@
 //!  прокси ──► ответ и адрес, которым он представился
 //! ```
 //!
-//! Сборка байт вынесена в свободные функции без `tokio` — их видно целиком и
-//! можно проверить без сети. Ждать умеют только [`negotiate`] и [`command`].
+//! Сборка байт — свободные функции без `tokio`; ждут только [`negotiate`] и [`command`].
 
 use penguin_core::address::SocketAddress;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -39,10 +38,7 @@ pub const CMD_CONNECT: u8 = 0x01;
 /// Попросить канал для датаграмм.
 pub const CMD_UDP_ASSOCIATE: u8 = 0x03;
 
-/// Приветствие: перечень способов, которыми клиент умеет представиться.
-///
-/// «Никакой» предлагается всегда, даже когда пароль задан: прокси, который
-/// его не спрашивает, иначе получил бы список, из которого ему нечего выбрать.
+/// Приветствие; «никакой» способ предлагается всегда, чтобы прокси без пароля мог выбрать.
 pub fn greeting(with_credentials: bool) -> Vec<u8> {
     if with_credentials {
         vec![VERSION, 2, METHOD_NONE, METHOD_USERPASS]
@@ -51,10 +47,7 @@ pub fn greeting(with_credentials: bool) -> Vec<u8> {
     }
 }
 
-/// Имя и пароль в записи RFC 1929.
-///
-/// Длина каждого поля — один байт; всё, что длиннее 255 байт, обрезается ещё
-/// в [`crate::config::Socks5Config::validate`], до попытки подключения.
+/// Имя и пароль в записи RFC 1929 (до 255 байт каждое, см. [`crate::config::Socks5Config::validate`]).
 pub fn credentials_message(username: &str, password: &str) -> Socks5Result<Vec<u8>> {
     let user = username.as_bytes();
     let pass = password.as_bytes();
@@ -84,10 +77,6 @@ pub fn request(command: u8, target: &SocketAddress) -> Socks5Result<Vec<u8>> {
 }
 
 /// Что означает код ответа прокси (RFC 1928, §6).
-///
-/// Свободная функция с таблицей, а не строка на месте: код `0x02` — это
-/// «запрещено правилами прокси», и подпись «не удалось подключиться» на его
-/// месте отправила бы человека чинить сеть вместо настроек прокси.
 pub fn reason(code: u8) -> &'static str {
     match code {
         0x01 => "внутренняя ошибка прокси",
@@ -125,8 +114,6 @@ where
         METHOD_NONE => Ok(()),
         METHOD_USERPASS => match credentials {
             Some((username, password)) => authenticate(io, username, password).await,
-            // Прокси выбрал способ, которого мы не предлагали. Считать это
-            // сетевой ошибкой нельзя: пока пароль не задан, ответ будет тем же.
             None => Err(Socks5Error::AuthUnsupported),
         },
         METHOD_UNACCEPTABLE => Err(Socks5Error::AuthUnsupported),
@@ -147,8 +134,6 @@ where
 
     let mut answer = [0u8; 2];
     io.read_exact(&mut answer).await?;
-    // Версия обмена своя: единица, а не пятёрка. Прокси, ответивший здесь
-    // пятёркой, обычно и есть тот, кто «почти» реализует RFC 1929.
     if answer[0] != AUTH_VERSION {
         return Err(Socks5Error::malformed(format!(
             "проверка подлинности версии {:#04x} вместо 1",
@@ -163,9 +148,7 @@ where
 
 /// Отправляет команду и читает ответ.
 ///
-/// Возвращает адрес, которым представился прокси: для [`CMD_CONNECT`] он мало
-/// что значит, а для [`CMD_UDP_ASSOCIATE`] это и есть тот адрес, на который
-/// потом уходят датаграммы.
+/// Возвращает адрес прокси из ответа; для [`CMD_UDP_ASSOCIATE`] это адрес для датаграмм.
 pub async fn command<S>(
     io: &mut S,
     command: u8,
@@ -195,11 +178,7 @@ where
     read_address(io, head[3]).await
 }
 
-/// Дочитывает адрес, тип которого уже известен.
-///
-/// Читается ровно столько, сколько обещает тип: лишний байт из потока — это
-/// первый байт данных приложения, и забрать его значило бы испортить
-/// соединение молча.
+/// Дочитывает адрес известного типа ровно по длине: лишний байт — уже данные приложения.
 async fn read_address<S>(io: &mut S, atyp: u8) -> Socks5Result<SocketAddress>
 where
     S: AsyncRead + Unpin,
@@ -208,7 +187,6 @@ where
     frame.push(atyp);
 
     match atyp {
-        // Хвост — сам адрес плюс два байта порта.
         ATYP_IPV4 => read_into(io, &mut frame, 4 + 2).await?,
         ATYP_IPV6 => read_into(io, &mut frame, 16 + 2).await?,
         ATYP_DOMAIN => {
@@ -247,9 +225,6 @@ mod tests {
     use super::*;
 
     /// Соединение с поддельным прокси, отвечающим заранее записанным.
-    ///
-    /// Настоящего сокета здесь нет: разговор с прокси — это байты, и проверять
-    /// его надо байтами, а не поднятым сервером.
     async fn proxy(script: &[u8]) -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
         let (client, mut server) = duplex(4096);
         server.write_all(script).await.expect("сценарий пишется");
@@ -283,8 +258,6 @@ mod tests {
 
     #[test]
     fn every_reply_code_says_something_useful() {
-        // «Запрещено правилами прокси» отправляет чинить настройки, а
-        // «не удалось подключиться» — чинить сеть. Это разные вечера.
         for code in 1..=8u8 {
             assert!(!reason(code).is_empty());
         }
@@ -307,7 +280,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_wrong_password_is_told_apart_from_a_broken_link() {
-        // От этого зависит, будет ли `supervisor` повторять попытку.
         let (mut client, _server) = proxy(&[VERSION, METHOD_USERPASS, AUTH_VERSION, 1]).await;
         let err = negotiate(&mut client, Some(("penguin", "secret")))
             .await
@@ -324,7 +296,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_wrong_kind_of_proxy_is_recognised_at_once() {
-        // На порту сидит HTTP-прокси: он отвечает текстом, а не пятёркой.
         let (mut client, _server) = proxy(b"HTTP/1.1 400 Bad Request\r\n").await;
         let err = negotiate(&mut client, None).await.expect_err("не SOCKS5");
         assert!(matches!(err, Socks5Error::Malformed(_)));
@@ -348,8 +319,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_bound_address_can_be_a_name_too() {
-        // Прокси вправе представиться именем; читать надо ровно столько, сколько
-        // он обещал, иначе следующий байт — это уже данные приложения.
         let mut script = vec![VERSION, 0, 0, ATYP_DOMAIN, 11];
         script.extend_from_slice(b"example.net");
         script.extend_from_slice(&443u16.to_be_bytes());

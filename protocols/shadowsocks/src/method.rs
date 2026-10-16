@@ -1,10 +1,7 @@
 //! Метод шифрования Shadowsocks: обычный AEAD или AEAD 2022.
 //!
-//! Список имён — из шести, а не из трёх: [`crate::crypto::Method`] остаётся
-//! рабочей частью AEAD, которую эта фаза не трогает, а три метода
-//! `2022-blake3-*` — [`Method2022`], с другим выводом ключа ([`crate::kdf2022`])
-//! и другим заголовком ([`crate::tcp2022`], [`crate::udp2022`]). Этот файл
-//! только выбирает между ними по имени; крипто-логики здесь нет.
+//! Шесть имён: три AEAD ([`crate::crypto::Method`]) и три `2022-blake3-*` ([`Method2022`]).
+//! Файл только выбирает между ними по имени.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -13,9 +10,7 @@ use crate::error::ShadowsocksResult;
 
 /// Метод Shadowsocks 2022.
 ///
-/// Тот же список шифров, что у AEAD, но ключ — не пароль, а закодированный
-/// в base64 предварительный общий ключ (PSK) ровно нужной длины, и вывод
-/// сеансового ключа — BLAKE3, а не HKDF-SHA1 (см. [`crate::kdf2022`]).
+/// Ключ — base64 PSK нужной длины, вывод подключа — BLAKE3 ([`crate::kdf2022`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method2022 {
     /// `2022-blake3-aes-128-gcm`. Ключ 16 байт.
@@ -55,30 +50,17 @@ impl Method2022 {
         }
     }
 
-    /// Длина соли TCP.
-    ///
-    /// Совпадает с длиной ключа — так задано протоколом
-    /// (`shadowsocks-crypto`, `kind.rs::salt_len`), а не выведено из
-    /// удобства (тот же приём, что у обычного AEAD).
+    /// Длина соли TCP; равна длине ключа (`shadowsocks-crypto`, `kind.rs::salt_len`).
     pub fn salt_len(self) -> usize {
         self.key_len()
     }
 
-    /// Использует ли метод AES-GCM (а не ChaCha).
-    ///
-    /// От этого зависит устройство UDP: у AES-GCM заголовок с
-    /// идентификатором сессии шифруется отдельно голым AES, у ChaCha —
-    /// нонс просто 24 случайных байта перед пакетом (`udp2022::cipher`).
+    /// AES-GCM (а не ChaCha); от этого зависит устройство UDP (`udp2022::cipher`).
     pub fn is_aes_gcm(self) -> bool {
         matches!(self, Self::Blake3Aes128Gcm | Self::Blake3Aes256Gcm)
     }
 
-    /// Шифр TCP-потока в терминах общего слоя.
-    ///
-    /// Только для TCP: там ChaCha20-Poly1305 обычный, с растущим 12-байтовым
-    /// нонсом, — общий слой (`penguin_transport::aead`) это умеет. У UDP
-    /// ChaCha — это `XChaCha20`, с явным 24-байтовым нонсом на пакет, и там
-    /// нужны свои разовые операции (`crate::udp2022::cipher`).
+    /// Шифр TCP-потока в терминах общего слоя (UDP ChaCha — `XChaCha20`, см. `udp2022::cipher`).
     pub fn algorithm(self) -> penguin_transport::aead::Algorithm {
         use penguin_transport::aead::Algorithm;
         match self {
@@ -101,8 +83,6 @@ pub enum ShadowsocksMethod {
 impl ShadowsocksMethod {
     /// Разбирает имя метода — любое из шести.
     pub fn parse(name: &str) -> ShadowsocksResult<Self> {
-        // 2022 проверяется первым: имена не пересекаются, но так порядок
-        // проверки не зависит от того, в каком списке заведут седьмой метод.
         if let Some(method) = Method2022::parse(name) {
             return Ok(Self::Aead2022(method));
         }
@@ -164,8 +144,6 @@ mod tests {
 
     #[test]
     fn the_tcp_algorithm_key_length_matches_the_method_key_length() {
-        // Разойтись им нельзя: подключ выводит этот файл, а собирает общий
-        // слой, и лишний байт означал бы «ключ не той длины» на ровном месте.
         for method in ALL_2022 {
             assert_eq!(
                 method.algorithm().key_len(),

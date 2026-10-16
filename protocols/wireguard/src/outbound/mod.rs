@@ -1,21 +1,7 @@
-//! `WireguardOutbound` — `PacketOutbound` поверх UDP-сокета от `Dialer`.
-//!
-//! ```text
-//!  send()/recv() ──► каналы ──► задача-водитель (outbound::driver)
-//!                                   │
-//!                          сокет UDP от Dialer::bind_udp
-//! ```
-//!
-//! Вся мутация состояния рукопожатия и сеанса живёт в одной задаче
-//! (`driver::run`), а не за `Mutex`: `send`/`recv` только передают байты через
-//! каналы `tokio::sync::mpsc`. У WireGuard нет отдельного «соединения» на
-//! пакет — есть один сокет и один сеанс на весь профиль, и держать их в
-//! одном месте проще, чем делить блокировкой между вызывающими и
-//! собственным таймером обновления рукопожатия.
-//!
-//! Начальное рукопожатие завершается **до** возврата из [`WireguardOutbound::connect`] — так
-//! `PacketFactory::build` действительно поднимает тоннель, а не обещает
-//! поднять его когда-нибудь.
+//! `WireguardOutbound`: `PacketOutbound` поверх UDP-сокета от `Dialer`.
+//! `send`/`recv` передают байты каналами в задачу-водитель (`driver`), которая
+//! владеет сокетом и сеансом. Рукопожатие завершается до возврата из
+//! [`WireguardOutbound::connect`].
 
 mod driver;
 
@@ -38,11 +24,7 @@ use crate::crypto::constants::REKEY_ATTEMPT_TIME;
 use crate::crypto::handshake::StaticKeys;
 use crate::error::{WireguardError, WireguardResult};
 
-/// Сколько сообщений может ждать своей отправки или доставки, прежде чем
-/// `send`/`recv` начнут ждать освобождения места.
-///
-/// Не безлимит: направление, за которым никто не читает, не должно копить
-/// пакеты в памяти вечно.
+/// Глубина каналов `send`/`recv`: ограничена, чтобы без читателя память не росла.
 const CHANNEL_CAPACITY: usize = 256;
 
 /// Направление WireGuard уровня пакетов.
@@ -56,10 +38,7 @@ pub struct WireguardOutbound {
 }
 
 impl WireguardOutbound {
-    /// Разрешает адрес сервера, открывает сокет и проводит рукопожатие.
-    ///
-    /// Возвращается только после того, как тоннель действительно поднят —
-    /// или после того, как это заведомо не удалось за [`REKEY_ATTEMPT_TIME`].
+    /// Разрешает адрес, открывает сокет, проводит рукопожатие (срок [`REKEY_ATTEMPT_TIME`]).
     pub async fn connect(
         id: OutboundId,
         config: WireguardConfig,
@@ -84,10 +63,6 @@ impl WireguardOutbound {
         ));
         let reserved = config.reserved;
 
-        // Срок — весь протокольный цикл попыток (`REKEY_ATTEMPT_TIME`), а не
-        // общее умолчание `deadline::DEFAULT`: WireGuard сам определяет, что
-        // значит «сервер завис» — 90 секунд неотвеченных повторов, а не
-        // произвольные десять.
         let session = deadline::within(
             REKEY_ATTEMPT_TIME,
             "рукопожатие WireGuard",
@@ -171,8 +146,6 @@ impl PacketOutbound for WireguardOutbound {
 
     async fn send(&self, packet: &[u8]) -> Result<(), ProtocolError> {
         if packet.len() > usize::from(self.interface.mtu) {
-            // Ошибка настройки того, кто собрал пакет крупнее объявленного
-            // MTU, а не повод молча его обрезать (документ `PacketOutbound::send`).
             return Err(WireguardError::malformed(format!(
                 "пакет длиной {} байт больше MTU в {}",
                 packet.len(),
@@ -193,8 +166,6 @@ impl PacketOutbound for WireguardOutbound {
 
     async fn close(&self) -> Result<(), ProtocolError> {
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
-            // Получатель уже мог уйти сам (фатальная ошибка сокета) — это не
-            // повод считать `close` неудачным.
             let _ = tx.send(());
         }
         if let Some(handle) = self.driver.lock().await.take() {
@@ -210,8 +181,6 @@ mod tests {
 
     #[test]
     fn a_packet_longer_than_the_mtu_names_both_numbers_in_the_error() {
-        // Не проверка сети — сборка ошибки не должна требовать рабочего
-        // сокета, поэтому здесь конструируется только сообщение напрямую.
         let mtu: u16 = 1420;
         let packet_len = 1500usize;
         let err =

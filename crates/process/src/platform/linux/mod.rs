@@ -1,17 +1,5 @@
-//! Linux: procfs.
-//!
-//! Ответ собирается в два шага: таблица соединений даёт inode сокета
-//! ([`procfs`]), обход `/proc/*/fd` — процесс, который его держит ([`fd`]).
-//!
-//! Первый шаг дорог: таблица читается целиком, дешёвых способов спросить про
-//! один порт ядро не даёт. Поэтому снимок живёт короткое время, и все
-//! обращения за этот срок отвечаются из него.
-//!
-//! Срок жизни снимка — компромисс. Слишком долгий врёт: порт освободился и
-//! достался другому процессу. Слишком короткий возвращает нас к чтению всей
-//! таблицы на каждое соединение. Полсекунды — заметно меньше времени, за
-//! которое система переиспользует порт, и заметно больше пачки соединений,
-//! которую браузер открывает при загрузке страницы.
+//! Linux: таблица соединений даёт inode ([`procfs`]), обход `/proc/*/fd` —
+//! процесс ([`fd`]). Снимок таблицы живёт 500 мс: дольше врёт, короче дорого.
 
 pub mod fd;
 pub mod procfs;
@@ -69,7 +57,7 @@ impl LinuxResolver {
         }
     }
 
-    /// Номер процесса, которому принадлежит локальный адрес.
+    /// Номер процесса-владельца; при промахе таблица перечитывается один раз.
     fn pid_of(&self, network: Network, local: SocketAddr) -> Option<u32> {
         let slot = match network {
             Network::Tcp => &self.tcp,
@@ -87,20 +75,13 @@ impl LinuxResolver {
             return fd::owner_of(inode);
         }
 
-        // Соединение могло появиться уже после снимка. Один повторный заход
-        // со свежей таблицей — этого хватает: соединение, которого нет и в
-        // ней, скорее всего уже закрылось.
         snapshot.entries = procfs::snapshot(network);
         snapshot.taken = Some(Instant::now());
         find(&snapshot.entries, local).and_then(fd::owner_of)
     }
 }
 
-/// Ищет запись по локальному адресу.
-///
-/// Сначала точное совпадение адреса и порта, потом — только по порту.
-/// Второй заход нужен для сокетов, привязанных к `0.0.0.0` или `[::]`: система
-/// показывает их именно так, а соединение приходит с конкретного адреса.
+/// Ищет запись: точный адрес, затем порт сокета на `0.0.0.0`/`[::]`.
 fn find(entries: &[Entry], local: SocketAddr) -> Option<u64> {
     if let Some(entry) = entries.iter().find(|entry| entry.local == local) {
         return Some(entry.inode);
@@ -112,10 +93,7 @@ fn find(entries: &[Entry], local: SocketAddr) -> Option<u64> {
         .map(|entry| entry.inode)
 }
 
-/// Личность процесса по его номеру.
-///
-/// Путь берётся из `/proc/<pid>/exe`: это ссылка на сам файл, и подменить её
-/// процесс не может — в отличие от `cmdline`, который он пишет себе сам.
+/// Личность по `/proc/<pid>/exe` (в отличие от `cmdline`, процесс её не подменит).
 fn identity_of(pid: u32) -> Option<ProcessIdentity> {
     let path = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
     Some(ProcessIdentity::new(pid, path.to_string_lossy()))
@@ -153,8 +131,6 @@ impl ProcessEnumerator for LinuxEnumerator {
         entries
             .flatten()
             .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
-            // Процессы без своего файла — потоки ядра; показывать их в списке
-            // приложений незачем, и правило на них всё равно не напишешь.
             .filter_map(identity_of)
             .collect()
     }
@@ -166,8 +142,6 @@ mod tests {
 
     #[test]
     fn finds_the_owner_of_our_own_socket() {
-        // Сквозная проверка всей цепочки: сокет -> таблица -> inode -> pid ->
-        // путь.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("сокет");
         let local = listener.local_addr().expect("адрес");
 
@@ -183,18 +157,12 @@ mod tests {
     #[test]
     fn unknown_socket_has_no_owner() {
         let resolver = LinuxResolver::new();
-        // Порт, которого почти наверняка нет ни у кого.
         let local: SocketAddr = "127.0.0.1:1".parse().expect("адрес");
-        // Ответ может быть и `Some`, если кто-то и правда слушает первый порт;
-        // важно, что вызов не паникует и не виснет.
         let _ = resolver.owner_of(Network::Tcp, local);
     }
 
     #[test]
     fn wildcard_socket_is_matched_by_port() {
-        // Сокет на `0.0.0.0` система показывает именно так, а соединение
-        // приходит с конкретного адреса — без второго захода владелец
-        // не нашёлся бы.
         let entries = vec![Entry {
             local: "0.0.0.0:8080".parse().expect("адрес"),
             inode: 4242,

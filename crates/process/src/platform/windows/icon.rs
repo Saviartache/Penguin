@@ -1,8 +1,4 @@
-//! Перечисление процессов и извлечение иконки.
-//!
-//! Иконка нужна одному экрану — выбору приложений — и ничему больше, поэтому
-//! она за фичей `icon`: без неё крейт не тянет ни графических зависимостей,
-//! ни разбора PE-ресурсов.
+//! Перечисление процессов и иконка (за фичей `icon`).
 
 #![allow(unsafe_code, reason = "системные вызовы Windows")]
 
@@ -35,10 +31,6 @@ impl ProcessEnumerator for WindowsEnumerator {
 
         if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
             loop {
-                // Путь берётся отдельным вызовом, а не из `szExeFile`: там
-                // лежит только имя файла, а правила пишутся на путь.
-                // Процессы, до которых нет доступа, просто пропускаются —
-                // системных среди них большинство, и падать из-за них незачем.
                 if let Some(identity) = path::identity_of(entry.th32ProcessID) {
                     identities.push(identity);
                 }
@@ -54,11 +46,7 @@ impl ProcessEnumerator for WindowsEnumerator {
     }
 }
 
-/// Иконка исполняемого файла в виде PNG.
-///
-/// Заглушка: извлечение иконок из ресурсов PE — отдельная работа, и
-/// откладывать из-за неё список приложений незачем. Интерфейс рисует
-/// заглушку, когда иконки нет.
+/// Иконка в виде PNG. Заглушка: извлечения из PE пока нет.
 #[cfg(feature = "icon")]
 pub fn icon_of(_path: &str) -> Option<Vec<u8>> {
     None
@@ -86,8 +74,6 @@ mod tests {
         let apps = WindowsEnumerator.list_apps();
         assert!(!apps.is_empty());
 
-        // Свёртка по пути обязана убрать повторы: у системы всегда есть
-        // несколько процессов с одним и тем же исполняемым файлом.
         let mut paths: Vec<&str> = apps.iter().map(|a| &*a.identity.path).collect();
         let before = paths.len();
         paths.sort_unstable();

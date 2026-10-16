@@ -16,23 +16,14 @@ use super::outbound::INTERFACE_MTU;
 use crate::capsule::CapsuleReader;
 use crate::error::{MasqueError, MasqueResult};
 
-/// Идентификаторы собственных запросов адреса.
-///
-/// Значения не значат ничего для сервера, кроме того, что они не равны нулю
-/// и не повторяются внутри одного потока (RFC 9484, §4.7.2) — единственное
-/// требование к Request ID.
+/// Request ID запросов: ненулевые и уникальные в потоке (RFC 9484, §4.7.2).
 const REQUEST_ID_IPV4: u64 = 1;
 const REQUEST_ID_IPV6: u64 = 2;
 
-/// Наибольшая длина одного куска, читаемого из сети за раз.
+/// Размер одного чтения из сети.
 const READ_CHUNK: usize = 4096;
 
-/// Запрашивает адрес у сервера и ждёт `ADDRESS_ASSIGN`.
-///
-/// `reader` может уже что-то содержать (хвост, пришедший вместе с ответом на
-/// апгрейд) — то, что он накопит сверх `ADDRESS_ASSIGN` (маршруты, а то и
-/// первый IP-пакет), не теряется: тот же `reader` передаётся дальше в
-/// фоновую задачу разбора как есть.
+/// Запрашивает адрес и ждёт `ADDRESS_ASSIGN`; накопленное в `reader` сверх него сохраняется.
 pub(super) async fn assign_interface<S>(
     io: &mut S,
     reader: &mut CapsuleReader,
@@ -75,8 +66,7 @@ where
     .await
 }
 
-/// Разбирает и обрабатывает уже накопленные капсулы, пока не дойдёт до
-/// `ADDRESS_ASSIGN` или пока не кончатся данные.
+/// Обрабатывает накопленные капсулы до `ADDRESS_ASSIGN` или до конца данных.
 fn process_one(reader: &mut CapsuleReader) -> MasqueResult<Option<PacketInterface>> {
     loop {
         let Some((capsule_type, value)) = reader.next_capsule()? else {
@@ -103,9 +93,6 @@ fn process_one(reader: &mut CapsuleReader) -> MasqueResult<Option<PacketInterfac
                      назначение адресов не поддержано, запрос пропущен"
                 );
             }
-            // Неизвестный тип или ранний IP-пакет (DATAGRAM) — RFC 9297,
-            // §3.2 велит пропускать незнакомое молча, а пакет до готового
-            // интерфейса всё равно некуда девать.
             _ => {}
         }
     }
@@ -133,16 +120,11 @@ fn interface_from(entries: Vec<capsule::AssignedAddress>) -> MasqueResult<Packet
         ipv4: (ipv4_addr, ipv4.1),
         ipv6,
         mtu: INTERFACE_MTU,
-        // RFC 9484 не даёт способа сервера назвать сервер имён внутри
-        // тоннеля — доменные имена
-        // через это направление честно не разрешаются, а не уходят мимо
-        // тоннеля молча (см. `crate::ip`).
         dns: Vec::new(),
     })
 }
 
-/// Первый адрес нужной версии, который не является отказом (RFC 9484, §4.7.2:
-/// отказ на запрос — это всё-нулевой адрес с максимальной длиной префикса).
+/// Первый адрес версии `family`, не отказ (RFC 9484, §4.7.2: нулевой адрес с максимальным префиксом).
 fn pick(
     entries: &[capsule::AssignedAddress],
     family: fn(&IpAddr) -> bool,
@@ -203,7 +185,6 @@ mod tests {
 
         let task = tokio::spawn(async move { assign_interface(&mut client, &mut reader).await });
 
-        // Клиент обязан прислать ADDRESS_REQUEST раньше, чем сервер ответит.
         let mut sent = vec![0u8; 64];
         let read = server.read(&mut sent).await.expect("запрос пришёл");
         assert!(read > 0);
@@ -221,16 +202,11 @@ mod tests {
     async fn a_server_that_never_assigns_an_address_is_a_named_error() {
         let (mut client, server) = duplex(4096);
         let mut reader = CapsuleReader::new();
-        drop(server); // сервер закрыл соединение, так и не назначив адрес
+        drop(server);
 
         let err = assign_interface(&mut client, &mut reader)
             .await
             .expect_err("нет ADDRESS_ASSIGN");
-        // Обрыв виден по-разному в зависимости от того, успел ли уйти
-        // ADDRESS_REQUEST до того, как собеседник пропал: либо запись
-        // проваливается сама (`Io`, «broken pipe»), либо поток закрывается
-        // штатно на первом же чтении (`Disconnected`). Оба — обрыв связи, а
-        // не поломка формата, и оба стоит повторить.
         assert!(
             matches!(err, MasqueError::Disconnected(_) | MasqueError::Io(_)),
             "{err}"

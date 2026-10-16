@@ -1,38 +1,16 @@
-//! Заголовок запроса: сборка, шифрование, порядок на проводе.
+//! Заголовок запроса.
 //!
-//! ```text
-//!  открытый заголовок:
-//! +------+--------+-------+--------+--------+-----+-----+-----+---------+---------+-----+
-//! | верс.| IV тела|ключ т.|байт отв|настройки|шифр*|ноль | ком.|порт/тип/адрес|дополн.|FNV-1a|
-//! +------+--------+-------+--------+--------+-----+-----+-----+---------+---------+-----+
-//! |  1   |   16   |  16   |   1    |   1    |  1  |  1  |  1  |  сколько     | сколько| 4   |
-//! +------+--------+-------+--------+--------+-----+-----+-----+---------+---------+-----+
-//!   * = (длина дополнения << 4) | байт шифра
-//!
-//!  на проводе:
-//! +-------------+------------------+---------------+-------------------------+
-//! | опознаватель| длина заголовка  | нонс соединения| заголовок              |
-//! |  (16, AAD)  | AEAD (2+16=18)   |     (8)        | AEAD (N+16)            |
-//! +-------------+------------------+---------------+-------------------------+
-//! ```
-//!
-//! Оба AEAD-вызова — AES-128-GCM, ключ и нонс которых выводятся вложенным
-//! KDF из `cmdKey`, опознавателя и нонса соединения; дополнительные данные
-//! (AAD) у обоих — сам опознаватель. Раскладка целиком — из
-//! `proxy/vmess/aead/encrypt.go` (`SealVMessAEADHeader`) и
-//! `proxy/vmess/encoding/client.go` (`EncodeRequestHeader`), эталон
-//! `v2fly/v2ray-core`, `master`.
-//!
-//! # Две ловушки в записи адреса
-//!
-//! Те же, что у VLESS: порт стоит перед типом, а домен — это `2`, а не `3`.
-//! Записывает его тот же кодировщик, [`penguin_transport::addr::v2ray`], —
-//! раскладка адреса у VMess и VLESS общая.
+//! Открытый: `версия(1) | IV(16) | ключ(16) | байт ответа(1) | настройки(1) |
+//! (дополнение<<4)|шифр(1) | 0 | команда | порт/тип/адрес | дополнение | FNV-1a(4)`.
+//! На проводе: `опознаватель(16) | AEAD длины(18) | нонс соединения(8) | AEAD заголовка(N+16)`.
+//! Оба AEAD — AES-128-GCM, ключ и нонс из вложенного KDF, AAD — опознаватель
+//! (`proxy/vmess/aead/encrypt.go`, `proxy/vmess/encoding/client.go`, `v2fly/v2ray-core`).
+//! Адрес пишет общий [`penguin_transport::addr::v2ray`].
 
 use penguin_core::address::SocketAddress;
 use penguin_core::uuid::Uuid;
+use penguin_proto::random;
 use penguin_transport::addr::v2ray;
-use rand::{Rng, RngCore};
 
 use crate::crypto::checksum::fnv1a;
 use crate::crypto::kdf::{kdf, kdf16};
@@ -41,7 +19,7 @@ use crate::crypto::{aes_gcm, auth_id, id};
 use crate::error::{VmessError, VmessResult};
 use crate::frame::clock::now_unix;
 
-/// Версия заголовка. `proxy/vmess/encoding/encoding.go`: `Version = byte(1)`.
+/// Версия заголовка (`proxy/vmess/encoding/encoding.go`).
 pub const VERSION: u8 = 1;
 
 /// Открыть поток до адреса назначения.
@@ -54,7 +32,7 @@ const LABEL_NONCE: &[u8] = b"VMess Header AEAD Nonce";
 const LABEL_KEY_LENGTH: &[u8] = b"VMess Header AEAD Key_Length";
 const LABEL_NONCE_LENGTH: &[u8] = b"VMess Header AEAD Nonce_Length";
 
-/// Собирает заголовок запроса целиком, готовым лечь на провод.
+/// Заголовок запроса целиком, готовый лечь на провод.
 pub fn build(
     uuid: &Uuid,
     session: &Session,
@@ -66,8 +44,7 @@ pub fn build(
     let cmd_key = id::cmd_key(uuid);
     let auth_id = auth_id::create(&cmd_key, now_unix());
 
-    let mut connection_nonce = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut connection_nonce);
+    let connection_nonce: [u8; 8] = random::array();
 
     let len_key = kdf16(
         &cmd_key,
@@ -90,7 +67,7 @@ pub fn build(
     Ok(wire)
 }
 
-/// Нонс одного из двух AEAD-вызовов заголовка: первые 12 байт вывода KDF.
+/// Нонс AEAD заголовка: первые 12 байт KDF.
 fn header_nonce(cmd_key: &[u8; 16], label: &[u8], auth_id: &[u8; 16], nonce: &[u8; 8]) -> [u8; 12] {
     let full = kdf(cmd_key, &[label, &auth_id[..], &nonce[..]]);
     let mut out = [0u8; 12];
@@ -98,9 +75,8 @@ fn header_nonce(cmd_key: &[u8; 16], label: &[u8], auth_id: &[u8; 16], nonce: &[u
     out
 }
 
-/// Собирает открытый (ещё не зашифрованный) заголовок.
+/// Открытый заголовок.
 fn build_plain(session: &Session, command: u8, target: &SocketAddress) -> VmessResult<Vec<u8>> {
-    // С запасом на самый длинный адрес и на дополнение до пятнадцати байт.
     let mut out = Vec::with_capacity(1 + 16 + 16 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + 256 + 15 + 4);
     out.push(VERSION);
     out.extend_from_slice(&session.request_body_iv);
@@ -108,18 +84,17 @@ fn build_plain(session: &Session, command: u8, target: &SocketAddress) -> VmessR
     out.push(session.response_header);
     out.push(session.wire.option_byte());
 
-    // Длина дополнения — случайное число от нуля до пятнадцати: столько
-    // умещается в оставшиеся четыре бита байта шифра.
-    let padding_len: u8 = rand::thread_rng().gen_range(0..16);
+    // Длина дополнения 0..16 — четыре старших бита байта шифра.
+    let padding_len = random::range(0..16) as u8;
     out.push((padding_len << 4) | session.wire.security_byte());
-    out.push(0); // зарезервировано
+    out.push(0);
     out.push(command);
     v2ray::encode(target, &mut out)?;
 
     if padding_len > 0 {
         let before = out.len();
         out.resize(before + usize::from(padding_len), 0);
-        rand::thread_rng().fill_bytes(&mut out[before..]);
+        random::fill(&mut out[before..]);
     }
 
     let checksum = fnv1a(&out);
@@ -149,14 +124,11 @@ mod tests {
         )
         .expect("собирается");
 
-        // Опознаватель (16) + длина (18) + нонс (8) = 42 байта до заголовка.
         assert!(wire.len() > 42, "заголовка нет вовсе");
     }
 
     #[test]
     fn two_headers_for_the_same_target_do_not_repeat() {
-        // Ключи, нонс соединения и опознаватель — все случайны на каждый
-        // вызов; повторный заголовок означал бы сломанный генератор.
         let session_a = Session::new(Wire::Aes128Gcm);
         let session_b = Session::new(Wire::Aes128Gcm);
         let target = SocketAddress::domain("example.com", 443);
@@ -168,12 +140,8 @@ mod tests {
 
     #[test]
     fn the_udp_command_only_changes_the_command_byte() {
-        // Байты до опознавателя шифра детерминированы самой сессией — на них
-        // не влияют ни случайное дополнение, ни команда. Дальше расходится
-        // всё, что зависит от случайного дополнения, но сам байт команды
-        // стоит на известном месте и различается ровно как ожидается.
         const BEFORE_SECURITY_BYTE: usize = 1 + 16 + 16 + 1 + 1;
-        const COMMAND_INDEX: usize = BEFORE_SECURITY_BYTE + 2; // + security + ноль
+        const COMMAND_INDEX: usize = BEFORE_SECURITY_BYTE + 2;
 
         let session = Session::new(Wire::Aes128Gcm);
         let target = SocketAddress::domain("example.com", 443);

@@ -1,9 +1,4 @@
 //! Направление `CONNECT-IP`, надетое на [`PacketOutbound`].
-//!
-//! Один поток на весь профиль — в отличие от CONNECT-UDP, где на каждый
-//! адрес назначения открывается свой канал ([`crate::datagram`]).
-//! `CONNECT-IP` целиком реализован через капсулы по одному потоку — какой
-//! перенос его несёт, здесь не важно, см. [`crate::ip`].
 
 use std::sync::Arc;
 
@@ -28,19 +23,13 @@ use crate::capsule::{CAPSULE_TYPE_DATAGRAM, CapsuleReader, encode_datagram_capsu
 use crate::config::MasqueConfig;
 use crate::error::{MasqueError, MasqueResult};
 
-/// MTU тоннеля `CONNECT-IP`.
-///
-/// RFC 9484 не даёт способа сервера назвать MTU — документ вообще не
-/// определяет такое согласование. Значение
-/// не придумано: RFC 9484, §7.2 требует, чтобы звено, переносящее IPv6, было
-/// не меньше 1280 байт. Это floor из самого документа, а не измеренный путь
-/// — профиль, которому нужно больше, лечится отдельной работой.
+/// MTU тоннеля: floor для IPv6 из RFC 9484, §7.2 (сервер MTU не сообщает).
 pub(crate) const INTERFACE_MTU: u16 = 1280;
 
-/// Сколько пакетов из тоннеля можно накопить, пока `recv()` их не забирает.
+/// Длина очереди входящих пакетов.
 const QUEUE_LEN: usize = 512;
 
-/// Наибольшая длина одного куска, читаемого из сети за раз.
+/// Размер одного чтения из сети.
 const READ_CHUNK: usize = 4096;
 
 /// Направление `CONNECT-IP`.
@@ -62,12 +51,7 @@ impl std::fmt::Debug for MasqueIpOutbound {
 }
 
 impl MasqueIpOutbound {
-    /// Заводит направление поверх уже открытого потока капсул: делит его на
-    /// половины и запускает чтение.
-    ///
-    /// `reader` — то, что уже накоплено сверх согласования адреса (маршруты,
-    /// а то и первый IP-пакет, пришедшие в одном куске с `ADDRESS_ASSIGN`) —
-    /// его нельзя просто отбросить, начав читать сеть с нуля.
+    /// Заводит направление поверх потока капсул; `reader` хранит накопленное после согласования.
     fn new(
         id: OutboundId,
         io: Box<dyn ProxyStream>,
@@ -135,8 +119,6 @@ impl PacketOutbound for MasqueIpOutbound {
         match incoming.recv().await {
             Some(Ok(packet)) => Ok(packet),
             Some(Err(err)) => Err(err.into()),
-            // Отправитель — только фоновая задача чтения; пусто здесь
-            // означает, что направление уже закрыто.
             None => Err(ProtocolError::Disconnected(
                 "направление CONNECT-IP закрыто".to_owned(),
             )),
@@ -144,19 +126,13 @@ impl PacketOutbound for MasqueIpOutbound {
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        // Без этого задача чтения переживает канал и держит его половину
-        // потока открытой.
         self.reader.abort();
         Ok(())
     }
 }
 
-/// Читает капсулы из сети, раскладывая их по смыслу: IP-пакеты — в очередь
-/// [`PacketOutbound::recv`], остальное — в журнал.
-///
-/// Останавливается сама, когда поток заканчивается, рвётся или приносит
-/// капсулу не по формату — чинить её нечем, дальше в потоке байты сдвинуты
-/// неизвестно на сколько.
+/// Читает капсулы: IP-пакеты — в очередь [`PacketOutbound::recv`], остальное — в журнал.
+/// Останавливается при конце потока, обрыве или капсуле не по формату.
 async fn read_loop(
     mut io: ReadHalf<Box<dyn ProxyStream>>,
     mut reader: CapsuleReader,
@@ -180,7 +156,7 @@ async fn read_loop(
         }
 
         let read = match io.read(&mut chunk).await {
-            Ok(0) => return, // сервер закрыл поток штатно
+            Ok(0) => return,
             Ok(n) => n,
             Err(err) => {
                 let _ = tx.send(Err(MasqueError::Io(err))).await;
@@ -191,11 +167,8 @@ async fn read_loop(
     }
 }
 
-/// Разбирает и обрабатывает одну готовую капсулу.
-///
-/// `Ok(None)` — капсулы целиком ещё нет, нужно почитать сеть. `Ok(Some(None))`
-/// — капсула была служебной и уже обработана. `Ok(Some(Some(_)))` — это был
-/// IP-пакет.
+/// Обрабатывает одну капсулу: `Ok(None)` — нужно читать сеть, `Ok(Some(None))` —
+/// служебная, `Ok(Some(Some(_)))` — IP-пакет.
 fn dispatch_ready(reader: &mut CapsuleReader) -> MasqueResult<Option<Option<Bytes>>> {
     let Some((capsule_type, mut value)) = reader.next_capsule()? else {
         return Ok(None);
@@ -205,8 +178,6 @@ fn dispatch_ready(reader: &mut CapsuleReader) -> MasqueResult<Option<Option<Byte
         let context_id = varint::decode_prefix(&mut value)
             .ok_or_else(|| MasqueError::malformed("капсула DATAGRAM без context ID"))?;
         if context_id != CONTEXT_ID_IP {
-            // Контекст сжатия заголовков, которого этот клиент не
-            // регистрировал (RFC 9484, §5) — разбирать нечем.
             return Ok(Some(None));
         }
         return Ok(Some(Some(value)));
@@ -219,8 +190,6 @@ fn dispatch_ready(reader: &mut CapsuleReader) -> MasqueResult<Option<Option<Byte
     }
 
     if capsule_type == CAPSULE_TYPE_ADDRESS_ASSIGN {
-        // Переназначение адреса на лету не поддержано: интерфейс — снимок на
-        // момент подключения, как и у WireGuard.
         tracing::debug!(
             "сервер прислал повторный ADDRESS_ASSIGN — уже поднятый интерфейс не меняется"
         );
@@ -236,7 +205,6 @@ fn dispatch_ready(reader: &mut CapsuleReader) -> MasqueResult<Option<Option<Byte
         return Ok(Some(None));
     }
 
-    // Неизвестный тип — пропускаем молча (RFC 9297, §3.2).
     Ok(Some(None))
 }
 
@@ -342,9 +310,6 @@ mod tests {
         let outbound = outbound(Box::new(client));
         outbound.close().await.expect("закрылось");
 
-        // Абортнутая задача либо уже успела завершиться сама, либо это
-        // видно по `JoinError::is_cancelled` — в обоих случаях `await` не
-        // висит вечно и живой задачи после `close()` не остаётся.
         if let Err(join_err) = outbound.reader.await {
             assert!(join_err.is_cancelled());
         }

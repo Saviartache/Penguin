@@ -64,8 +64,6 @@ mod tests {
 
     #[test]
     fn family_follows_the_destination() {
-        // Версия берётся из адреса назначения, а не задаётся отдельно:
-        // рассогласование этих двух вещей нашло бы себе применение как ошибка.
         assert_eq!(
             target(Network::Tcp, "1.2.3.4:1").family(),
             Some(IpFamily::V4)

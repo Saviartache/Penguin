@@ -1,9 +1,7 @@
 //! Ошибки протокола.
 //!
-//! Различие между вариантами не косметическое: по нему `supervisor` решает,
-//! повторять ли попытку. Неверный пароль — [`NaiveError::AuthRejected`], и
-//! его повторять нельзя; обрыв связи — [`NaiveError::Disconnected`], и его
-//! нужно повторять всегда.
+//! По варианту `supervisor` решает, повторять ли: [`NaiveError::AuthRejected`]
+//! — нет, [`NaiveError::Disconnected`] — да.
 
 use penguin_proto::error::ProtocolError;
 use thiserror::Error;
@@ -23,8 +21,6 @@ pub enum NaiveError {
     Transport(String),
 
     /// Сервер отверг `CONNECT`: коды `401`/`407`.
-    ///
-    /// В HTTP/2 и HTTP/3 у ответа нет строки причины — только код.
     #[error("сервер отклонил пароль (код {status})")]
     AuthRejected {
         /// Код ответа.
@@ -48,11 +44,7 @@ pub enum NaiveError {
     #[error("соединение с сервером потеряно: {0}")]
     Disconnected(String),
 
-    /// Ошибка общего транспорта: TLS, срок рукопожатия, запись адреса.
-    ///
-    /// Отдельным вариантом, а не разобранной на части: классификацию
-    /// «повторять / не повторять» транспорт уже сделал, и повторять её здесь
-    /// значит однажды разойтись с ней.
+    /// Ошибка общего транспорта; классификацию повтора он уже сделал.
     #[error(transparent)]
     TransportCommon(#[from] penguin_transport::TransportError),
 
@@ -78,16 +70,11 @@ impl NaiveError {
     }
 }
 
-// Перевод в общий язык, на котором говорит остальной клиент. Здесь и
-// закрепляется обещание про повторные попытки.
 impl From<NaiveError> for ProtocolError {
     fn from(err: NaiveError) -> Self {
         match err {
             NaiveError::Config(message) => Self::InvalidConfig(message),
             NaiveError::AuthRejected { .. } => Self::AuthRejected,
-            // Не по протоколу — это ошибка настроек (не тот адрес, не тот
-            // сервер), а не сети: повторять бессмысленно, пока в поле стоит
-            // не то.
             err @ NaiveError::Malformed(_) => Self::InvalidConfig(err.to_string()),
             NaiveError::Transport(message) => Self::Connect(message),
             err @ NaiveError::Refused { .. } => Self::Unreachable(err.to_string()),

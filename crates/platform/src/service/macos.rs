@@ -1,4 +1,4 @@
-//! macOS: registration, loading and execution are separate launchd states.
+//! macOS: регистрация, загрузка и исполнение — отдельные состояния launchd.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,20 +11,12 @@ use launchd::{HELPER_DIR, HELPER_PATH, PLIST, PLIST_PATH, TARGET};
 
 const LAUNCHCTL: &str = "/bin/launchctl";
 
-/// How long to keep asking launchd to load the job.
-///
-/// While the previous job of the same name is being torn down, `bootstrap`
-/// answers with a refusal and nothing but waiting helps. Fractions of a
-/// second in practice; the shipped clients wait the same way.
+/// Пока снимается прежнее задание с тем же именем, `bootstrap` отказывает — помогает только ожидание.
 const BOOTSTRAP_ATTEMPTS: u32 = 20;
 const BOOTSTRAP_PAUSE: Duration = Duration::from_millis(500);
 
-/// Stages the program and registers the job without launching it.
-///
-/// Repeating it is how a wrong or outdated registration is repaired: the job
-/// definition and the staged copy are both overwritten in place. Nothing is
-/// removed first, so a registration that cannot be written leaves the machine
-/// with the service it already had.
+/// Кладёт копию программы и регистрирует задание, не запуская; повторный вызов перезаписывает
+/// описание и копию на месте, ничего не снимая заранее.
 pub fn install(executable: &Path) -> PlatformResult<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -35,7 +27,7 @@ pub fn install(executable: &Path) -> PlatformResult<()> {
         .map_err(|err| at(plist, &err))
 }
 
-/// Stops the job before removing its definition. Real stop failures are fatal.
+/// Останавливает задание и удаляет описание; настоящие ошибки остановки фатальны.
 pub fn uninstall() -> PlatformResult<()> {
     stop()?;
     if Path::new(PLIST_PATH).try_exists()? {
@@ -48,13 +40,12 @@ pub fn uninstall() -> PlatformResult<()> {
     }
 }
 
-/// Enables and starts the job without killing an already running instance.
+/// Включает и запускает задание, не трогая работающий экземпляр.
 pub fn start() -> PlatformResult<()> {
     if !Path::new(PLIST_PATH).try_exists()? {
         return Err(PlatformError::Service("service is not installed".into()));
     }
-    // A ban outlives both the job and a reboot: without lifting it first the
-    // bootstrap succeeds and the job still never runs.
+    // Запрет переживает задание и перезагрузку: без `enable` bootstrap проходит, а задание не бежит.
     run(&["enable", TARGET])?;
     if report()?.is_none() {
         bootstrap()?;
@@ -62,17 +53,17 @@ pub fn start() -> PlatformResult<()> {
     run(&["kickstart", TARGET])
 }
 
-/// Unloads the job with launchd's graceful termination, ignoring only absence.
+/// Выгружает задание штатно; игнорируется только отсутствие.
 pub fn stop() -> PlatformResult<()> {
     match command::run(LAUNCHCTL, &["bootout", TARGET]) {
         Ok(_) => Ok(()),
-        // A missing manager/domain must not be mistaken for a missing service.
+        // Отсутствие домена — не отсутствие службы.
         Err(err) if launchd::absent(err.code()) => run(&["print", "system"]),
         Err(err) => Err(err.into_error(PlatformError::Service, "stopping service")),
     }
 }
 
-/// Queries the job state without hiding manager/permission failures.
+/// Состояние задания; отказ менеджера или прав не скрывается.
 pub fn status() -> PlatformResult<ServiceStatus> {
     if !Path::new(PLIST_PATH).try_exists()? {
         return Ok(ServiceStatus::NotInstalled);
@@ -83,7 +74,7 @@ pub fn status() -> PlatformResult<ServiceStatus> {
     }
 }
 
-/// Returns the executable only when the persisted job has the service role.
+/// Зарегистрированный файл, если задание имеет роль службы.
 pub fn registered_executable() -> PlatformResult<Option<PathBuf>> {
     match std::fs::read_to_string(PLIST_PATH) {
         Ok(text) => Ok(launchd::executable_from(&text)),
@@ -92,13 +83,13 @@ pub fn registered_executable() -> PlatformResult<Option<PathBuf>> {
     }
 }
 
-/// Whether the registered job is the very build asking the question.
+/// Та ли сборка зарегистрирована, что задаёт вопрос.
 pub(super) fn runs_current_build() -> bool {
     let registered = registered_executable().ok().flatten();
     stage::runs_current_build(registered.as_deref(), HELPER_PATH)
 }
 
-/// Loads the job, sitting out launchd's refusals.
+/// Загружает задание, пережидая отказы launchd.
 fn bootstrap() -> PlatformResult<()> {
     let mut attempt = 1;
     loop {

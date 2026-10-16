@@ -1,34 +1,14 @@
-//! Заголовок ответа: снять длину, снять сам заголовок, проверить байт ответа.
+//! Заголовок ответа: `AEAD длины (18) | AEAD заголовка (N+16)`.
 //!
-//! ```text
-//!  на проводе:
-//! +----------------------+---------------------------+
-//! | длина заголовка (18) | заголовок (N + 16)         |
-//! +----------------------+---------------------------+
-//!
-//!  расшифрованный заголовок (N байт):
-//! +----------+----------+---------+----------------------------+
-//! | байт отв.| настройки| команда | данные команды, если байт≠0|
-//! +----------+----------+---------+----------------------------+
-//! |    1     |    1     |    1    | 1 (длина) + сколько сказано|
-//! +----------+----------+---------+----------------------------+
-//! ```
-//!
-//! В отличие от заголовка запроса, ключи здесь выводятся не из `cmdKey`, а
-//! прямо из ключа и `IV` тела ответа, одной меткой без опознавателя и нонса
-//! соединения, и дополнительных данных (AAD) у AEAD нет вовсе —
-//! `DecodeResponseHeader`, `proxy/vmess/encoding/client.go`, эталон
-//! `v2fly/v2ray-core`, `master`.
-//!
-//! Команду в заголовке (смена порта на лету, `CommandSwitchAccount`) этот
-//! клиент не умеет и не обязан: данные пропускаются, чтобы не потерять
-//! границу до тела, а само содержимое отбрасывается.
+//! Открытый: `байт ответа | настройки | команда | данные команды`. Ключи выводятся из ключа и
+//! `IV` тела ответа, без AAD (`DecodeResponseHeader`, `proxy/vmess/encoding/client.go`,
+//! `v2fly/v2ray-core`). Команды (`CommandSwitchAccount`) не исполняются, данные отбрасываются.
 
 use crate::crypto::aes_gcm;
 use crate::crypto::kdf::{kdf, kdf16};
 use crate::error::{VmessError, VmessResult};
 
-/// Сколько байт занимает зашифрованный блок длины: два байта плюс метка.
+/// Блок длины: два байта плюс метка.
 pub const LENGTH_BLOCK_LEN: usize = 2 + 16;
 
 const LABEL_LEN_KEY: &[u8] = b"AEAD Resp Header Len Key";
@@ -36,12 +16,7 @@ const LABEL_LEN_IV: &[u8] = b"AEAD Resp Header Len IV";
 const LABEL_KEY: &[u8] = b"AEAD Resp Header Key";
 const LABEL_IV: &[u8] = b"AEAD Resp Header IV";
 
-/// Расшифровывает блок длины заголовка ответа.
-///
-/// `response_body_key`/`response_body_iv` — [`crate::crypto::session::Session::response_body_key`]
-/// и `_iv`, не то, что уходит на провод в заголовке запроса. Возвращает
-/// длину расшифрованного заголовка — без метки подлинности, которая идёт
-/// следом отдельным блоком в [`open_payload`].
+/// Расшифровывает блок длины; возвращает длину заголовка без метки.
 pub fn open_length(
     response_body_key: &[u8; 16],
     response_body_iv: &[u8; 16],
@@ -57,12 +32,7 @@ pub fn open_length(
     Ok(u16::from_be_bytes(raw))
 }
 
-/// Расшифровывает сам заголовок ответа и проверяет байт ответа.
-///
-/// `block` — ровно `length + 16` байт, как объявила [`open_length`].
-/// Возвращает [`VmessError::AuthRejected`], если байт не совпал: заголовок
-/// расшифровался, ключи верны, но сервер ответил не тем, о чём
-/// договаривались.
+/// Расшифровывает заголовок (`length + 16` байт); несовпавший байт ответа — [`VmessError::AuthRejected`].
 pub fn open_payload<'a>(
     response_body_key: &[u8; 16],
     response_body_iv: &[u8; 16],
@@ -95,7 +65,7 @@ mod tests {
     use crate::crypto::session::Session;
     use crate::frame::request;
 
-    /// Собирает ровно то, что сервер отправил бы в ответ.
+    /// Ответ сервера.
     fn seal_response(session: &Session, plain: &[u8]) -> Vec<u8> {
         let len_key = kdf16(&session.response_body_key, &[LABEL_LEN_KEY]);
         let len_nonce = nonce12(&session.response_body_iv, LABEL_LEN_IV);
@@ -172,8 +142,6 @@ mod tests {
 
     #[test]
     fn a_request_session_round_trips_with_its_own_response() {
-        // Ключи ответа выводятся из ключей запроса ровно той же сессией,
-        // что строит заголовок запроса, — это и проверяем.
         let session = Session::new(Wire::Aes128Gcm);
         let _ = request::build(
             &"b831381d-6324-4d53-ad4f-8cda48b30811"

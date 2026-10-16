@@ -1,14 +1,5 @@
-//! Направление через сервер TUIC.
-//!
-//! В отличие от прокси-протоколов, соединение здесь **постоянное**: оно
-//! поднимается один раз при сборке направления и живёт, пока живёт профиль.
-//! Рукопожатие QUIC и проверка подлинности платятся один раз на всё.
-//!
-//! Отсюда и поведение при обрыве: заново соединение здесь не поднимается.
-//! Оборвалось — `connect_tcp` отвечает `Disconnected`, а поднимать профиль
-//! заново — дело `supervisor`, который для этого и существует. Своя попытка
-//! переподключиться здесь означала бы вторую лестницу повторов рядом с той,
-//! что уже есть, и две разные политики ожидания.
+//! Направление через сервер TUIC: соединение постоянное, при обрыве
+//! `connect_tcp` отвечает `Disconnected`, а переподнимает профиль `supervisor`.
 
 use std::sync::Arc;
 
@@ -34,7 +25,6 @@ use crate::transport;
 #[derive(Debug)]
 pub struct TuicOutbound {
     id: OutboundId,
-    /// Пускать ли UDP.
     udp: bool,
     session: Arc<Session>,
 }
@@ -49,8 +39,6 @@ impl TuicOutbound {
         config.validate()?;
         let (host, port) = config.endpoint()?;
 
-        // Имя для TLS берётся из настроек, а если его там нет — из адреса
-        // сервера. Тот же порядок, что у остальных протоколов.
         let server_name = match config.tls.sni.as_deref().map(str::trim) {
             Some(sni) if !sni.is_empty() => sni.to_owned(),
             _ => host.to_string(),
@@ -60,9 +48,6 @@ impl TuicOutbound {
             .await
             .map_err(|e| TuicError::Disconnected(e.to_string()))?;
 
-        // Адреса перебираются по порядку: у имени их бывает несколько, и
-        // первый может не отвечать — так бывает у сервера с записью IPv6 в
-        // сети без IPv6.
         let mut last = None;
         for address in addresses {
             match transport::connect(&config, &*dialer, address, &server_name).await {
@@ -97,11 +82,8 @@ impl Outbound for TuicOutbound {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             udp: self.udp,
-            // Соединение одно на профиль: открытие потока внутри него дёшево,
-            // и маршрутизатор вправе на это рассчитывать.
             multiplex: true,
             port_hopping: false,
-            // Имя уезжает серверу доменом и разрешается на той стороне.
             remote_dns: true,
         }
     }

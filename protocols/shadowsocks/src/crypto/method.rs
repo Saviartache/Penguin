@@ -1,32 +1,15 @@
-//! Метод шифрования: какой шифр и какой длины у него ключ.
-//!
-//! Три метода, и все три — AEAD, то есть данные не только шифруются, но и
-//! заверяются: изменить их по дороге незаметно нельзя.
-//!
-//! Потоковых шифров прежних версий (`aes-256-cfb`, `rc4-md5`) здесь нет
-//! намеренно. Они не заверяют данные вовсе: тот, кто видит трафик, может
-//! править его как угодно, и ни клиент, ни сервер этого не заметят. Метод,
-//! который выглядит как «просто ещё один в списке», а на деле снимает защиту
-//! целиком, в списке стоять не должен.
+//! Метод шифрования: шифр и длина ключа. Только AEAD; потоковых шифров нет намеренно:
+//! они не заверяют данные.
 
 use penguin_transport::aead::Algorithm;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{ShadowsocksError, ShadowsocksResult};
 
-/// Длина метки подлинности у всех трёх методов.
-///
-/// Своя запись, а не своё число: считает метку общий слой, и разойтись им
-/// нельзя.
+/// Длина метки подлинности (из общего слоя).
 pub const TAG_LEN: usize = penguin_transport::aead::TAG_LEN;
 
-/// Метод шифрования.
-///
-/// `serde` здесь написан вручную поверх [`Method::parse`], а не выведен.
-/// Производный принял бы ровно одно написание на вариант, а в чужих
-/// настройках их два: `chacha20-poly1305` и `chacha20-ietf-poly1305` — это
-/// один и тот же метод. И текст ошибки был бы про «неизвестный вариант
-/// перечисления», а не про неизвестный метод шифрования.
+/// Метод шифрования; `serde` поверх [`Method::parse`] принимает оба написания ChaCha.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     /// AES-128-GCM. Быстрее всех там, где у процессора есть AES-NI.
@@ -57,7 +40,6 @@ impl Method {
         match name.trim().to_ascii_lowercase().as_str() {
             "aes-128-gcm" => Ok(Self::Aes128Gcm),
             "aes-256-gcm" => Ok(Self::Aes256Gcm),
-            // Второе имя того же метода: так его зовут старые конфигурации.
             "chacha20-ietf-poly1305" | "chacha20-poly1305" => Ok(Self::Chacha20Poly1305),
             other => Err(ShadowsocksError::UnknownMethod(other.to_owned())),
         }
@@ -80,10 +62,7 @@ impl Method {
         }
     }
 
-    /// Длина соли.
-    ///
-    /// Совпадает с длиной ключа — так задано протоколом, а не выведено из
-    /// удобства.
+    /// Длина соли; равна длине ключа по протоколу.
     pub fn salt_len(self) -> usize {
         self.key_len()
     }
@@ -115,7 +94,6 @@ mod tests {
 
     #[test]
     fn the_older_spelling_is_understood() {
-        // Так метод зовут старые конфигурации; это тот же самый метод.
         assert_eq!(
             Method::parse("chacha20-poly1305").expect("разбирается"),
             Method::Chacha20Poly1305
@@ -132,16 +110,12 @@ mod tests {
 
     #[test]
     fn an_unknown_method_names_itself_in_the_error() {
-        // «Неверные настройки» без имени метода не отвечают на вопрос, что
-        // именно исправить.
         let err = Method::parse("rc4-md5").expect_err("такого метода нет");
         assert!(err.to_string().contains("rc4-md5"), "{err}");
     }
 
     #[test]
     fn a_stream_cipher_is_not_silently_accepted() {
-        // Потоковые шифры не заверяют данные: правку по дороге не заметит ни
-        // клиент, ни сервер. Принять их молча значит снять защиту целиком.
         for name in ["aes-256-cfb", "rc4-md5", "chacha20"] {
             assert!(Method::parse(name).is_err(), "{name}");
         }
@@ -149,7 +123,6 @@ mod tests {
 
     #[test]
     fn the_salt_is_as_long_as_the_key() {
-        // Так задано протоколом: соль короче ключа сервер не примет.
         for method in [
             Method::Aes128Gcm,
             Method::Aes256Gcm,
@@ -162,8 +135,6 @@ mod tests {
 
     #[test]
     fn the_key_length_matches_the_shared_table() {
-        // Разойтись им нельзя: ключ выводит этот крейт, а собирает общий
-        // слой, и лишний байт означал бы «ключ не той длины» на ровном месте.
         for method in [
             Method::Aes128Gcm,
             Method::Aes256Gcm,

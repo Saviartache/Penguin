@@ -7,10 +7,7 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
-/// Поля формы в том порядке, в каком они показываются.
-///
-/// Управления перегрузкой здесь нет, хотя в ссылках оно встречается: у
-/// эталона в коде все значения сходятся к BBR, и другого никто не включает.
+/// Управления перегрузкой нет: в коде эталона все значения сходятся к BBR.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -21,15 +18,13 @@ static FIELDS: &[FieldSpec] = &[
         .check(check::uuid),
     FieldSpec::secret("password", &["password"], |s| s.password).required(|s| s.need_password),
     FieldSpec::text("sni", &["tls", "sni"], |s| s.sni).example(|s| s.sni_example),
-    // Не то же, что «не проверять»: сервер по-прежнему обязан предъявить
-    // ровно ту цепочку, что здесь названа.
+    // Не «не проверять»: сервер обязан предъявить именно эту цепочку.
     FieldSpec::text("pin_chain", &["tls", "pin_chain_sha256"], |s| {
         s.chain_fingerprint
     })
     .example(|s| s.chain_fingerprint_example),
     FieldSpec::flag("insecure", &["tls", "insecure"], |s| s.insecure),
-    // Датаграммы идут внутри того же соединения QUIC — значит, и запросы DNS
-    // защищены.
+    // Датаграммы идут внутри того же соединения QUIC, DNS защищён.
     FieldSpec::flag("udp", &["udp"], |s| s.proxy_udp).on(),
 ];
 
@@ -43,32 +38,15 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     note: None,
 };
 
-/// Как ссылка ложится в поля.
-///
-/// ```text
-///  juicity://uuid:пароль@хост:порт?sni=…&pinned_certchain_sha256=…#имя
-/// ```
-///
-/// Двоеточие в userinfo — **разделитель**: слева UUID, справа пароль. Этим
-/// ссылка похожа на `tuic://` и не похожа на `trojan://`, где двоеточие
-/// принадлежит паролю целиком.
+/// Как ссылка ложится в поля:
+/// `juicity://uuid:пароль@хост:порт?sni=…&pinned_certchain_sha256=…#имя`.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
-    let userinfo = link.userinfo();
-    let Some((uuid, password)) = userinfo.split_once(':') else {
-        // Без пароля профиль не соберётся: из него выводится отпечаток.
-        return Err(crate::i18n::s().link_no_password.to_owned());
-    };
-    if uuid.is_empty() {
-        return Err(crate::i18n::s().link_no_uuid.to_owned());
-    }
-    if password.is_empty() {
-        return Err(crate::i18n::s().link_no_password.to_owned());
-    }
+    let (uuid, password) = link.uuid_password()?;
 
     let mut values = vec![
         ("server", link.server(DEFAULT_PORT)),
-        ("uuid", uuid.to_owned()),
-        ("password", password.to_owned()),
+        ("uuid", uuid),
+        ("password", password),
     ];
 
     if let Some(sni) = link.query.get("sni") {
@@ -77,8 +55,7 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     if let Some(pin) = link.query.get("pinned_certchain_sha256") {
         values.push(("pin_chain", pin));
     }
-    // В ссылках эталона это поле пишут и со значением `0`; тогда проверка
-    // остаётся на месте, и ставить флаг нельзя.
+    // Эталон пишет и `allow_insecure=0`: проверка остаётся.
     if link.query.flag("allow_insecure") || link.query.flag("allowInsecure") {
         values.push(("insecure", "1".to_owned()));
     }
@@ -90,19 +67,12 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
 mod tests {
     use super::*;
     use crate::forms::link;
+    use crate::forms::protocol::testing::{self, Values, value};
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 
-    fn parse(raw: &str) -> Vec<(&'static str, String)> {
-        let link = link::split(raw).expect("ссылка разбирается");
-        from_link(&link).expect("поля заполняются")
-    }
-
-    fn value<'a>(values: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
-        values
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, value)| value.as_str())
+    fn parse(raw: &str) -> Values {
+        testing::parse(from_link, raw)
     }
 
     #[test]
@@ -115,8 +85,6 @@ mod tests {
 
     #[test]
     fn the_colon_splits_the_uuid_from_the_password() {
-        // Как у TUIC: первое двоеточие отделяет ровно UUID, остальное —
-        // пароль целиком.
         let values = parse(&format!("juicity://{UUID}:раз:два@example.com:443"));
         assert_eq!(value(&values, "uuid"), Some(UUID));
         assert_eq!(value(&values, "password"), Some("раз:два"));
@@ -148,8 +116,6 @@ mod tests {
 
     #[test]
     fn a_check_explicitly_left_on_is_not_turned_off() {
-        // В ссылках эталона это поле пишут и со значением `0`. Принять его за
-        // «выключить» значило бы снять проверку у того, кто её оставил.
         let values = parse(&format!(
             "juicity://{UUID}:secret@example.com:443?allow_insecure=0"
         ));
@@ -163,8 +129,6 @@ mod tests {
 
     #[test]
     fn the_congestion_control_from_the_link_is_ignored() {
-        // Поле в ссылках эталона есть, но в его коде все значения сходятся к
-        // BBR. Класть его некуда, и молча заводить своё поле не следует.
         let values = parse(&format!(
             "juicity://{UUID}:secret@example.com:443?congestion_control=cubic"
         ));

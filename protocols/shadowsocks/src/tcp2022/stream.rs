@@ -7,20 +7,10 @@
 //!       один раз в начале             отдельного поля длины перед ним нет
 //! ```
 //!
-//! Отдельный тип, а не [`penguin_transport::aead::ChunkStream`]: у 2022 два
-//! настоящих различия с обычным AEAD, а не одно. Вывод подключа — уже дело
-//! [`crate::kdf2022`], это `ChunkStream` и так принимает через `Keying`. Но
-//! кадр здесь **начинается иначе** — двумя кусками фиксированного и
-//! переменного заголовка вместо одной пары «длина, данные», — и потолок
-//! куска другой: 0xFFFF, а не 0x3FFF, потому что 2022 не отдаёт под служебные
-//! биты старшие два бита длины (сверено в `shadowsocks-rust`:
-//! `relay/tcprelay/aead_2022.rs::MAX_PACKET_SIZE`).
-//!
-//! Заголовок запроса отправляет [`crate::outbound`] — до того, как этот тип
-//! вообще появляется, точно как это устроено у обычного AEAD
-//! ([`crate::stream`]). Здесь начинается уже установившийся обмен: шифр
-//! отправки передаётся с уже сдвинутым на два шага счётчиком, а шифр приёма
-//! появляется по мере того, как приходит соль и заголовок ответа.
+//! Не [`penguin_transport::aead::ChunkStream`]: кадр начинается двумя кусками заголовка,
+//! а потолок куска 0xFFFF, не 0x3FFF (`shadowsocks-rust`: `aead_2022.rs::MAX_PACKET_SIZE`).
+//! Заголовок запроса уходит из [`crate::outbound`] до создания потока; шифр отправки
+//! приходит со счётчиком, сдвинутым на два шага.
 
 use std::collections::VecDeque;
 use std::io;
@@ -293,8 +283,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Ss2022Stream<S> {
         }
 
         let take = buf.len().min(MAX_CHUNK);
-        let sealed = seal_chunk(&mut this.send, &buf[..take]).map_err(as_io)?;
-        this.out.extend_from_slice(&sealed);
+        seal_chunk(&mut this.send, &buf[..take], &mut this.out).map_err(as_io)?;
 
         let _ = this.poll_drain(cx);
         Poll::Ready(Ok(take))
@@ -317,17 +306,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Ss2022Stream<S> {
     }
 }
 
-/// Шифрует один кусок обычных данных: длину отдельным сообщением, данные —
-/// следующим. Не [`penguin_transport::aead::seal_chunk`]: у него предел
-/// 0x3FFF, у 2022 — 0xFFFF (см. документ модуля).
-fn seal_chunk(cipher: &mut Cipher, plain: &[u8]) -> ShadowsocksResult<Vec<u8>> {
+/// Шифрует кусок (длина и данные отдельными сообщениями) и дописывает в `out`.
+/// Не `penguin_transport::aead::seal_chunk`: у него предел 0x3FFF, у 2022 — 0xFFFF.
+fn seal_chunk(cipher: &mut Cipher, plain: &[u8], out: &mut BytesMut) -> ShadowsocksResult<()> {
     let length = u16::try_from(plain.len()).map_err(|_| {
         ShadowsocksError::malformed(format!("кусок 2022 в {} байт длиннее предела", plain.len()))
     })?;
 
-    let mut out = cipher.seal(&length.to_be_bytes())?;
-    out.extend_from_slice(&cipher.seal(plain)?);
-    Ok(out)
+    out.reserve(sealed_len(2) + sealed_len(plain.len()));
+    cipher.seal_into(&length.to_be_bytes(), out)?;
+    cipher.seal_into(plain, out)?;
+    Ok(())
 }
 
 /// Ошибка в языке, на котором говорят [`AsyncRead`] и [`AsyncWrite`].
@@ -395,9 +384,11 @@ mod tests {
         out.extend_from_slice(&cipher.seal(&plain).expect("шифруется"));
         out.extend_from_slice(&cipher.seal(first).expect("шифруется"));
 
+        let mut chunks = BytesMut::new();
         for piece in pieces.iter().skip(1) {
-            out.extend_from_slice(&seal_chunk(&mut cipher, piece).expect("шифруется"));
+            seal_chunk(&mut cipher, piece, &mut chunks).expect("шифруется");
         }
+        out.extend_from_slice(&chunks);
         out
     }
 

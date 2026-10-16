@@ -1,40 +1,13 @@
-//! Кадр тела: длина (может быть замаскирована), кусок, может быть с меткой,
-//! может быть с дополнением.
+//! Кадр тела: `[длина, 2 байта ⊕ маска] [кусок + метка AEAD] [дополнение]`.
 //!
-//! ```text
-//! ──► [длина, 2 байта, может ⊕ маска] [кусок + метка AEAD, если есть] [дополнение, если есть] ...
-//! ```
-//!
-//! # Маскировка длины (`0x04`)
-//!
-//! Длина — не сама по себе, а результат `длина ⊕ следующее слово потока
-//! Shake128`, засеянного целиком шестнадцатибайтовым `IV` тела. Это отдельный
-//! кеystream от AEAD: даже у `security = "none"`, где кусок не шифруется и не
-//! заверяется вовсе, длина всё равно маскируется — `RequestOptionChunkMasking`
-//! стоит и там (`proxy/vmess/outbound/outbound.go`, эталон
-//! `v2fly/v2ray-core`, `master`).
-//!
-//! # Нонс куска (только у AES-128-GCM и ChaCha20-Poly1305)
-//!
-//! `counter (2 байта, big-endian) || IV[2..12]` — двенадцать байт, где
-//! меняется только счётчик, начинающийся с нуля и растущий на каждый кусок.
-//! Байты `IV[12..16]` в нонсе не участвуют вовсе (`GenerateChunkNonce`,
-//! `proxy/vmess/encoding/client.go`). У `none` и `zero` нонса нет: `none`
-//! шифра не завершил, `zero` — не кадрован вовсе (см. [`crate::crypto::security`]).
-//!
-//! # Дополнение (`0x08`)
-//!
-//! Ещё одно слово того же потока Shake128, взятое **до** маскировки длины —
-//! `NextPaddingLen() % 64` случайных байт, дописанных за меткой открытым
-//! текстом. Только у AES-128-GCM и ChaCha20-Poly1305: `none` и `zero` его не
-//! получают (см. [`crate::crypto::security::Wire::option_byte`]).
-//!
-//! # Терминатор
-//!
-//! Кусок с пустыми данными (длина кадра равна ровно метке плюс дополнение)
-//! значит «дальше ничего не будет» — явный сигнал конца тела, а не совпадение
-//! длины. Проверяется до попытки расшифровать, а не после.
+//! Маска длины (`0x04`) и длина дополнения (`0x08`, `% 64`) — слова одного потока
+//! Shake128, засеянного `IV` тела; padding берётся до маски. Маска есть и у `none`.
+//! Нонс куска (AES-GCM, ChaCha): `counter(2, BE) || IV[2..12]`, счётчик с нуля на кусок
+//! (`GenerateChunkNonce`, `proxy/vmess/encoding/client.go`, `v2fly/v2ray-core`).
+//! Кусок без данных (длина кадра = метка + дополнение) — терминатор, проверяется до расшифровки.
 
+use bytes::{BufMut, BytesMut};
+use penguin_proto::random;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey};
 use sha3::Shake128;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -42,27 +15,16 @@ use sha3::digest::{ExtendableOutput, Update, XofReader};
 use crate::crypto::security::Wire;
 use crate::error::{VmessError, VmessResult};
 
-/// Наш собственный предел на кусок, который мы сами формируем при записи.
-///
-/// Не протокольная константа: длина кадра пишется двумя байтами, и потолок
-/// у неё — `0xFFFF` минус метка (16) и наибольшее дополнение (63). Выбран
-/// впритык к этому потолку, а не к удобному «покруглее», по одной причине:
-/// у VMess одна отправка датаграммы ([`crate::datagram::VmessDatagram`],
-/// `ProxyDatagram::send_to`) обязана
-/// уйти ровно одним куском ([`BodyCipher::seal_chunk`]) — кусок сервер
-/// пересылает как отдельный пакет UDP, и разрезать одну датаграмму на два
-/// куска значит доставить два пакета там, где отправили один. Меньший
-/// предел был бы неправ для датаграммы длиннее его самого; на TCP он же
-/// просто определяет, как крупно резать поток, — здесь годится любой.
+/// Предел куска при записи: `0xFFFF` минус метка (16) и наибольшее дополнение (63).
+/// Датаграмма обязана уйти одним куском, поэтому предел впритык.
 pub const MAX_PLAINTEXT: usize = 0xFFFF - 16 - 63;
 
-/// Сколько байт кадра ждать после поля длины, и сколько из них — кусок.
+/// Сколько байт кадра ждать после поля длины.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkLength {
     /// Всего байт после поля длины: кусок, метка, дополнение.
     pub on_wire: usize,
-    /// Из них — кусок с меткой, без дополнения. Ровно столько ждёт
-    /// [`BodyCipher::open_chunk`].
+    /// Из них кусок с меткой, без дополнения; столько ждёт [`BodyCipher::open_chunk`].
     pub ciphertext: usize,
 }
 
@@ -74,7 +36,7 @@ pub struct BodyCipher {
     tag_len: usize,
 }
 
-/// AEAD-часть шифра — только у AES-128-GCM и ChaCha20-Poly1305.
+/// AEAD-часть: только у AES-128-GCM и ChaCha20-Poly1305.
 struct Aead {
     key: LessSafeKey,
     iv_tail: [u8; 10],
@@ -82,19 +44,13 @@ struct Aead {
 }
 
 impl BodyCipher {
-    /// Строит шифр по уже приведённому шифру и ключу/`IV` тела этого
-    /// направления (`request_body_*` на запись, `response_body_*` на чтение).
-    ///
-    /// `wire == Zero` сюда не доходит: у него нет ни кадра, ни этого типа —
-    /// см. [`crate::stream`].
+    /// Шифр по ключу и `IV` тела этого направления; `Wire::Zero` сюда не доходит.
     pub fn new(wire: Wire, body_key: &[u8; 16], body_iv: &[u8; 16]) -> Self {
         let mut mask = Shake128::default();
         mask.update(body_iv);
 
         let aead = wire.ring_algorithm().map(|algorithm| {
             let key_bytes = wire.effective_key(body_key);
-            // Длина ключа задана самим `Wire` и совпадает с алгоритмом по
-            // построению — `ring` не может отказать здесь.
             let unbound = UnboundKey::new(algorithm, &key_bytes)
                 .unwrap_or_else(|_| unreachable!("длина ключа задана самим `Wire`"));
             let mut iv_tail = [0u8; 10];
@@ -114,44 +70,41 @@ impl BodyCipher {
         }
     }
 
-    /// Шифрует один кусок целиком: маскированная длина, кусок, метка,
-    /// дополнение. Пустой `plain` — терминатор конца тела.
-    pub fn seal_chunk(&mut self, plain: &[u8]) -> VmessResult<Vec<u8>> {
+    /// Дописывает в `out` кадр целиком; пустой `plain` — терминатор. При ошибке `out` не меняется.
+    pub fn seal_chunk(&mut self, plain: &[u8], out: &mut BytesMut) -> VmessResult<()> {
         let padding_len = self.next_padding_len();
+        let sealed_len = plain.len() + self.tag_len;
+        let declared = u16::try_from(sealed_len + padding_len)
+            .map_err(|_| VmessError::Oversized(sealed_len + padding_len))?;
+        let masked = declared ^ self.mask.next_u16();
 
-        let sealed = match &mut self.aead {
-            Some(aead) => {
-                let mut buffer = plain.to_vec();
-                let nonce = aead.next_nonce();
-                aead.key
-                    .seal_in_place_append_tag(nonce, Aad::empty(), &mut buffer)
-                    .map_err(|_| VmessError::malformed("кусок тела не зашифровался"))?;
-                buffer
+        let frame_start = out.len();
+        out.reserve(2 + sealed_len + padding_len);
+        out.put_u16(masked);
+        let body_start = out.len();
+        out.extend_from_slice(plain);
+        if let Some(aead) = &mut self.aead {
+            let nonce = aead.next_nonce();
+            match aead
+                .key
+                .seal_in_place_separate_tag(nonce, Aad::empty(), &mut out[body_start..])
+            {
+                Ok(tag) => out.extend_from_slice(tag.as_ref()),
+                Err(_) => {
+                    out.truncate(frame_start);
+                    return Err(VmessError::malformed("кусок тела не зашифровался"));
+                }
             }
-            None => plain.to_vec(),
-        };
-
-        let declared_len = u16::try_from(sealed.len() + padding_len)
-            .map_err(|_| VmessError::Oversized(sealed.len() + padding_len))?;
-
-        let mut out = Vec::with_capacity(2 + sealed.len() + padding_len);
-        out.extend_from_slice(&self.mask_length(declared_len).to_be_bytes());
-        out.extend_from_slice(&sealed);
-        if padding_len > 0 {
-            let before = out.len();
-            out.resize(before + padding_len, 0);
-            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut out[before..]);
         }
-        Ok(out)
+        if padding_len > 0 {
+            let at = out.len();
+            out.resize(at + padding_len, 0);
+            fill_padding(&mut out[at..]);
+        }
+        Ok(())
     }
 
-    /// Разбирает уже снятое с провода поле длины (два байта до маскировки).
-    ///
-    /// `Ok(None)` — терминатор, дальше по потоку данных не будет.
-    /// `Ok(Some(_))` называет, сколько байт кадра ждать следом
-    /// ([`ChunkLength::on_wire`]) и сколько из них — кусок с меткой, без
-    /// дополнения ([`ChunkLength::ciphertext`]) — именно столько отдаётся
-    /// [`Self::open_chunk`], а не всё прочитанное целиком.
+    /// Разбирает снятое с провода поле длины; `Ok(None)` — терминатор.
     pub fn decode_length(&mut self, masked: [u8; 2]) -> VmessResult<Option<ChunkLength>> {
         let padding_len = self.next_padding_len();
         let declared = usize::from(u16::from_be_bytes(masked) ^ self.mask.next_u16());
@@ -168,8 +121,7 @@ impl BodyCipher {
         }))
     }
 
-    /// Расшифровывает кусок на месте. `frame` — ровно
-    /// [`ChunkLength::ciphertext`] байт: кусок и метка, без дополнения.
+    /// Расшифровывает на месте; `frame` — ровно [`ChunkLength::ciphertext`] байт.
     pub fn open_chunk<'a>(&mut self, frame: &'a mut [u8]) -> VmessResult<&'a mut [u8]> {
         match &mut self.aead {
             Some(aead) => {
@@ -182,7 +134,7 @@ impl BodyCipher {
         }
     }
 
-    /// Длина метки подлинности — ноль у `none`.
+    /// Длина метки подлинности; ноль у `none`.
     pub fn tag_len(&self) -> usize {
         self.tag_len
     }
@@ -194,14 +146,9 @@ impl BodyCipher {
             0
         }
     }
-
-    fn mask_length(&mut self, declared: u16) -> u16 {
-        declared ^ self.mask.next_u16()
-    }
 }
 
 impl Aead {
-    /// Нонс текущего куска и продвижение счётчика.
     fn next_nonce(&mut self) -> Nonce {
         let mut bytes = [0u8; 12];
         bytes[..2].copy_from_slice(&self.counter.to_be_bytes());
@@ -211,8 +158,15 @@ impl Aead {
     }
 }
 
-/// Поток Shake128, отдающий по два байта за раз — вплотную к тому, как
-/// эталон читает `ShakeSizeParser.next()`.
+/// Дополнение идёт открытым текстом, криптостойкость не нужна.
+fn fill_padding(buf: &mut [u8]) {
+    for chunk in buf.chunks_mut(8) {
+        let word = random::u64().to_le_bytes();
+        chunk.copy_from_slice(&word[..chunk.len()]);
+    }
+}
+
+/// Поток Shake128 по два байта (`ShakeSizeParser.next()` эталона).
 struct Shake128Xof(sha3::Shake128Reader);
 
 impl Shake128Xof {
@@ -221,6 +175,13 @@ impl Shake128Xof {
         self.0.read(&mut buffer);
         u16::from_be_bytes(buffer)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn seal_to_vec(cipher: &mut BodyCipher, plain: &[u8]) -> Vec<u8> {
+    let mut out = BytesMut::new();
+    cipher.seal_chunk(plain, &mut out).expect("шифруется");
+    out.to_vec()
 }
 
 #[cfg(test)]
@@ -238,7 +199,7 @@ mod tests {
 
     fn round_trip(wire: Wire) {
         let (mut send, mut recv) = pair(wire);
-        let wire_bytes = send.seal_chunk(b"payload").expect("шифруется");
+        let wire_bytes = seal_to_vec(&mut send, b"payload");
 
         let length_field: [u8; 2] = wire_bytes[..2].try_into().expect("два байта");
         let frame_len = recv
@@ -270,26 +231,24 @@ mod tests {
     #[test]
     fn a_terminator_is_recognised_by_its_length() {
         let (mut send, mut recv) = pair(Wire::Aes128Gcm);
-        let wire_bytes = send.seal_chunk(b"").expect("шифруется");
+        let wire_bytes = seal_to_vec(&mut send, b"");
         let length_field: [u8; 2] = wire_bytes[..2].try_into().expect("два байта");
         assert_eq!(recv.decode_length(length_field).expect("разбирается"), None);
     }
 
     #[test]
     fn the_length_on_the_wire_is_not_the_real_length() {
-        // Маскировка обязана хоть что-то менять, иначе это не маскировка.
         let (mut send, _recv) = pair(Wire::Aes128Gcm);
-        let wire_bytes = send.seal_chunk(b"payload").expect("шифруется");
+        let wire_bytes = seal_to_vec(&mut send, b"payload");
         let raw = u16::from_be_bytes(wire_bytes[..2].try_into().expect("два байта"));
         assert_ne!(usize::from(raw), b"payload".len() + 16);
     }
 
     #[test]
     fn two_chunks_use_different_nonces() {
-        // Разный нонс — разный шифротекст на тех же данных.
         let (mut send, _recv) = pair(Wire::Aes128Gcm);
-        let first = send.seal_chunk(b"same").expect("шифруется");
-        let second = send.seal_chunk(b"same").expect("шифруется");
+        let first = seal_to_vec(&mut send, b"same");
+        let second = seal_to_vec(&mut send, b"same");
         assert_ne!(first, second);
     }
 }

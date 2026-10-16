@@ -5,33 +5,17 @@
 //!  ──► [длина: u16 BE] [дополнение: u8] [данные] [нули: `дополнение` байт] ...
 //! ```
 //!
-//! Обрамляются только **первые восемь** операций чтения и **первые
-//! восемь** операций записи (`kFirstPaddings = 8`) — дальше поток идёт как
-//! есть. Счётчики раздельные: то, сколько раз мы записали, не влияет на то,
-//! сколько раз мы прочитали, и наоборот — в эталоне это два независимых
-//! `NaivePaddingSocket` на каждое направление.
-//!
-//! # Почему сторона записи не повторяет асимметрию эталона
-//!
-//! В эталоне длина дополнения на стороне **сервера** при маленьком ответе
-//! (< 100 байт) выбирается не из `[0, 255]`, а из `[255 - длина, 255]` — так
-//! короткий ответ маскируется под кадр максимального размера. Этот клиент
-//! всегда пишет как клиент (`direction = kClient` в терминах эталона), а
-//! правило асимметрии в эталоне относится только к `direction = kServer`
-//! (`naive_padding_socket.cc`, `WritePaddingV1`). Поэтому здесь достаточно
-//! равномерного `[0, 255]` без особого случая — свою половину эталон в этом
-//! случае обрабатывает точно так же.
-//!
-//! Сторону чтения асимметрия вообще не касается: длину дополнения выбирает
-//! **тот, кто пишет**, а этот код только разбирает уже готовый кадр и
-//! отбрасывает хвост из нулей, кто бы его ни выбрал.
+//! Обрамляются первые 8 чтений и первые 8 записей (`kFirstPaddings`), счётчики
+//! раздельные. Длина дополнения клиента равномерна в `[0, 255]`: особый случай
+//! `[255 - длина, 255]` в эталоне только у `direction = kServer`
+//! (`naive_padding_socket.cc`, `WritePaddingV1`); чтению он не важен.
 
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use bytes::{Buf, BytesMut};
-use rand::Rng;
+use penguin_proto::random;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::padding::PaddingType;
@@ -48,10 +32,7 @@ const HEADER_LEN: usize = 2 + 1;
 /// Сколько байт брать из сокета за раз при разборе кадров.
 const READ_CHUNK: usize = 16 * 1024;
 
-/// Поток с дополнением первых кадров, поверх обычного соединения.
-///
-/// Если [`PaddingType::None`] — сервер не поддерживает схему или отказался
-/// от неё, — оборачивание ничего не меняет: чтение и запись идут напрямую.
+/// Поток с дополнением первых кадров; при [`PaddingType::None`] — прозрачный.
 pub struct PaddedStream<S> {
     inner: S,
     mode: PaddingType,
@@ -78,10 +59,7 @@ impl<S> std::fmt::Debug for PaddedStream<S> {
 }
 
 impl<S> PaddedStream<S> {
-    /// Оборачивает уже установленный туннель.
-    ///
-    /// `mode` — результат [`crate::padding::negotiate`] по ответу сервера:
-    /// решение принимается один раз, до первого байта прикладных данных.
+    /// Оборачивает туннель; `mode` — результат [`crate::padding::negotiate`].
     pub fn new(inner: S, mode: PaddingType) -> Self {
         Self {
             inner,
@@ -130,8 +108,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PaddedStream<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
 
-        // То, что уже обрамлено, обязано уйти первым: новые байты не должны
-        // обогнать дополнение, отправленное для предыдущего вызова.
         if !this.out.is_empty() {
             match this.poll_drain(cx) {
                 Poll::Ready(Ok(())) => {}
@@ -145,10 +121,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PaddedStream<S> {
         }
 
         if this.still_padding_writes() {
-            // Длина данных пишется двумя байтами: кусок длиннее предела
-            // делится на несколько вызовов, как и у обычного `poll_write`.
             let take = buf.len().min(u16::MAX as usize);
-            let padding_len = rand::thread_rng().gen_range(0..=MAX_PADDING);
+            let padding_len = random::range(0..u64::from(MAX_PADDING) + 1) as u8;
 
             this.out
                 .reserve(HEADER_LEN + take + usize::from(padding_len));
@@ -159,10 +133,6 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PaddedStream<S> {
                 .resize(this.out.len() + usize::from(padding_len), 0);
             this.write_frames += 1;
 
-            // Отдать в сокет пытаемся сразу, но неудача здесь не отменяет
-            // того, что кадр уже поставлен в очередь: `Prefixed`-подобный
-            // приём — данные наши, сокет догонит на следующем `poll_write`
-            // или на `poll_flush`.
             let _ = this.poll_drain(cx);
             return Poll::Ready(Ok(take));
         }
@@ -190,9 +160,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PaddedStream<S> {
 impl<S: AsyncRead + Unpin> PaddedStream<S> {
     /// Забирает из накопленного один кадр, если он пришёл целиком.
     ///
-    /// Возвращает данные кадра без хвоста из нулей. `None` — байт пока не
-    /// хватает; `incoming` при этом не трогается, и следующее чтение
-    /// сокета дополнит его, а не начнёт заново.
+    /// Данные кадра без нулевого хвоста; `None` — кадр пришёл не весь.
     fn take_frame(&mut self) -> Option<BytesMut> {
         let header = self.incoming.first_chunk::<HEADER_LEN>()?;
         let payload_len = usize::from(u16::from_be_bytes([header[0], header[1]]));
@@ -227,10 +195,6 @@ impl<S: AsyncRead + Unpin> AsyncRead for PaddedStream<S> {
             }
 
             if !this.still_padding_reads() {
-                // Дополнение кончилось: то, что успело накопиться в
-                // `incoming` сверх последнего разобранного кадра, — уже не
-                // кадр, а обычные данные, и досматривать его как заголовок
-                // нельзя.
                 if !this.incoming.is_empty() {
                     let take = this.incoming.len().min(buf.remaining());
                     buf.put_slice(&this.incoming[..take]);
@@ -256,8 +220,6 @@ impl<S: AsyncRead + Unpin> AsyncRead for PaddedStream<S> {
 
             match result {
                 Poll::Ready(Ok(())) if filled == 0 => {
-                    // Сервер замолчал на середине кадра — это потерянные
-                    // данные, а не чистый конец потока.
                     return Poll::Ready(if this.incoming.is_empty() {
                         Ok(())
                     } else {
@@ -324,9 +286,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_ninth_write_is_not_framed() {
-        // Точная проверка границы: подменяем источник случайности нечем, но
-        // можно проверить длину точно, зная, что заголовок и дополнение
-        // всегда добавляют хотя бы `HEADER_LEN` байт к первым восьми.
         let (mut stream, mut peer) = pair(PaddingType::Variant1);
 
         let reader = tokio::spawn(async move {
@@ -350,9 +309,6 @@ mod tests {
         drop(stream);
 
         let wire = reader.await.expect("задача");
-        // Последние восемь байт пришли как есть: без них в конце потока
-        // не нашлось бы точной строки `bbbbbbbb` — обрамлённая версия
-        // добавила бы заголовок и, скорее всего, дополнение между байтами.
         assert!(
             wire.windows(8).any(|w| w == b"bbbbbbbb"),
             "девятая запись оказалась обрамлена: {wire:?}"
@@ -400,7 +356,6 @@ mod tests {
             for _ in 0..8 {
                 peer.write_all(&frame(b"x", 0)).await.expect("пишется");
             }
-            // Девятая порция — уже не кадр, а обычные данные.
             peer.write_all(b"raw-data").await.expect("пишется");
         });
 

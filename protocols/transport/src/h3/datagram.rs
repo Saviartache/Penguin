@@ -1,14 +1,4 @@
-//! Датаграмма HTTP/3 (RFC 9297, §2.1).
-//!
-//! ```text
-//!  HTTP/3 Datagram {
-//!    Quarter Stream ID (i),
-//!    HTTP Datagram Payload (..),
-//!  }
-//! ```
-//!
-//! Quarter Stream ID — номер потока запроса, делённый на четыре: запросы
-//! идут по двунаправленным потокам клиента, номера которых кратны четырём.
+//! Датаграмма HTTP/3 (RFC 9297, §2.1): Quarter Stream ID (номер потока / 4) и данные.
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -49,7 +39,6 @@ mod tests {
 
     #[test]
     fn a_datagram_names_its_stream_divided_by_four() {
-        // Поток 8 → Quarter Stream ID 2, затем контекст 0 и данные.
         let datagram = encode(8, &[0x00, 0xaa]);
         assert_eq!(&datagram[..], &[0x02, 0x00, 0xaa]);
         let (stream_id, payload) = decode(datagram).expect("разбирается");

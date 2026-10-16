@@ -1,10 +1,5 @@
-//! Три шифра TLS 1.3, из которых сервер выбирает один в `ServerHello` —
-//! RFC 8446 §B.4.
-//!
-//! Reality не вводит своих шифров: набор ровно тот, что предлагает
-//! `ClientHello` любого из трёх отпечатков `penguin-utls` (`0x1301`, `0x1302`,
-//! `0x1303`, каждый в своём порядке). Отсюда и хеш транскрипта — он не
-//! настраивается отдельно, а вытекает из выбранного шифра (RFC 8446 §7.1).
+//! Шифры TLS 1.3 (RFC 8446 §B.4), которые предлагают отпечатки `penguin-utls`;
+//! хеш транскрипта вытекает из шифра.
 
 use ring::aead;
 use ring::hkdf;
@@ -21,8 +16,7 @@ pub enum CipherSuite {
 }
 
 impl CipherSuite {
-    /// Разбирает код шифра из `ServerHello`. `None` — сервер выбрал что-то за
-    /// пределами TLS 1.3, чего эта реализация не ведёт.
+    /// Шифр по коду из `ServerHello`; `None` — не из трёх.
     pub fn from_u16(code: u16) -> Option<Self> {
         match code {
             0x1301 => Some(Self::Aes128GcmSha256),
@@ -40,8 +34,7 @@ impl CipherSuite {
         }
     }
 
-    /// Тот же хеш, но для отдельного вычисления хеша транскрипта — `HKDF`
-    /// `ring` не даёт хешировать в одиночку, только вывод ключей.
+    /// Хеш транскрипта (`ring::hkdf` хешировать в одиночку не умеет).
     pub fn digest_algorithm(self) -> &'static ring::digest::Algorithm {
         match self {
             Self::Aes128GcmSha256 | Self::Chacha20Poly1305Sha256 => &ring::digest::SHA256,

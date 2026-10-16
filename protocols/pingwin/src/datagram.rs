@@ -1,8 +1,4 @@
-//! Датаграммный канал: один запрос `connect-udp`, адрес на каждой посылке.
-//!
-//! Один канал обслуживает всю UDP-сессию приложения: отдельного запроса на
-//! каждого собеседника нет. Потерять датаграмму законно — это UDP; очередь
-//! входящих не ждёт читателя, а выбрасывает лишнее (`penguin_transport::h3`).
+//! Датаграммный канал: один запрос `connect-udp` на сессию, адрес на каждой посылке.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,6 +18,8 @@ pub struct PingwinDatagram {
     /// Поток запроса держит канал открытым; `None` — закрыт.
     stream: Mutex<Option<RequestStream>>,
     incoming: Mutex<DatagramReceiver>,
+    /// Буфер кадра, общий для всех отправок.
+    scratch: std::sync::Mutex<Vec<u8>>,
 }
 
 impl std::fmt::Debug for PingwinDatagram {
@@ -43,6 +41,7 @@ impl PingwinDatagram {
             stream_id: stream.id(),
             stream: Mutex::new(Some(stream)),
             incoming: Mutex::new(incoming),
+            scratch: std::sync::Mutex::default(),
         }
     }
 }
@@ -50,11 +49,11 @@ impl PingwinDatagram {
 #[async_trait]
 impl ProxyDatagram for PingwinDatagram {
     async fn send_to(&self, payload: Bytes, target: &SocketAddress) -> Result<(), ProtocolError> {
-        let body = udp::encode(target, &payload)?;
+        let mut body = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        udp::encode_into(target, &payload, &mut body)?;
         self.h3
             .send_datagram(self.stream_id, &body)
             .map_err(|err| match err {
-                // Резать датаграмму нельзя: границы посылки — это и есть UDP.
                 H3Error::DatagramTooLarge => PingwinError::Oversized(body.len()),
                 err => err.into(),
             })?;

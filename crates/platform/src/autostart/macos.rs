@@ -1,8 +1,4 @@
-//! macOS: агент запуска текущего пользователя.
-//!
-//! Не служба: агент из `~/Library/LaunchAgents` работает под самим
-//! пользователем и поднимается при его входе, а не вместе с системой. Прав
-//! администратора он не требует — а автозапуск окна и не должен их требовать.
+//! macOS: агент запуска `~/Library/LaunchAgents` (работает под пользователем, права не нужны).
 
 use std::path::{Path, PathBuf};
 
@@ -28,16 +24,14 @@ pub(super) fn write(executable: &Path) -> PlatformResult<()> {
     std::fs::write(&path, agent(executable))
         .map_err(|err| PlatformError::Service(format!("{}: {err}", path.display())))?;
 
-    // Без загрузки агент заработает только со следующего входа в систему, и
-    // человек решит, что переключатель не сработал.
+    // Без загрузки агент заработает только со следующего входа.
     load(&path);
     Ok(())
 }
 
-/// Убирает описание агента.
+/// Убирает описание агента; отсутствующее — успех.
 pub(super) fn remove() -> PlatformResult<()> {
     let path = entry_path()?;
-    // Файла не было — снимать нечего, и это успех.
     if !path.exists() {
         return Ok(());
     }
@@ -62,10 +56,7 @@ fn entry_path_in(home: &Path) -> PathBuf {
     home.join("Library").join("LaunchAgents").join(FILE)
 }
 
-/// Загружает агента.
-///
-/// Неудача не отменяет включения: файл записан, и со следующего входа агент
-/// заработает в любом случае.
+/// Загружает агента; неудача не отменяет включения — со следующего входа он заработает.
 fn load(path: &Path) {
     let target = format!("gui/{}", nix::unistd::getuid().as_raw());
     if let Err(err) = command::run(
@@ -84,10 +75,7 @@ fn unload() {
     }
 }
 
-/// Описание агента.
-///
-/// Свободная функция с тестом: забытый `RunAtLoad` означает автозапуск,
-/// который «включён», но ничего не запускает.
+/// Описание агента; без `RunAtLoad` автозапуск ничего не запускает.
 fn agent(executable: &Path) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -109,7 +97,7 @@ fn agent(executable: &Path) -> String {
     )
 }
 
-/// Строки `ProgramArguments`: сама программа и то, с чем её запускают.
+/// Строки `ProgramArguments`: программа и её аргументы.
 fn arguments(executable: &Path) -> String {
     std::iter::once(executable.display().to_string())
         .chain(
@@ -134,7 +122,6 @@ mod tests {
 
     #[test]
     fn the_agent_actually_runs_at_login() {
-        // Без `RunAtLoad` автозапуск «включён», но ничего не запускает.
         let text = agent(Path::new(
             "/Applications/Penguin.app/Contents/MacOS/penguin",
         ));
@@ -144,8 +131,6 @@ mod tests {
 
     #[test]
     fn the_agent_names_the_window_not_the_service() {
-        // Служба поднимается сама и агента не касается: здесь запускается
-        // окно, и только оно.
         let text = agent(Path::new("/usr/local/bin/penguin"));
         assert!(!text.contains("--service"), "{text}");
         assert!(
@@ -156,8 +141,6 @@ mod tests {
 
     #[test]
     fn the_agent_starts_the_window_in_the_tray() {
-        // Без флага окно вставало бы поверх рабочего стола при каждом входе —
-        // а автозапуск включают не за этим.
         let text = agent(Path::new("/usr/local/bin/penguin"));
         assert!(text.contains("<string>--tray</string>"), "{text}");
     }
@@ -170,8 +153,6 @@ mod tests {
 
     #[test]
     fn the_agent_lives_where_the_system_looks_for_it() {
-        // Каталог задан системой: файл в любом другом месте launchd не
-        // увидит.
         assert_eq!(
             entry_path_in(Path::new("/Users/пингвин")),
             PathBuf::from("/Users/пингвин/Library/LaunchAgents/com.penguin.gui.plist")

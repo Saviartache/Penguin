@@ -1,12 +1,4 @@
 //! Кадры HTTP/3: тип, длина, содержимое (RFC 9114, §7.1).
-//!
-//! ```text
-//!  HTTP/3 Frame {
-//!    Type (i),
-//!    Length (i),
-//!    Frame Payload (..),
-//!  }
-//! ```
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -27,8 +19,7 @@ pub const GOAWAY: u64 = 0x07;
 /// `MAX_PUSH_ID` (§7.2.7).
 pub const MAX_PUSH_ID: u64 = 0x0d;
 
-/// Типы кадров HTTP/2, у которых в HTTP/3 нет пары. Получить такой —
-/// ошибка соединения `H3_FRAME_UNEXPECTED` (§7.2.8).
+/// Типы кадров HTTP/2 без пары в HTTP/3: `H3_FRAME_UNEXPECTED` (§7.2.8).
 pub fn is_reserved_http2(kind: u64) -> bool {
     matches!(kind, 0x02 | 0x06 | 0x08 | 0x09)
 }
@@ -42,8 +33,7 @@ pub struct FrameHeader {
     pub len: u64,
 }
 
-/// Разбирает заголовок кадра в начале `buf`. `None` — байт пока не хватает.
-/// Возвращает заголовок и его длину на проводе.
+/// Заголовок кадра и его длина на проводе; `None` — байт не хватает.
 pub fn decode_header(buf: &[u8]) -> Option<(FrameHeader, usize)> {
     let (kind, kind_len) = varint::try_decode(buf)?;
     let (len, len_len) = varint::try_decode(&buf[kind_len..])?;
@@ -74,7 +64,6 @@ mod tests {
     #[test]
     fn a_frame_header_round_trips() {
         let frame = encode(HEADERS, &[0xaa; 70]);
-        // Тип в один байт, длина 70 — в два (RFC 9000, §16).
         assert_eq!(&frame[..3], &[0x01, 0x40, 0x46]);
         let (header, used) = decode_header(&frame).expect("заголовок целиком");
         assert_eq!(

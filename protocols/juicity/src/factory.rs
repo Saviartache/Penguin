@@ -43,8 +43,6 @@ impl ProtocolFactory for JuicityFactory {
         params: &serde_json::Value,
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = Self::parse(params)?;
-        // Соединение здесь не поднимается: первое заводит первый поток.
-        // Включённый профиль не обязан держать соединение QUIC.
         Ok(Arc::new(JuicityOutbound::new(ctx.id, config, ctx.dialer)?))
     }
 }

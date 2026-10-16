@@ -1,25 +1,8 @@
 //! Модальное окно нового правила: имя, действие, адреса и список приложений.
 //!
-//! Окно, а не раздел под таблицей. Форма из четырёх полей плюс список
-//! запущенного в полторы сотни строк отодвигали саму таблицу за нижний край, и
-//! человек писал правило, не видя тех, что уже есть, — тогда как новое правило
-//! почти всегда пишут, глядя на соседнее, и половина ошибок в наборе от того,
-//! что два правила спорят.
-//!
-//! Адреса, домены и порты вводятся **одной строкой** и разбираются по виду.
-//! Три отдельных поля заставляли бы пользователя знать, чем подсеть отличается
-//! от домена, — а он знает только, что хочет пустить мимо тоннеля
-//! `10.0.0.0/8`, `local.dev` и `445`.
-//!
-//! Приложения приходят от службы: у окна нет прав, чтобы узнать путь чужого
-//! процесса, а без пути правило не написать — по имени файла его писать можно,
-//! но небезопасно.
-//!
-//! Список от службы — только про **запущенное**, и этого мало: правило пишут и
-//! для игры, в которую сегодня не играли, и для обновлятора, который
-//! просыпается сам раз в неделю. Их показывают файлом, через системное окно
-//! выбора, и выбранное встаёт в тот же список первой строкой: отметка, которой
-//! не видно, читается как «не сработало».
+//! Адреса, домены и порты — одной строкой, разбор по виду. Приложения приходят от
+//! службы (у окна нет прав узнать путь чужого процесса), но это только запущенное,
+//! поэтому есть выбор файла; выбранное встаёт в список первой строкой.
 
 use iced::Element;
 use iced::theme::Palette;
@@ -33,24 +16,14 @@ use crate::app::state::State;
 use crate::forms::rule::{Action, Draft};
 use crate::ui;
 
-/// Ширина окна.
-///
-/// Та же, что у окна профиля: два модальных окна разной ширины в одной
-/// программе читаются как два разных диалога.
+/// Ширина окна — как у окна профиля.
 const WIDTH: f32 = 620.0;
 
-/// Высота списка приложений.
-///
-/// Фиксированная, а не «сколько поместится»: растянутое содержимое в панели
-/// «по содержимому» схлопывается в ноль, а ноль роняет отрисовку. Значение
-/// подобрано так, чтобы окно целиком помещалось в наименьшее окно программы.
+/// Высота списка приложений: фиксированная (растянутое схлопнулось бы в ноль),
+/// помещается в наименьшее окно.
 const LIST_HEIGHT: f32 = 180.0;
 
-/// Наибольшая длина пути в строке списка.
-///
-/// Полный путь внутри пакета Windows занимает две строки машинных
-/// идентификаторов и растягивает окно; выбирают же приложение по имени файла и
-/// по началу пути.
+/// Наибольшая длина пути в строке списка в знаках.
 const PATH_WIDTH: usize = 52;
 
 /// Собирает модальное окно нового правила.
@@ -89,16 +62,14 @@ pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
         .gap(gap::MD)
         .build();
 
+    // `Esc` и нажатие мимо панели — «Отмена».
     let mut modal = Modal::new(form)
         .title(crate::i18n::s().new_rule)
         .max_width(WIDTH)
-        // `Esc` и нажатие мимо панели означают «Отмена»: отдельной кнопки для
-        // этого не нужно, а место в ряду ответов дорого.
         .on_close(Message::SplitTunnel(SplitTunnelMessage::EditorClosed))
         .on_backdrop(Message::SplitTunnel(SplitTunnelMessage::EditorClosed));
 
-    // Ответа нет, пока правилу нечем сработать: правило без условий совпадает
-    // со всем подряд, и добавить такое молча нельзя.
+    // Без условий правило совпало бы со всем подряд — ответа нет.
     if !draft.is_empty() {
         modal = modal.action(
             crate::i18n::s().add_rule,
@@ -114,9 +85,7 @@ fn apps<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     let palette = &state.palette;
     let split = &state.split_tunnel;
 
-    // Кнопка рядом с поиском, а не под списком: нажимают её ровно тогда, когда
-    // поиск ничего не нашёл, — и рука уже здесь. Пока системное окно открыто,
-    // нажимать нечего: второе такое же означало бы два ответа на один вопрос.
+    // Пока системное окно открыто, второе такое же не нужно.
     let mut pick = ui::button(ButtonVariant::Secondary, crate::i18n::s().pick_app);
     if !split.picking {
         pick = pick.on_press(Message::SplitTunnel(SplitTunnelMessage::AppPickRequested));
@@ -133,16 +102,14 @@ fn apps<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
         .align(iced::Alignment::Center)
         .build();
 
-    // Выбранное файлом собирается здесь и живёт только эту отрисовку: списка,
-    // в котором оно лежало бы вместе с запущенным, нет — правило и есть такой
-    // список.
+    // Выбранное файлом собирается на каждой отрисовке: отдельного списка нет,
+    // список — само правило.
     let picked = picked_apps(&split.running_apps, &draft.processes);
     let mut shown = filter(&picked, &split.app_search);
     shown.extend(filter(&split.running_apps, &split.app_search));
 
     let list: Element<'_, Message> = if shown.is_empty() {
-        // Пустой список без объяснения читается как «сломалось». Причин ровно
-        // две, и они требуют разных действий от пользователя.
+        // Две причины, и действия от человека разные.
         let reason = if split.running_apps.is_empty() {
             crate::i18n::s().no_apps
         } else {
@@ -165,11 +132,7 @@ fn apps<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
         .build()
 }
 
-/// Одна строка списка приложений.
-///
-/// У приложения ничего не занимает: строка переживает список, из которого её
-/// собрали, — а список выбранного файлом собирается на каждой отрисовке
-/// заново.
+/// Строка списка; ничего не заимствует у приложения, список пересобирается.
 fn row<'a>(palette: &Palette, app: &AppInfo, checked: bool) -> Element<'a, Message> {
     let path = app.path.clone();
 
@@ -178,9 +141,6 @@ fn row<'a>(palette: &Palette, app: &AppInfo, checked: bool) -> Element<'a, Messa
             Message::SplitTunnel(SplitTunnelMessage::AppToggled(path.clone(), value))
         }))
         .push(ui::spring())
-        // Путь тише и правее: различают по нему, но читают его редко. И
-        // серединой: у путей внутри пакетов она из машинных
-        // идентификаторов, а концы — как раз то, по чему приложение и узнают.
         .push_auto(ui::faint(
             palette,
             shorten(&app.path, PATH_WIDTH),
@@ -191,12 +151,8 @@ fn row<'a>(palette: &Palette, app: &AppInfo, checked: bool) -> Element<'a, Messa
         .build()
 }
 
-/// Что пошло не так — строкой под формой.
-///
-/// Бед две, и обе показываются сразу, а не по нажатию. Молча выбросить
-/// непонятое нельзя: правило соберётся, но не тем, чего ждали, и разбираться
-/// человек будет уже по последствиям. Не открывшееся окно выбора — то же
-/// самое: без строки о нём кнопка выглядит сломанной.
+/// Строка под формой: причина сразу, не по нажатию. Непонятое молча выбрасывать
+/// нельзя, неоткрывшееся окно выбора иначе делает кнопку «сломанной».
 fn problem<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     let palette = &state.palette;
     let mut lines: Vec<Element<'a, Message>> = Vec::new();
@@ -225,12 +181,8 @@ fn problem<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     Flex::col().extend(lines).gap(gap::XS).build()
 }
 
-/// Отмеченные приложения, которых нет среди запущенных.
-///
-/// Показанная файлом программа обычно не запущена, и в списке от службы её
-/// нет. Отметка, которой не видно, читается как «не сработало», и человек
-/// показывает файл второй раз; поэтому выбранное встаёт в тот же список,
-/// снимается тем же флажком и стоит первым — чтобы его было видно сразу.
+/// Отмеченные приложения, которых нет среди запущенных: стоят первыми и снимаются
+/// тем же флажком, иначе отметку не видно.
 pub fn picked_apps(running: &[AppInfo], chosen: &[String]) -> Vec<AppInfo> {
     chosen
         .iter()
@@ -238,24 +190,20 @@ pub fn picked_apps(running: &[AppInfo], chosen: &[String]) -> Vec<AppInfo> {
         .map(|path| AppInfo {
             name: penguin_core::path::file_name(path).to_owned(),
             path: path.clone(),
-            // Ни одной запущенной копии — про это и говорит ноль.
+            // Запущенных копий нет.
             instances: 0,
         })
         .collect()
 }
 
-/// Выбрасывает середину пути, оставляя начало и конец.
-///
-/// Свободная функция с тестом: обрезка не по знакам, а по байтам разрубила бы
-/// кириллицу пополам, и в списке появились бы вопросительные знаки.
+/// Выбрасывает середину пути, оставляя начало и конец; по знакам, не по байтам.
 pub fn shorten(path: &str, width: usize) -> String {
     let count = path.chars().count();
     if count <= width {
         return path.to_owned();
     }
 
-    // Хвост длиннее головы: имя файла и его каталог опознаются мгновенно, а
-    // начало пути у всех приложений и так одинаковое.
+    // Хвост длиннее головы: имя файла опознаётся сразу.
     let tail = width.saturating_sub(4) * 2 / 3;
     let head = width.saturating_sub(tail + 1);
 
@@ -264,10 +212,7 @@ pub fn shorten(path: &str, width: usize) -> String {
     format!("{start}…{end}")
 }
 
-/// Подпись приложения в списке.
-///
-/// Число копий показывается, только когда их больше одной: «steam.exe (1)» —
-/// лишний шум, «chrome.exe (24)» — полезное знание.
+/// Подпись приложения; число копий — только если их больше одной.
 pub fn label(app: &AppInfo) -> String {
     if app.instances > 1 {
         format!("{} ({})", app.name, app.instances)
@@ -276,9 +221,7 @@ pub fn label(app: &AppInfo) -> String {
     }
 }
 
-/// Отбирает приложения по строке поиска.
-///
-/// Ищет и по имени, и по пути: пользователь помнит либо одно, либо другое.
+/// Отбирает приложения по строке поиска: по имени и по пути.
 pub fn filter<'a>(apps: &'a [AppInfo], query: &str) -> Vec<&'a AppInfo> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
@@ -320,8 +263,6 @@ mod tests {
 
     #[test]
     fn a_long_path_keeps_both_ends() {
-        // Середину пути внутри пакета Windows занимают машинные
-        // идентификаторы; узнают приложение по началу и по имени файла.
         let path = r"D:\WpSystem\S-1-5-21-2960677031-2112851187-709588018-1001\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude-code.1.247\claude.exe";
         let short = shorten(path, PATH_WIDTH);
 
@@ -339,8 +280,6 @@ mod tests {
 
     #[test]
     fn cyrillic_paths_are_cut_by_characters() {
-        // Обрезка по байтам разрубила бы букву пополам, и в списке появились
-        // бы вопросительные знаки.
         let path = format!("D:/Программы/{}/приложение.exe", "п".repeat(100));
         let short = shorten(&path, PATH_WIDTH);
         assert_eq!(short.chars().count(), PATH_WIDTH);
@@ -348,7 +287,6 @@ mod tests {
 
     #[test]
     fn search_looks_at_the_name_and_the_path() {
-        // Пользователь помнит либо имя, либо где оно установлено.
         let apps = apps_list();
         assert_eq!(filter(&apps, "chrome").len(), 1);
         assert_eq!(filter(&apps, "games").len(), 1);
@@ -359,7 +297,6 @@ mod tests {
 
     #[test]
     fn renders_without_apps() {
-        // Самое частое состояние: окно открыто, ответ службы ещё не пришёл.
         let state = State::default();
         assert!(state.split_tunnel.running_apps.is_empty());
         let _ = view(&state, &Draft::default());
@@ -377,9 +314,6 @@ mod tests {
 
     #[test]
     fn an_empty_draft_offers_no_answer() {
-        // Правило без условий совпало бы со всем подряд, и добавить такое
-        // молча нельзя. Кнопка, которая ничего не делает, читается как
-        // сломанная, поэтому её нет вовсе.
         let draft = Draft {
             name: "Пусто".to_owned(),
             ..Draft::default()
@@ -400,8 +334,6 @@ mod tests {
 
     #[test]
     fn a_program_chosen_by_file_joins_the_list() {
-        // Она не запущена, и в списке от службы её нет. Отметка, которой не
-        // видно, читается как «не сработало».
         let running = apps_list();
         let chosen = ["c:/games/doom/doom.exe".to_owned()];
 
@@ -414,8 +346,6 @@ mod tests {
 
     #[test]
     fn a_running_program_is_not_listed_twice() {
-        // Тот же файл можно и отметить в списке, и показать через окно
-        // выбора: две одинаковые строки означали бы, что одна из них лишняя.
         let running = apps_list();
         let chosen = [running[1].path.clone()];
 
@@ -424,8 +354,6 @@ mod tests {
 
     #[test]
     fn the_chosen_program_comes_first() {
-        // Ради этого список и собирается заново: только что выбранное должно
-        // быть видно без прокрутки полутора сотен строк.
         let mut state = State::default();
         state.split_tunnel.running_apps = apps_list();
 
@@ -443,7 +371,6 @@ mod tests {
 
     #[test]
     fn the_button_goes_quiet_while_the_window_is_open() {
-        // Второе системное окно поверх первого — два ответа на один вопрос.
         let mut state = State::default();
         state.split_tunnel.picking = true;
         let _ = view(&state, &Draft::default());
@@ -451,7 +378,6 @@ mod tests {
 
     #[test]
     fn a_window_that_did_not_open_says_so() {
-        // Без строки о беде кнопка выглядит сломанной.
         let mut state = State::default();
         state.split_tunnel.pick_error = Some("Не удалось открыть окно выбора".to_owned());
         let _ = view(&state, &Draft::default());
@@ -459,8 +385,6 @@ mod tests {
 
     #[test]
     fn the_window_fits_the_smallest_window() {
-        // Растянутое содержимое в панели «по содержимому» схлопывается в ноль,
-        // поэтому высота списка фиксированная — и обязана помещаться.
         const { assert!(LIST_HEIGHT < crate::app::EXPANDED.height) };
     }
 }

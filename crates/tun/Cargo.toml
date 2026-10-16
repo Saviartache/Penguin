@@ -12,7 +12,6 @@ description = "Виртуальный сетевой интерфейс"
 workspace = true
 
 [dependencies]
-# Параметры адаптера читаются из общего файла настроек.
 penguin-config.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
@@ -22,7 +21,6 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-# `#[tokio::test]` требует макросов, которым в самом крейте места нет.
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -32,8 +30,5 @@ windows = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkMana
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["ioctl", "net", "socket", "fs"] }
 libc.workspace = true
-# `AsyncFd` живёт за фичей `net`: адаптер здесь — обычный дескриптор, и ждать
-# его готовности нужно тем же реактором, что и сокеты. `macros` — ради
-# `select!`: закрытие адаптера обязано разбудить того, кто ждёт пакета, иначе
-# договор `TunDevice::close` не выполняется.
+# `net` — AsyncFd; `macros` — select! в recv.
 tokio = { workspace = true, features = ["net", "macros"] }

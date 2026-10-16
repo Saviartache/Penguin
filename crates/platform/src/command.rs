@@ -1,14 +1,6 @@
-//! Запуск системных программ там, где своего интерфейса у системы нет.
+//! Запуск системных программ там, где нативного интерфейса нет.
 //!
-//! Часть работы платформенного слоя делается нативно — маршруты, адаптер,
-//! права ([`crate::route`], [`crate::privilege`]). Но у брандмауэра, службы и
-//! настроек DNS нативного интерфейса либо нет вовсе (`launchd` и `systemd`
-//! разговаривают только своими программами), либо он не задокументирован и
-//! меняется от версии к версии. Там честнее вызвать системную программу, чем
-//! держать копию её работы, которая однажды разойдётся с системой.
-//!
-//! Правило одно: **вывод не разбирается на естественном языке**. Сообщения
-//! переводятся, а коды возврата — нет.
+//! Вывод не разбирается как естественный язык: сообщения переводятся, коды возврата — нет.
 
 use std::process::Command;
 
@@ -21,17 +13,17 @@ pub(crate) struct Failure {
     program: String,
     /// Что сказала программа.
     reason: String,
-    /// С каким кодом она завершилась. `None` — не запустилась вовсе.
+    /// Код завершения; `None` — не запустилась вовсе.
     code: Option<i32>,
     /// Не хватило прав.
     denied: bool,
-    /// The executable could not be found, rather than exiting with code 127.
+    /// Исполняемого файла нет (а не код 127 от оболочки).
     not_found: bool,
 }
 
 impl Failure {
-    /// Whether spawning failed because the executable was not found.
-    #[allow(dead_code, reason = "used by Linux elevation")]
+    /// Не найден ли исполняемый файл.
+    #[allow(dead_code, reason = "нужен не каждой системе")]
     pub(crate) fn is_not_found(&self) -> bool {
         self.not_found
     }
@@ -44,10 +36,7 @@ impl Failure {
         make(format!("{}: {}", self.program, self.reason))
     }
 
-    /// Код возврата.
-    ///
-    /// По нему запрос прав отличает отказ человека от настоящего сбоя: слова
-    /// в сообщении переводятся, а коды — нет.
+    /// Код возврата: по нему отказ человека отличается от сбоя.
     #[allow(dead_code, reason = "нужен не каждой системе")]
     pub(crate) fn code(&self) -> Option<i32> {
         self.code
@@ -61,12 +50,6 @@ impl Failure {
 }
 
 /// Есть ли такая программа в системе.
-///
-/// Спрашивается заранее, чтобы сказать «поставьте `nft`», а не «команда
-/// завершилась с кодом 127».
-///
-/// Нужна там, где нужного не оказывается в системе, — то есть на Linux;
-/// у macOS все её программы на месте по построению.
 #[allow(dead_code, reason = "нужна не каждой системе")]
 pub(crate) fn exists(program: &str) -> bool {
     Command::new("/usr/bin/env")
@@ -82,11 +65,7 @@ pub(crate) fn run(program: &str, arguments: &[&str]) -> Result<String, Failure> 
     finish(Command::new(program).args(arguments).output(), program)
 }
 
-/// Запускает программу, передав ей текст на вход.
-///
-/// Правила брандмауэра передаются именно так: временный файл с ними пришлось
-/// бы ещё и убирать, а забытый файл с правилами — это подсказка, как их
-/// подменить.
+/// Запускает программу, передав текст на вход (без временного файла с правилами).
 #[allow(dead_code, reason = "нужна не каждой системе")]
 pub(crate) fn feed(program: &str, arguments: &[&str], input: &str) -> Result<String, Failure> {
     use std::io::Write;
@@ -104,8 +83,7 @@ pub(crate) fn feed(program: &str, arguments: &[&str], input: &str) -> Result<Str
             .write_all(input.as_bytes())
             .map_err(|err| spawn_failure(program, &err))?;
     }
-    // Поток закрывается до ожидания: программа читает вход до конца файла и
-    // без закрытия ждала бы вечно.
+    // Закрыть вход до ожидания: программа читает до конца файла.
     drop(child.stdin.take());
 
     finish(child.wait_with_output(), program)
@@ -123,14 +101,12 @@ fn finish(output: std::io::Result<std::process::Output>, program: &str) -> Resul
     Err(Failure {
         program: program.to_owned(),
         reason: if reason.is_empty() {
-            format!("код возврата {}", exit_code(&output.status))
+            format!("код возврата {}", output.status.code().unwrap_or(-1))
         } else {
             reason
         },
         code: output.status.code(),
-        // Программа уже запустилась, значит отказ пришёл от системы, а не от
-        // оболочки. Отличить нехватку прав по коду нельзя, и решает её здесь
-        // вызывающий: почти всё в этом крейте прав требует.
+        // Нехватку прав по коду не отличить: решает вызывающий.
         denied: false,
         not_found: false,
     })
@@ -145,11 +121,6 @@ fn spawn_failure(program: &str, err: &std::io::Error) -> Failure {
         denied: err.kind() == std::io::ErrorKind::PermissionDenied,
         not_found: err.kind() == std::io::ErrorKind::NotFound,
     }
-}
-
-/// Код возврата, если он есть.
-fn exit_code(status: &std::process::ExitStatus) -> i32 {
-    status.code().unwrap_or(-1)
 }
 
 #[cfg(test)]
@@ -170,8 +141,6 @@ mod tests {
 
     #[test]
     fn a_silent_failure_reports_its_code() {
-        // Программа, промолчавшая в поток ошибок, всё равно должна оставить
-        // след: «не сработало» без причины не лечится ничем.
         let failure = run("sh", &["-c", "exit 7"]).expect_err("не удалось");
         assert!(failure.reason.contains('7'), "{failure:?}");
     }

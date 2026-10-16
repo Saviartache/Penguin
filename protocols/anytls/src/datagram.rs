@@ -1,15 +1,7 @@
 //! Канал датаграмм: один поток на всех адресатов.
 //!
-//! Датаграммы едут `udp-over-tcp` версии 2 (см. [`crate::uot`]): открывается
-//! обычный поток к особому имени, и дальше по нему идут пары «адрес,
-//! данные». Адрес стоит на каждой датаграмме, поэтому потока хватает одного —
-//! в отличие от VLESS, где адрес назван один раз и потоков нужно столько,
-//! сколько адресатов.
-//!
-//! Поток заводится **первой посылкой**, а не при создании канала. Причина не
-//! в экономии: в заголовке потока сервер ждёт адрес, и до первой посылки его
-//! неоткуда взять. Нули на его месте лишили бы сервер возможности решать по
-//! адресу, куда пускать.
+//! `udp-over-tcp` v2 ([`crate::uot`]): один поток к особому имени, адрес на
+//! каждой датаграмме. Поток открывается первой посылкой: в заголовке нужен адрес.
 
 use std::sync::Arc;
 
@@ -35,11 +27,10 @@ const QUEUE: usize = 512;
 /// Канал датаграмм через сервер AnyTLS.
 pub struct AnyTlsDatagram {
     pool: Arc<SessionPool>,
-    /// Пишущая половина потока. Пусто — посылок ещё не было.
+    /// Пишущая половина потока; пусто до первой посылки.
     outgoing: Mutex<Option<WriteHalf<AnyTlsStream>>>,
-    /// Что пришло.
     incoming: Mutex<mpsc::Receiver<(Bytes, SocketAddress)>>,
-    /// Его отдают задаче чтения.
+    /// Отдаётся задаче чтения.
     sender: mpsc::Sender<(Bytes, SocketAddress)>,
     /// Задача чтения потока.
     reader: Mutex<Option<JoinHandle<()>>>,
@@ -70,8 +61,6 @@ impl AnyTlsDatagram {
     async fn open(&self, first: &SocketAddress) -> Result<WriteHalf<AnyTlsStream>, ProtocolError> {
         let mut stream = self.pool.open().await?;
 
-        // Сначала адрес самого потока — особое имя, по которому сервер
-        // понимает, что дальше едут датаграммы. За ним заголовок запроса.
         let mut header = Vec::new();
         socks::encode(&uot::magic_target(), &mut header).map_err(AnyTlsError::from)?;
         header.extend_from_slice(&uot::request(false, first)?);
@@ -129,8 +118,6 @@ impl ProxyDatagram for AnyTlsDatagram {
         if let Some(reader) = self.reader.lock().await.take() {
             reader.abort();
         }
-        // Пишущая половина уходит вместе с потоком: его `Drop` скажет серверу
-        // `cmdFIN`, и сессия вернётся в пул.
         self.outgoing.lock().await.take();
         Ok(())
     }
@@ -159,13 +146,7 @@ async fn read_packets(
     }
 }
 
-/// Читает адрес датаграммы.
-///
-/// Байт за байтом, пока разбор не скажет «хватит». Разбор при этом один и
-/// тот же — тот, что проверен тестами в [`crate::uot`]; своя асинхронная
-/// копия ветвлений по типу адреса рано или поздно разошлась бы с ним. Чтение
-/// здесь идёт из очереди потока, а не из сокета, поэтому байт за байтом
-/// стоит ровно столько же, сколько разом.
+/// Читает адрес по байту, пока разбор [`crate::uot`] не скажет «хватит».
 async fn read_address(io: &mut ReadHalf<AnyTlsStream>) -> AnyTlsResult<SocketAddress> {
     let mut buffer = Vec::with_capacity(uot::MAX_ADDRESS);
     loop {

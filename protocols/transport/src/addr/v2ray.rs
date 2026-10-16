@@ -8,15 +8,7 @@
 //! +----------+------+----------+
 //! ```
 //!
-//! Отличий от [`socks`](super::socks) два, и оба — ловушка:
-//!
-//! 1. **Порт стоит первым**, а не последним.
-//! 2. **Домен — это `2`**, а не `3`. Тройка здесь означает IPv6, то есть
-//!    ровно тот номер, под которым в записи SOCKS5 идёт домен.
-//!
-//! Из-за второго общий кодировщик с флагом однажды записал бы домен как
-//! IPv6, а сервер прочитал бы шестнадцать байт имени как адрес и отправил бы
-//! запрос неизвестно куда. Поэтому кодировщика два.
+//! Отличия от [`socks`](super::socks): порт идёт первым; домен — `2`, а `3` — IPv6.
 
 use std::net::IpAddr;
 
@@ -63,7 +55,7 @@ pub fn encode(address: &SocketAddress, out: &mut Vec<u8>) -> TransportResult<()>
 
 /// Читает адрес с начала среза.
 ///
-/// `Ok(None)` — байт пока не хватает.
+/// `Ok(None)` — данных пока не хватает.
 pub fn decode(bytes: &[u8]) -> TransportResult<Option<(SocketAddress, usize)>> {
     let Some(port) = bytes.first_chunk::<2>() else {
         return Ok(None);
@@ -74,9 +66,6 @@ pub fn decode(bytes: &[u8]) -> TransportResult<Option<(SocketAddress, usize)>> {
         return Ok(None);
     };
 
-    // Разбор хоста общий с записью SOCKS5 — различаются только номера, и
-    // перевод между ними стоит одной строки. Сам разбор, повторённый дважды,
-    // однажды разошёлся бы в мелочи вроде имени не в UTF-8.
     let atyp = match kind {
         TYPE_IPV4 => super::socks::ATYP_IPV4,
         TYPE_DOMAIN => super::socks::ATYP_DOMAIN,
@@ -117,8 +106,6 @@ mod tests {
 
     #[test]
     fn the_port_comes_first_and_a_domain_is_two() {
-        // Тот самый тест, ради которого записи разделены: перепутанные
-        // номера дали бы имя, прочитанное как IPv6.
         let mut out = Vec::new();
         encode(&SocketAddress::domain("a.io", 443), &mut out).unwrap();
         assert_eq!(out, [0x01, 0xBB, 0x02, 4, b'a', b'.', b'i', b'o']);
@@ -126,9 +113,6 @@ mod tests {
 
     #[test]
     fn the_two_layouts_do_not_read_each_other() {
-        // Прямая проверка того, что запись SOCKS5, прочитанная здесь, не
-        // выдаёт себя за верную: молчаливое согласие двух записей — самая
-        // дорогая ошибка из возможных.
         let address = SocketAddress::domain("example.com", 443);
         let mut socks = Vec::new();
         super::super::socks::encode(&address, &mut socks).unwrap();

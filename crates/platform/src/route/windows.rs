@@ -1,14 +1,5 @@
-//! Windows: `IP Helper` и метрики интерфейсов.
-//!
-//! Маршрут по умолчанию через TUN ставится **не заменой** существующего, а
-//! добавлением своего с меньшей метрикой. Разница принципиальная: заменить
-//! чужой маршрут значит потерять его, а вместе с ним — возможность вернуть
-//! всё как было, если клиент упадёт.
-//!
-//! Ещё одна тонкость: вместо `0.0.0.0/0` ставятся две половины, `0.0.0.0/1` и
-//! `128.0.0.0/1`. Они покрывают всё то же самое, но их префикс длиннее, и
-//! система выбирает их раньше **любого** маршрута по умолчанию — включая
-//! чужой VPN-клиент, который тоже прописал себе метрику поменьше.
+//! Windows: `IP Helper`. Маршрут тоннеля добавляется с меньшей метрикой, а не заменяет чужой;
+//! вместо `0.0.0.0/0` ставятся две половины — их префикс длиннее любого маршрута по умолчанию.
 
 #![allow(unsafe_code, reason = "таблица маршрутизации через IP Helper")]
 
@@ -30,17 +21,10 @@ use windows::Win32::Networking::WinSock::{
 use crate::error::{PlatformError, PlatformResult};
 use crate::route::Route;
 
-/// Метрика маршрутов тоннеля.
-///
-/// Ноль означает «считать по интерфейсу»; единица — самое низкое явное
-/// значение, то есть самый предпочтительный маршрут.
+/// Метрика маршрутов тоннеля: 0 — «считать по интерфейсу», 1 — самая предпочтительная явная.
 const TUNNEL_METRIC: u32 = 1;
 
 /// Две половины адресного пространства вместо маршрута по умолчанию.
-///
-/// Свободная функция с тестом: перепутать здесь границы легко, а последствие
-/// — половина трафика мимо тоннеля, причём та половина, которую никто не
-/// проверяет.
 pub fn default_route_halves() -> [Ipv4Net; 2] {
     [
         Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 1).unwrap_or_default(),
@@ -51,12 +35,12 @@ pub fn default_route_halves() -> [Ipv4Net; 2] {
 /// Ставит маршрут.
 pub fn add(route: &Route) -> PlatformResult<()> {
     let row = build_row(route);
+    // SAFETY: `row` инициализирована `InitializeIpForwardEntry` и живёт до конца вызова.
     let result = unsafe { CreateIpForwardEntry2(&row) };
 
     match result {
         NO_ERROR => verify(route),
-        // Маршрут уже стоит — например, после падения клиента. Это не
-        // ошибка: цель достигнута.
+        // Остался после падения клиента: цель достигнута.
         ERROR_OBJECT_ALREADY_EXISTS => {
             tracing::debug!(destination = %route.destination, "маршрут уже стоял");
             Ok(())
@@ -68,15 +52,12 @@ pub fn add(route: &Route) -> PlatformResult<()> {
     }
 }
 
-/// Проверяет, что маршрут и правда появился в таблице.
-///
-/// `NO_ERROR` от `CreateIpForwardEntry2` этого **не** обещает: запись с
-/// нулевым временем жизни принимается и тут же исчезает. Без проверки такое
-/// не видно ниоткуда — клиент говорит «подключено», а трафику идти некуда, и
-/// при включённом kill switch интернет пропадает совсем.
+/// Проверяет, что маршрут появился в таблице: `NO_ERROR` этого не обещает (запись с нулевым
+/// временем жизни принимается и тут же исчезает).
 fn verify(route: &Route) -> PlatformResult<()> {
     let mut row = build_row(route);
 
+    // SAFETY: `row` заполнена ключевыми полями и живёт до конца вызова.
     match unsafe { GetIpForwardEntry2(&mut row) } {
         NO_ERROR => Ok(()),
         code => Err(PlatformError::Route(format!(
@@ -89,46 +70,30 @@ fn verify(route: &Route) -> PlatformResult<()> {
 /// Снимает маршрут.
 pub fn remove(route: &Route) -> PlatformResult<()> {
     let row = build_row(route);
+    // SAFETY: `row` инициализирована и живёт до конца вызова.
     let result = unsafe { DeleteIpForwardEntry2(&row) };
 
     match result {
-        // Маршрута уже нет — снимать нечего, и это тоже успех. Кодов на это
-        // два: система отвечает то «не найдено», то «нет такого файла».
+        // Маршрута уже нет; система отвечает то «не найдено», то «нет такого файла».
         NO_ERROR | ERROR_NOT_FOUND | ERROR_FILE_NOT_FOUND => Ok(()),
-        code => {
-            // Оставленный маршрут — это сеть, которая у пользователя не
-            // работает после выхода из клиента. Такое молчанием не покрывают.
-            Err(PlatformError::rollback(
-                "маршрут тоннеля",
-                format!("{} (код {})", route.destination, code.0),
-            ))
-        }
+        code => Err(PlatformError::rollback(
+            "маршрут тоннеля",
+            format!("{} (код {})", route.destination, code.0),
+        )),
     }
 }
 
-/// Собирает запись таблицы маршрутизации.
-///
-/// # Почему нельзя просто заполнить поля
-///
-/// `CreateIpForwardEntry2` требует, чтобы запись сначала прошла через
-/// `InitializeIpForwardEntry`. Требование не формальное: там выставляются
-/// `ValidLifetime` и `PreferredLifetime` — время жизни маршрута. У записи,
-/// собранной с нуля, они равны нулю, и система такую запись **принимает**,
-/// вернув `NO_ERROR`, а потом сразу выбрасывает как просроченную.
-///
-/// Снаружи это выглядит так: клиент отчитался об успехе, интернета нет, а при
-/// отключении маршруты не снимаются — их уже нет.
+/// Собирает запись таблицы. Через `InitializeIpForwardEntry` обязательно: иначе время жизни
+/// нулевое, система принимает запись и сразу выбрасывает как просроченную.
 fn build_row(route: &Route) -> MIB_IPFORWARD_ROW2 {
     let mut row = MIB_IPFORWARD_ROW2::default();
+    // SAFETY: `row` — локальная структура нужного типа.
     unsafe { InitializeIpForwardEntry(&mut row) };
 
     row.InterfaceIndex = route.interface_index;
     row.Metric = route.metric.unwrap_or(TUNNEL_METRIC);
-    // Обязательно: без этого система считает запись недействительной и
-    // отвергает её с невнятным кодом.
+    // Без протокола система считает запись недействительной.
     row.Protocol = MIB_IPPROTO_NETMGMT;
-    // Длина префикса участка не используется; она должна быть не больше длины
-    // префикса назначения, а ноль подходит всегда.
     row.SitePrefixLength = 0;
 
     match route.destination {
@@ -137,8 +102,6 @@ fn build_row(route: &Route) -> MIB_IPFORWARD_ROW2 {
             row.DestinationPrefix.Prefix = sockaddr_v4(v4.network());
             row.NextHop = match route.gateway {
                 Some(IpAddr::V4(gateway)) => sockaddr_v4(gateway),
-                // Маршрут «на интерфейс»: за TUN никого нет, следующего узла
-                // не существует.
                 _ => sockaddr_v4(Ipv4Addr::UNSPECIFIED),
             };
         }
@@ -188,17 +151,17 @@ pub(crate) fn sockaddr_v6(address: Ipv6Addr) -> SOCKADDR_INET {
     }
 }
 
-/// Читает адрес из объединения Windows.
-///
-/// Семейство лежит в общем поле и определяет, какую из половин объединения
-/// можно читать. Прочитать не ту — значит получить мусор.
+/// Читает адрес из объединения Windows: семейство в общем поле выбирает читаемую половину.
 pub(crate) fn from_sockaddr(address: &SOCKADDR_INET) -> Option<IpAddr> {
+    // SAFETY: `si_family` общее для обеих половин объединения.
     match unsafe { address.si_family } {
         AF_INET => {
+            // SAFETY: семейство IPv4 — читается `Ipv4`.
             let raw = unsafe { address.Ipv4.sin_addr.S_un.S_addr };
             Some(IpAddr::from(raw.to_ne_bytes()))
         }
         AF_INET6 => {
+            // SAFETY: семейство IPv6 — читается `Ipv6`.
             let octets = unsafe { address.Ipv6.sin6_addr.u.Byte };
             Some(IpAddr::from(octets))
         }
@@ -206,10 +169,8 @@ pub(crate) fn from_sockaddr(address: &SOCKADDR_INET) -> Option<IpAddr> {
     }
 }
 
-/// Переводит код Windows в понятную ошибку.
+/// Переводит код Windows в понятную ошибку; 5 (`ERROR_ACCESS_DENIED`) — не администратор.
 fn classify(code: WIN32_ERROR, context: String) -> PlatformError {
-    // 5 — `ERROR_ACCESS_DENIED`. Самая частая причина: клиент запущен не от
-    // администратора.
     if code == WIN32_ERROR(5) {
         return PlatformError::PermissionDenied(context);
     }
@@ -222,8 +183,6 @@ mod tests {
 
     #[test]
     fn halves_cover_everything_exactly_once() {
-        // Перепутанные границы означают половину трафика мимо тоннеля —
-        // причём ту половину, которую никто не проверяет.
         let [low, high] = default_route_halves();
         assert_eq!(low.to_string(), "0.0.0.0/1");
         assert_eq!(high.to_string(), "128.0.0.0/1");
@@ -245,8 +204,6 @@ mod tests {
 
     #[test]
     fn halves_beat_a_default_route() {
-        // Префикс длиннее нулевого, значит система выберет их раньше любого
-        // `0.0.0.0/0` — включая чужой VPN-клиент с низкой метрикой.
         for half in default_route_halves() {
             assert!(half.prefix_len() > 0);
         }

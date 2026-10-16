@@ -1,16 +1,14 @@
-//! Разговор с ядром через `PF_ROUTE`.
+//! Разговор с ядром через `PF_ROUTE` (не `route add`: снимать маршруты надо и по аварийному пути).
 //!
-//! Не `route add`: маршруты — то, чем тоннель забирает трафик, и снимать их
-//! обязательно даже по аварийному пути. Зависеть в этом от чужой программы,
-//! вывод которой к тому же переводится, нельзя.
-//!
-//! Сообщение устроено просто: заголовок, а за ним подряд адреса в порядке
-//! битов в `rtm_addrs`. Каждый выровнен по четыре байта — так их читает ядро.
+//! Сообщение: заголовок и адреса подряд в порядке битов `rtm_addrs`, каждый выровнен по 4 байта.
 
 use std::net::IpAddr;
 use std::os::fd::AsRawFd;
 
 use crate::error::{PlatformError, PlatformResult};
+
+/// Сколько чужих уведомлений пропустить, прежде чем сдаться.
+const MAX_FOREIGN_MESSAGES: usize = 32;
 
 /// Собираемое сообщение.
 pub(super) struct Message {
@@ -45,18 +43,14 @@ impl Message {
         }
     }
 
-    /// Дописывает адрес.
-    ///
-    /// Порядок вызовов обязан совпадать с порядком битов в `rtm_addrs`:
-    /// назначение, шлюз, маска. Ядро читает адреса подряд и разбирает их
-    /// именно по этому порядку, а не по содержимому.
+    /// Дописывает адрес; порядок вызовов — порядок битов в `rtm_addrs` (назначение, шлюз, маска).
     pub(super) fn address(&mut self, slot: libc::c_int, bytes: &[u8]) {
         self.header.rtm_addrs |= slot;
         self.addresses.extend_from_slice(bytes);
         self.addresses.resize(align(self.addresses.len()), 0);
     }
 
-    /// Проставляет длину и порядковый номер и отдаёт готовые байты.
+    /// Проставляет длину и номер, отдаёт готовые байты.
     pub(super) fn finish(mut self, sequence: libc::c_int) -> Vec<u8> {
         let length = std::mem::size_of::<libc::rt_msghdr>() + self.addresses.len();
 
@@ -76,7 +70,7 @@ impl Message {
     }
 }
 
-/// Пустые метрики маршрута: ядру они не нужны, а поля есть.
+/// Пустые метрики маршрута: ядру не нужны, но поля есть.
 fn empty_metrics() -> libc::rt_metrics {
     libc::rt_metrics {
         rmx_locks: 0,
@@ -102,6 +96,7 @@ const fn align(length: usize) -> usize {
 /// Байты структуры как они лягут в сообщение.
 fn bytes_of<T: Copy>(value: &T) -> &[u8] {
     #[allow(unsafe_code, reason = "заголовок маршрута передаётся ядру как есть")]
+    // SAFETY: `T` — `repr(C)` без указателей; длина равна размеру значения.
     unsafe {
         std::slice::from_raw_parts(
             std::ptr::from_ref(value).cast::<u8>(),
@@ -110,63 +105,44 @@ fn bytes_of<T: Copy>(value: &T) -> &[u8] {
     }
 }
 
-/// Адрес в виде `sockaddr_in` / `sockaddr_in6`.
-///
-/// `sin_len` обязателен: в BSD длина лежит в самой структуре, и без неё ядро
-/// прочитает адрес не той длины.
+/// Адрес в виде `sockaddr_in` / `sockaddr_in6`; в BSD длина `sin_len` обязательна.
 pub(super) fn sockaddr(address: IpAddr) -> Vec<u8> {
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "семейство адресов помещается в байт"
+    )]
     match address {
         IpAddr::V4(v4) => {
             let mut bytes = vec![0u8; 16];
             bytes[0] = 16;
-            #[allow(
-                clippy::cast_sign_loss,
-                clippy::cast_possible_truncation,
-                reason = "семейство адресов помещается в байт"
-            )]
-            {
-                bytes[1] = libc::AF_INET as u8;
-            }
+            bytes[1] = libc::AF_INET as u8;
             bytes[4..8].copy_from_slice(&v4.octets());
             bytes
         }
         IpAddr::V6(v6) => {
             let mut bytes = vec![0u8; 28];
             bytes[0] = 28;
-            #[allow(
-                clippy::cast_sign_loss,
-                clippy::cast_possible_truncation,
-                reason = "семейство адресов помещается в байт"
-            )]
-            {
-                bytes[1] = libc::AF_INET6 as u8;
-            }
+            bytes[1] = libc::AF_INET6 as u8;
             bytes[8..24].copy_from_slice(&v6.octets());
             bytes
         }
     }
 }
 
-/// Интерфейс в виде `sockaddr_dl` — так задаётся маршрут «на интерфейс».
-///
-/// Длина восемь байт, а не двадцать: имени и аппаратного адреса у нас нет, а
-/// ядру достаточно номера.
+/// Интерфейс в виде короткого `sockaddr_dl` (8 байт): ядру достаточно номера.
 pub(super) fn sockaddr_link(interface_index: u32) -> Vec<u8> {
     let mut bytes = vec![0u8; 8];
     bytes[0] = 8;
     #[allow(
         clippy::cast_sign_loss,
         clippy::cast_possible_truncation,
-        reason = "семейство адресов помещается в байт"
+        reason = "семейство адресов и номер интерфейса помещаются в поля"
     )]
     {
         bytes[1] = libc::AF_LINK as u8;
+        bytes[2..4].copy_from_slice(&(interface_index as u16).to_ne_bytes());
     }
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "номер интерфейса помещается в u16"
-    )]
-    bytes[2..4].copy_from_slice(&(interface_index as u16).to_ne_bytes());
     bytes
 }
 
@@ -178,8 +154,7 @@ pub(super) fn talk(message: Message, expect_reply: bool) -> PlatformResult<Vec<u
         nix::sys::socket::socket(AddressFamily::Route, SockType::Raw, SockFlag::empty(), None)
             .map_err(|err| PlatformError::Route(format!("сокет маршрутизации: {err}")))?;
 
-    // Номер нужен, только чтобы отличить свой ответ от чужого: сокет
-    // маршрутизации широковещательный, и в него сыплются чужие уведомления.
+    // Сокет широковещательный: свой ответ узнаётся по номеру и pid.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
@@ -199,10 +174,9 @@ pub(super) fn talk(message: Message, expect_reply: bool) -> PlatformResult<Vec<u
     }
 
     let ours = std::process::id();
-    // Чужих уведомлений в сокете может быть сколько угодно; своё узнаётся по
-    // номеру и по идентификатору процесса.
+    let mut reply = vec![0u8; 4096];
     for _ in 0..MAX_FOREIGN_MESSAGES {
-        let mut reply = vec![0u8; 4096];
+        reply.resize(4096, 0);
         let read = nix::sys::socket::recv(socket.as_raw_fd(), &mut reply, MsgFlags::empty())
             .map_err(classify)?;
         reply.truncate(read);
@@ -225,15 +199,11 @@ pub(super) fn talk(message: Message, expect_reply: bool) -> PlatformResult<Vec<u
     ))
 }
 
-/// Сколько чужих уведомлений пропустить, прежде чем сдаться.
-const MAX_FOREIGN_MESSAGES: usize = 32;
-
-/// Номер, процесс и код ошибки из заголовка ответа.
+/// Номер, процесс и код ошибки из заголовка ответа (поля `rt_msghdr` по смещениям 20, 16, 24).
 fn identity(reply: &[u8]) -> Option<(libc::c_int, libc::c_int, libc::c_int)> {
     if reply.len() < std::mem::size_of::<libc::rt_msghdr>() {
         return None;
     }
-    // Смещения полей в `rt_msghdr`: процесс, номер, код ошибки идут подряд.
     let field = |offset: usize| {
         let bytes = reply.get(offset..offset + 4)?;
         Some(libc::c_int::from_ne_bytes([
@@ -253,10 +223,7 @@ fn classify(err: nix::errno::Errno) -> PlatformError {
     }
 }
 
-/// Перебирает адреса, приложенные к сообщению.
-///
-/// Возвращает пары «бит слота, байты адреса». Ответ ядра — чужие данные, и
-/// обрыв в середине здесь обычное дело: перебор просто заканчивается.
+/// Пары «бит слота, байты адреса» из ответа; обрыв чужих данных просто завершает перебор.
 pub(super) fn addresses(reply: &[u8]) -> Vec<(libc::c_int, &[u8])> {
     let head = std::mem::size_of::<libc::rt_msghdr>();
     let Some(slots) = reply.get(12..16) else {
@@ -292,7 +259,7 @@ pub(super) fn interface_index(reply: &[u8]) -> u32 {
     })
 }
 
-/// Адрес из `sockaddr`.
+/// Адрес из `sockaddr`; интерфейс (`AF_LINK`) адресом не считается.
 pub(super) fn to_address(bytes: &[u8]) -> Option<IpAddr> {
     #[allow(
         clippy::cast_sign_loss,
@@ -310,7 +277,6 @@ pub(super) fn to_address(bytes: &[u8]) -> Option<IpAddr> {
             let octets: [u8; 16] = bytes.get(8..24)?.try_into().ok()?;
             Some(IpAddr::from(octets))
         }
-        // Шлюзом может быть и интерфейс (`AF_LINK`) — это не адрес.
         _ => None,
     }
 }
@@ -321,8 +287,6 @@ mod tests {
 
     #[test]
     fn the_header_is_the_size_the_kernel_expects() {
-        // Разойдясь с ядром на байт, мы получим `EINVAL` без единого намёка
-        // на причину.
         assert_eq!(std::mem::size_of::<libc::rt_msghdr>(), 92);
     }
 
@@ -333,14 +297,11 @@ mod tests {
         message.address(libc::RTA_GATEWAY, &sockaddr_link(7));
 
         let bytes = message.finish(1);
-        // Заголовок, шестнадцать байт адреса и восемь байт интерфейса.
         assert_eq!(bytes.len(), std::mem::size_of::<libc::rt_msghdr>() + 16 + 8);
     }
 
     #[test]
     fn a_length_travels_inside_the_address() {
-        // В BSD длина лежит в самой структуре; ноль здесь означает адрес,
-        // который ядро прочитает не так.
         assert_eq!(sockaddr("203.0.113.5".parse().expect("а"))[0], 16);
         assert_eq!(sockaddr("::1".parse().expect("а"))[0], 28);
         assert_eq!(sockaddr_link(7)[0], 8);
@@ -348,8 +309,6 @@ mod tests {
 
     #[test]
     fn an_interface_gateway_is_not_an_address() {
-        // Шлюзом маршрута «на интерфейс» стоит сам интерфейс; принять его за
-        // адрес значит увести прямой трафик в никуда.
         assert!(to_address(&sockaddr_link(7)).is_none());
         assert_eq!(
             to_address(&sockaddr("203.0.113.5".parse().expect("а"))),
@@ -378,7 +337,6 @@ mod tests {
 
     #[test]
     fn a_truncated_reply_does_not_panic() {
-        // Ответ ядра — чужие данные: обрыв в середине здесь обычное дело.
         let mut message = Message::new(libc::RTM_GET as u8, 0);
         message.address(libc::RTA_DST, &sockaddr("198.51.100.7".parse().expect("а")));
         let mut bytes = message.finish(1);

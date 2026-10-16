@@ -1,48 +1,10 @@
-//! Рукопожатие Noise IK (с модификатором `psk2`): роль инициатора.
+//! Рукопожатие Noise IK (`psk2`), роль инициатора: клиент всегда инициатор.
 //!
-//! Крейт всегда клиент, то есть всегда инициатор — сервер ролями с ним не
-//! меняется никогда. Поэтому здесь нет ни `ConsumeMessageInitiation`, ни
-//! `CreateMessageResponse`: только то, что делает инициатор.
-//!
-//! Последовательность — построчный перевод `CreateMessageInitiation` и
-//! `ConsumeMessageResponse` из `device/noise-protocol.go` (`wireguard-go`).
-//! Каждый шаг подписан номером строки того же смысла на человеческом языке,
-//! а не только формулой: спутать порядок перемешивания `hash`/`chaining_key`
-//! значит получить рукопожатие, которое не проходит молча, и найти это по
-//! одним лишь формулам ниже потом не получится — только сверкой с эталоном.
-//!
-//! # Что мешается в хэш и в каком порядке (сообщение 1, инициатор → сервер)
-//!
-//! 1. `chaining_key = HASH(CONSTRUCTION)`, `hash = HASH(chaining_key || IDENTIFIER)`.
-//! 2. `hash = HASH(hash || Spub_сервера)`.
-//! 3. Новый эфемерный ключ `E`. `chaining_key = KDF1(chaining_key, Epub)`,
-//!    `hash = HASH(hash || Epub)`.
-//! 4. `ss = DH(Epriv, Spub_сервера)`. `(chaining_key, key) = KDF2(chaining_key, ss)`.
-//! 5. Шифруется собственный статический ключ: `msg.static = AEAD(key, 0,
-//!    Spub_свой, hash)`. `hash = HASH(hash || msg.static)`.
-//! 6. `ss = DH(Spriv_свой, Spub_сервера)` — не зависит от эфемерного, считается
-//!    один раз при старте (`StaticKeys::precomputed_ss`, поле не публично).
-//!    `(chaining_key, key) = KDF2(chaining_key, ss)`.
-//! 7. Шифруется метка времени: `msg.timestamp = AEAD(key, 0, TAI64N::now(),
-//!    hash)`. `hash = HASH(hash || msg.timestamp)`.
-//! 8. `mac1`/`mac2` считаются отдельно от `hash`/`chaining_key` — это защита
-//!    от перегрузки, а не часть транскрипта Noise (см. `crate::frame::initiation`).
-//!
-//! # Сообщение 2 (сервер → инициатор)
-//!
-//! 9. `hash = HASH(hash || Epub_сервера)`. `chaining_key = KDF1(chaining_key, Epub_сервера)`.
-//! 10. `ss = DH(Epriv_свой, Epub_сервера)`. `chaining_key = KDF1(chaining_key, ss)`.
-//! 11. `ss = DH(Spriv_свой, Epub_сервера)`. `chaining_key = KDF1(chaining_key, ss)`.
-//! 12. Смешивается предварительный ключ: `(chaining_key, tau, key) =
-//!     KDF3(chaining_key, psk)`. `hash = HASH(hash || tau)`.
-//! 13. Транскрипт заверяется пустой строкой: `AEAD_open(key, 0, msg.empty,
-//!     hash)` обязан дать пустой открытый текст. `hash = HASH(hash || msg.empty)`.
-//! 14. Ключи сеанса: `(k0, k1) = KDF2(chaining_key, "")`. Инициатор
-//!     отправляет ключом `k0`, принимает — `k1` (источник:
-//!     `BeginSymmetricSession` в `device/noise-protocol.go` — у инициатора
-//!     `sendKey, recvKey = KDF2(...)` именно в этом порядке; у ответчика
-//!     порядок был бы обратный, но им этот крейт не бывает).
+//! Перевод `CreateMessageInitiation` и `ConsumeMessageResponse` из
+//! `device/noise-protocol.go` (`wireguard-go`); номера шагов в коде - порядок
+//! перемешивания `hash`/`chaining_key`, ошибка в котором не видна иначе как сверкой с эталоном.
 
+use penguin_proto::random;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::crypto::constants::{
@@ -53,28 +15,18 @@ use crate::crypto::tai64n::Tai64N;
 use crate::error::{WireguardError, WireguardResult};
 use crate::frame::{initiation, response};
 
-/// Долгоживущие ключи и то, что из них можно посчитать заранее.
-///
-/// Одна штука на направление, живёт весь сеанс профиля — в отличие от
-/// [`PendingHandshake`], который заводится заново на каждую попытку.
+/// Долгоживущие ключи и предвычисленное из них.
 pub struct StaticKeys {
     private: StaticSecret,
     public: [u8; KEY_LEN],
     server_public: [u8; KEY_LEN],
-    /// Предварительный ключ. Все нули, если в настройках не задан — это и
-    /// есть штатное поведение `wg(8)` для пустого `PresharedKey`, а не
-    /// заглушка этого крейта.
+    /// Нули, если в настройках не задан (штатно для `wg(8)`).
     preshared: [u8; KEY_LEN],
-    /// `DH(Spriv_свой, Spub_сервера)` — не меняется, пока не меняются оба
-    /// ключа, и вычисление здесь одно на весь сеанс, а не на каждую попытку
-    /// рукопожатия.
+    /// `DH(Spriv_свой, Spub_сервера)`.
     precomputed_ss: [u8; KEY_LEN],
-    /// `HASH(LABEL_MAC1 || Spub_сервера)` — ключ `mac1` для сообщений,
-    /// которые шлём мы (сообщение адресовано серверу, и мета защищает
-    /// именно его от перегрузки).
+    /// Ключ `mac1` для сообщений к серверу.
     mac1_key_send: [u8; KEY_LEN],
-    /// `HASH(LABEL_MAC1 || Spub_свой)` — ключ, которым сервер обязан был
-    /// посчитать `mac1` ответа: сообщение адресовано нам.
+    /// Ключ `mac1` для сообщений от сервера к нам.
     mac1_key_receive: [u8; KEY_LEN],
 }
 
@@ -109,11 +61,7 @@ impl StaticKeys {
     }
 }
 
-/// Состояние рукопожатия между отправкой сообщения 1 и получением сообщения 2.
-///
-/// Заводится заново на каждую попытку: индекс, эфемерный ключ и транскрипт —
-/// одноразовые. Переживший неудачную попытку `PendingHandshake` не годится ни
-/// для чего, кроме как быть отброшенным.
+/// Состояние между сообщениями 1 и 2; одноразовое, на каждую попытку новое.
 pub struct PendingHandshake {
     local_index: u32,
     ephemeral_private: StaticSecret,
@@ -122,38 +70,44 @@ pub struct PendingHandshake {
 }
 
 impl PendingHandshake {
-    /// Индекс, под которым сервер будет адресовать нам ответ.
+    /// Индекс, под которым сервер адресует нам ответ.
     pub fn local_index(&self) -> u32 {
         self.local_index
     }
 }
 
-/// Ключи установленного сеанса, готовые лечь в `crate::crypto::session::Session`.
+/// Ключи установленного сеанса.
 pub struct SessionKeys {
-    /// Ключ, которым шифруются пакеты в сторону сервера.
+    /// Ключ пакетов к серверу.
     pub send_key: [u8; KEY_LEN],
-    /// Ключ, которым расшифровываются пакеты от сервера.
+    /// Ключ пакетов от сервера.
     pub recv_key: [u8; KEY_LEN],
-    /// Наш индекс — сервер вставляет его в заголовок пакетов к нам.
+    /// Наш индекс: сервер ставит его в заголовок пакетов к нам.
     pub local_index: u32,
-    /// Индекс сервера — мы вставляем его в заголовок пакетов к нему.
+    /// Индекс сервера: ставится в заголовок пакетов к нему.
     pub remote_index: u32,
 }
 
-/// Строит сообщение 1 (инициация) и возвращает его вместе с состоянием,
-/// нужным, чтобы разобрать ответ.
+fn random_index() -> u32 {
+    u32::from_ne_bytes(random::array())
+}
+
+fn random_secret() -> StaticSecret {
+    StaticSecret::from(random::array::<KEY_LEN>())
+}
+
+/// Строит сообщение 1 (инициация) и состояние для разбора ответа.
 pub fn create_initiation(
     keys: &StaticKeys,
     reserved: [u8; 3],
 ) -> ([u8; INITIATION_MESSAGE_LEN], PendingHandshake) {
-    // Шаг 1.
+    // Шаги 1-2.
     let mut chaining_key = hash(&[CONSTRUCTION]);
     let mut transcript = hash(&[&chaining_key, IDENTIFIER]);
-    // Шаг 2.
     transcript = hash(&[&transcript, &keys.server_public]);
 
     // Шаг 3.
-    let ephemeral_private = StaticSecret::random();
+    let ephemeral_private = random_secret();
     let ephemeral_public = *PublicKey::from(&ephemeral_private).as_bytes();
     chaining_key = kdf1(&chaining_key, &ephemeral_public);
     transcript = hash(&[&transcript, &ephemeral_public]);
@@ -166,7 +120,7 @@ pub fn create_initiation(
     chaining_key = chaining_key_2;
 
     // Шаг 5.
-    let static_ciphertext = to_array_48(aead_seal(&key, 0, &keys.public, &transcript));
+    let static_ciphertext = to_array(&aead_seal(&key, 0, &keys.public, &transcript));
     transcript = hash(&[&transcript, &static_ciphertext]);
 
     // Шаг 6.
@@ -175,10 +129,10 @@ pub fn create_initiation(
 
     // Шаг 7.
     let timestamp = Tai64N::now().to_bytes();
-    let timestamp_ciphertext = to_array_28(aead_seal(&key, 0, &timestamp, &transcript));
+    let timestamp_ciphertext = to_array(&aead_seal(&key, 0, &timestamp, &transcript));
     transcript = hash(&[&transcript, &timestamp_ciphertext]);
 
-    let local_index = rand::random::<u32>();
+    let local_index = random_index();
     let fields = initiation::InitiationFields {
         sender_index: local_index,
         ephemeral_public,
@@ -187,8 +141,7 @@ pub fn create_initiation(
     };
     let mut message = initiation::encode(&fields, reserved);
 
-    // Шаг 8: mac1 считается над готовыми байтами отдельным ключом, mac2
-    // остаётся нулём — cookie этот крейт не запрашивает.
+    // Шаг 8: `mac1` вне транскрипта, `mac2` - ноль (cookie не запрашивается).
     let mac1 = mac(&keys.mac1_key_send, initiation::mac1_covered(&message));
     initiation::set_mac1(&mut message, mac1);
 
@@ -203,8 +156,7 @@ pub fn create_initiation(
     )
 }
 
-/// Разбирает сообщение 2 (ответ) и завершает рукопожатие, отдавая ключи
-/// установленного сеанса.
+/// Разбирает сообщение 2 и завершает рукопожатие.
 pub fn consume_response(
     keys: &StaticKeys,
     pending: PendingHandshake,
@@ -218,8 +170,7 @@ pub fn consume_response(
         ));
     }
 
-    // Проверка `mac1` — не часть транскрипта Noise, а дешёвый ранний отсев
-    // подделанного или испорченного ответа до дорогих операций Диффи-Хеллмана.
+    // Ранний отсев подделки до дорогих DH.
     let expected_mac1 = mac(&keys.mac1_key_receive, response::mac1_covered(message));
     if expected_mac1 != message[60..76] {
         return Err(WireguardError::malformed("mac1 ответа не сошёлся"));
@@ -254,20 +205,15 @@ pub fn consume_response(
     chaining_key = chaining_key_final;
     transcript = hash(&[&transcript, &tau]);
 
-    // Шаг 13.
+    // Шаг 13: на этом шаге сервер шифрует пустую строку.
     let opened = aead_open(&key, 0, &fields.empty_ciphertext, &transcript)?;
     if !opened.is_empty() {
-        // Не должно случиться: пустой открытый текст — это то, что сервер
-        // всегда шифрует на этом шаге. Непустой результат означает не «сервер
-        // прислал данные», а то, что транскрипт разошёлся ещё до этой точки
-        // и метка всё равно как-то сошлась — то есть баг в самой реализации,
-        // а не во входных данных.
         return Err(WireguardError::malformed(
             "второе сообщение несёт данные там, где протокол ждёт пустую строку",
         ));
     }
 
-    // Шаг 14.
+    // Шаг 14: у инициатора `send, recv = KDF2(ck, "")` (`BeginSymmetricSession`).
     let (send_key, recv_key) = kdf2(&chaining_key, &[]);
 
     Ok(SessionKeys {
@@ -278,15 +224,10 @@ pub fn consume_response(
     })
 }
 
-fn to_array_48(vec: Vec<u8>) -> [u8; 48] {
-    let mut out = [0u8; 48];
-    out.copy_from_slice(&vec);
-    out
-}
-
-fn to_array_28(vec: Vec<u8>) -> [u8; 28] {
-    let mut out = [0u8; 28];
-    out.copy_from_slice(&vec);
+/// Длина источника равна `N` по построению.
+fn to_array<const N: usize>(bytes: &[u8]) -> [u8; N] {
+    let mut out = [0u8; N];
+    out.copy_from_slice(bytes);
     out
 }
 
@@ -295,37 +236,34 @@ mod tests {
     use super::*;
 
     fn keypair() -> (StaticSecret, PublicKey) {
-        let secret = StaticSecret::random();
+        let secret = random_secret();
         let public = PublicKey::from(&secret);
         (secret, public)
     }
 
-    #[test]
-    fn a_full_handshake_between_two_instances_of_this_crate_agrees_on_keys() {
-        // Круговой тест ловит опечатку в паре, но не ловит неверно понятый
-        // формат — этим и объясняются отдельные тесты на длину сообщений
-        // (`crate::frame`) и на захардкоженные `InitialChainKey`/`InitialHash`
-        // (`crate::crypto::primitives`), сверенные с `boringtun` и с OpenSSL
-        // независимо от этого файла.
+    fn key_pairs() -> (StaticKeys, StaticKeys) {
         let (client_priv, client_pub) = keypair();
         let (server_priv, server_pub) = keypair();
-
-        let client_keys = StaticKeys::new(
+        let client = StaticKeys::new(
             client_priv.to_bytes(),
             *server_pub.as_bytes(),
             [0u8; KEY_LEN],
         );
-        let server_keys = StaticKeys::new(
+        let server = StaticKeys::new(
             server_priv.to_bytes(),
             *client_pub.as_bytes(),
             [0u8; KEY_LEN],
         );
+        (client, server)
+    }
+
+    /// Круговой тест ловит опечатку в паре, но не неверно понятый формат: для
+    /// этого есть векторы в `crate::crypto::primitives` и тесты `crate::frame`.
+    #[test]
+    fn a_full_handshake_between_two_instances_of_this_crate_agrees_on_keys() {
+        let (client_keys, server_keys) = key_pairs();
 
         let (message1, pending) = create_initiation(&client_keys, [0, 0, 0]);
-
-        // Сторона сервера собирается вручную по тем же формулам — этот крейт
-        // не реализует роль ответчика, а тест обязан её сыграть, чтобы
-        // проверить, что созданное сообщение 1 в принципе разбирается.
         let (message2, server_local_index) =
             server_side_response(&server_keys, &message1).expect("сервер отвечает");
 
@@ -333,28 +271,15 @@ mod tests {
             consume_response(&client_keys, pending, &message2).expect("рукопожатие сходится");
 
         assert_eq!(session_keys.remote_index, server_local_index);
-        // То, чем шифрует один, обязано быть тем, чем расшифровывает другой.
         assert_ne!(session_keys.send_key, session_keys.recv_key);
     }
 
     #[test]
     fn a_response_addressed_to_a_different_handshake_is_refused() {
-        let (client_priv, client_pub) = keypair();
-        let (server_priv, server_pub) = keypair();
-        let client_keys = StaticKeys::new(
-            client_priv.to_bytes(),
-            *server_pub.as_bytes(),
-            [0u8; KEY_LEN],
-        );
-        let server_keys = StaticKeys::new(
-            server_priv.to_bytes(),
-            *client_pub.as_bytes(),
-            [0u8; KEY_LEN],
-        );
+        let (client_keys, server_keys) = key_pairs();
 
         let (message1, pending) = create_initiation(&client_keys, [0, 0, 0]);
         let (mut message2, _) = server_side_response(&server_keys, &message1).expect("отвечает");
-        // Подменяем receiver_index на чужой.
         message2[8..12].copy_from_slice(&(pending.local_index().wrapping_add(1)).to_le_bytes());
 
         assert!(consume_response(&client_keys, pending, &message2).is_err());
@@ -362,18 +287,7 @@ mod tests {
 
     #[test]
     fn a_response_with_a_tampered_mac1_is_refused() {
-        let (client_priv, client_pub) = keypair();
-        let (server_priv, server_pub) = keypair();
-        let client_keys = StaticKeys::new(
-            client_priv.to_bytes(),
-            *server_pub.as_bytes(),
-            [0u8; KEY_LEN],
-        );
-        let server_keys = StaticKeys::new(
-            server_priv.to_bytes(),
-            *client_pub.as_bytes(),
-            [0u8; KEY_LEN],
-        );
+        let (client_keys, server_keys) = key_pairs();
 
         let (message1, pending) = create_initiation(&client_keys, [0, 0, 0]);
         let (mut message2, _) = server_side_response(&server_keys, &message1).expect("отвечает");
@@ -382,9 +296,8 @@ mod tests {
         assert!(consume_response(&client_keys, pending, &message2).is_err());
     }
 
-    /// Играет роль ответчика по тем же формулам спецификации — только для
-    /// теста. Возвращает сообщение 2 и локальный индекс, который сервер в
-    /// нём объявил (для сверки с `remote_index` на стороне клиента).
+    /// Роль ответчика по формулам спецификации, только для теста; возвращает
+    /// сообщение 2 и объявленный сервером индекс.
     fn server_side_response(
         keys: &StaticKeys,
         message1: &[u8],
@@ -414,9 +327,8 @@ mod tests {
         let _timestamp = aead_open(&key, 0, &fields.timestamp_ciphertext, &transcript)?;
         transcript = hash(&[&transcript, &fields.timestamp_ciphertext]);
 
-        // Сообщение 2.
-        let local_index = rand::random::<u32>();
-        let ephemeral_private = StaticSecret::random();
+        let local_index = random_index();
+        let ephemeral_private = random_secret();
         let ephemeral_public = *PublicKey::from(&ephemeral_private).as_bytes();
         transcript = hash(&[&transcript, &ephemeral_public]);
         chaining_key = kdf1(&chaining_key, &ephemeral_public);
@@ -433,8 +345,6 @@ mod tests {
             .as_bytes();
         chaining_key = kdf1(&chaining_key, &ss_se);
 
-        // `chaining_key` дальше не нужен: сервер после этого шага сразу
-        // выводит ключи сеанса, а не участвует в проверках теста.
         let (_chaining_key, tau, key) = kdf3(&chaining_key, &keys.preshared);
         transcript = hash(&[&transcript, &tau]);
 

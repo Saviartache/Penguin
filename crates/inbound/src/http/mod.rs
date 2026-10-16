@@ -1,8 +1,5 @@
-//! Локальный HTTP-прокси.
-//!
-//! Существует ради приложений, которые умеют только его: системные настройки
-//! прокси в Windows, корпоративные утилиты, старые сборки. Поддерживается один
-//! метод — `CONNECT`; почему только он, объяснено в [`connect`].
+//! Локальный HTTP-прокси для приложений, умеющих только его. Поддерживается
+//! один метод, `CONNECT` (см. [`connect`]).
 
 pub mod connect;
 
@@ -11,12 +8,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use penguin_core::network::Network;
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::InboundResult;
 use crate::inbound::{Inbound, InboundHandler, InboundRequest};
+use crate::relay::relay;
 
 /// Локальный HTTP-прокси.
 pub struct HttpInbound {
@@ -73,29 +71,27 @@ async fn serve_connection(
     handler: Arc<dyn InboundHandler>,
 ) -> InboundResult<()> {
     let _ = stream.set_nodelay(true);
-    let mut reader = BufReader::new(stream);
+    let mut reader = BufReader::with_capacity(1024, stream);
 
     let target = match connect::read_request(&mut reader).await {
         Ok(target) => target,
         Err(err) => {
-            let mut stream = reader.into_inner();
-            let _ = connect::reply_failure(&mut stream, 400, "Bad Request").await;
+            let _ = connect::reply_failure(reader.get_mut(), 400, "Bad Request").await;
             return Err(err);
         }
     };
 
     let request = InboundRequest {
         source,
-        target: target.clone(),
+        target,
         network: Network::Tcp,
     };
 
-    let outbound = match handler.open_tcp(&request).await {
+    let mut outbound = match handler.open_tcp(&request).await {
         Ok(outbound) => outbound,
         Err(err) => {
-            tracing::debug!(%target, %err, "не удалось открыть соединение");
-            let mut stream = reader.into_inner();
-            let _ = connect::reply_failure(&mut stream, 502, "Bad Gateway").await;
+            tracing::debug!(target = %request.target, %err, "не удалось открыть соединение");
+            let _ = connect::reply_failure(reader.get_mut(), 502, "Bad Gateway").await;
             return Ok(());
         }
     };
@@ -103,27 +99,6 @@ async fn serve_connection(
     let mut stream = reader.into_inner();
     connect::reply_established(&mut stream).await?;
 
-    let (mut client_read, mut client_write) = stream.into_split();
-    let (mut remote_read, mut remote_write) = tokio::io::split(outbound);
-
-    let (up, down) = tokio::join!(
-        async {
-            let result = tokio::io::copy(&mut client_read, &mut remote_write).await;
-            let _ = remote_write.shutdown().await;
-            result
-        },
-        async {
-            let result = tokio::io::copy(&mut remote_read, &mut client_write).await;
-            let _ = client_write.shutdown().await;
-            result
-        }
-    );
-
-    tracing::debug!(
-        %target,
-        uploaded = up.unwrap_or(0),
-        downloaded = down.unwrap_or(0),
-        "соединение закрыто"
-    );
+    relay(&mut stream, &mut outbound, &request.target).await;
     Ok(())
 }

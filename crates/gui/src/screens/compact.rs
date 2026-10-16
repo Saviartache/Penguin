@@ -1,24 +1,8 @@
 //! Окно в покое: консоль и одна кнопка.
 //!
-//! Ради этого клиент и открывают: посмотреть, куда он ведёт, и нажать. Всё
-//! остальное — серверы, правила, журнал, настройки — живёт за кнопкой настроек
-//! в шапке и появляется, только когда за ним пришли.
-//!
-//! Экран — консольный вывод во всю площадь, а не карточка в середине пустоты.
-//! Рисует его [`crate::console`]; здесь только то, из каких строк он состоит:
-//!
-//! - сверху конфигурация: куда тоннель поведёт. Первой строкой, без шапки с
-//!   именем программы — имя стоит в заголовке окна, и второй раз его читать
-//!   незачем;
-//! - под ней состояние — словом и цветом;
-//! - дальше подпись трафика и его цифры: скорость приёма и отдачи, число
-//!   соединений;
-//! - между подписью и цифрами — поток данных, только пока соединение
-//!   поднимается или работает. Он забирает всю высоту, не занятую текстом, и
-//!   прижимает цифры к нижнему краю. Без соединения потока нет.
-//!
-//! Конфигурация и трафик показываются вместе, а не по очереди: переключение
-//! содержимого на одном месте заставляло бы искать глазами, что там сейчас.
+//! Консоль рисует [`crate::console`]; здесь её строки: конфигурация, состояние,
+//! заголовок трафика, поток данных (пока соединение поднимается или работает) и
+//! цифры, прижатые к нижнему краю.
 
 use iced::Element;
 use iced::widget::text;
@@ -32,58 +16,40 @@ use crate::app::state::State;
 use crate::console::{self, Line, Reveal};
 use crate::screens::tunnel::{Tone, describe, describe_button};
 
-/// Высота кнопки.
-///
-/// Заметно выше обычной: это единственное действие окна в покое, и промахнуться
-/// по нему не должно быть возможности.
+/// Высота кнопки: единственное действие окна не должно быть легко промахнуть.
 const BUTTON_HEIGHT: f32 = 40.0;
 
-/// Значение, которого нет.
-///
-/// Дефис, а не длинное тире: тире в моноширинном шрифте кита нет, подставленный
-/// вместо него системный глиф шире знака, и значение уезжало за правый край —
-/// единственная строка, где ровный край консоли ломался (см.
-/// [`crate::console`], правило про глифы).
+/// Значение, которого нет: дефис, а не тире (см. правило про глифы в [`crate::console`]).
 const NONE: &str = "-";
 
-/// Ход потока у поднятого тоннеля, который сейчас молчит.
-///
-/// Пятая часть полного: движение должно быть заметно — тоннель поднят, — но так,
-/// чтобы первый же обмен было видно как ускорение, а не как «что-то изменилось».
+/// Ход потока у поднятого, но молчащего тоннеля.
 const IDLE_FLOW: f32 = 0.2;
 
 /// Собирает компактный экран.
 pub fn view(state: &State) -> Element<'_, Message> {
-    // Колонка объявляет размер сама. Без этого она «по содержимому», а
-    // растянутая консоль внутри такой группы схлопывается в ноль: на экране
-    // осталась бы одна кнопка, прижатая к верхнему краю.
+    // Размер колонки явный: растянутая консоль в группе «по содержимому» схлопнется.
     Flex::col()
         .w(Size::FILL)
         .h(Size::FILL)
-        .push(screen(state))
+        .push(console::console(
+            &state.palette,
+            &lines(state),
+            reveal(state),
+        ))
         .push_auto(button(state))
         .gap(gap::SM)
         .build()
 }
 
-/// Консоль целиком.
-fn screen(state: &State) -> Element<'_, Message> {
-    console::console(&state.palette, &lines(state), reveal(state))
-}
-
-/// Строки консоли.
 fn lines(state: &State) -> Vec<Line> {
     let mut lines = config(state);
     lines.push(status(state));
     let traffic_head = Line::Section(crate::i18n::s().traffic.to_uppercase());
     if streaming(state) {
-        // Заголовок раздела стоит над потоком и служит ему подписью; поток
-        // забирает свободную высоту и прижимает цифры к нижнему краю.
         lines.push(traffic_head);
         lines.push(Line::Stream(load(state)));
     } else {
-        // Потока нет — свободную высоту держит пустота, и раздел трафика
-        // целиком стоит у нижнего края.
+        // Пустота прижимает раздел трафика к нижнему краю.
         lines.push(Line::Space);
         lines.push(traffic_head);
     }
@@ -91,35 +57,23 @@ fn lines(state: &State) -> Vec<Line> {
     lines
 }
 
-/// Показывать ли поток: только пока тоннель поднимается, работает или
-/// переподключается. Без соединения ему нечего показывать.
+/// Поток показывается, пока тоннель поднимается, работает или переподключается.
 fn streaming(state: &State) -> bool {
     matches!(
-        state.connection.tunnel_now(),
+        state.connection.tunnel,
         TunnelState::Connecting { .. }
             | TunnelState::Connected { .. }
             | TunnelState::Reconnecting { .. }
     )
 }
 
-/// Загрузка потока: свежая скорость долей от наибольшей за окно истории.
+/// Загрузка потока: свежая скорость долей от пика окна истории.
 ///
-/// Состояний ровно два. Тоннель не поднят — ноль: полотно стоит и только
-/// переливается, говоря лишь то, что окно живо. Поднят — полотно идёт, и тем
-/// быстрее, чем плотнее сейчас обмен.
-///
-/// Поэтому у поднятого тоннеля есть свой пол ([`IDLE_FLOW`]): молчащий тоннель
-/// — это всё-таки поднятый тоннель, и стоять его полотно не должно.
-///
-/// Шкала — наибольший отсчёт окна, а не предел канала: предела никто не знает,
-/// и доля от него была бы долей от выдуманного числа.
-///
-/// Ноль берётся из состояния, а не из последнего отсчёта: когда тоннель падает,
-/// новых замеров больше не приходит, и в истории так и остаётся последняя
-/// ненулевая скорость — поток разогнался бы на связи, которой уже нет.
+/// Ноль берётся из состояния, а не из отсчёта: после падения тоннеля в истории
+/// остаётся последняя ненулевая скорость. У поднятого тоннеля пол [`IDLE_FLOW`].
 fn load(state: &State) -> f32 {
     let connection = &state.connection;
-    if !matches!(connection.tunnel_now(), TunnelState::Connected { .. }) {
+    if !matches!(connection.tunnel, TunnelState::Connected { .. }) {
         return 0.0;
     }
 
@@ -132,7 +86,6 @@ fn load(state: &State) -> f32 {
     IDLE_FLOW + (1.0 - IDLE_FLOW) * rate
 }
 
-/// Что печатается при первом открытии, а дальше показывается целиком.
 fn reveal(state: &State) -> Reveal {
     match state.boot.progress() {
         Some(fraction) if fraction < 1.0 => Reveal::Typing(fraction),
@@ -140,14 +93,11 @@ fn reveal(state: &State) -> Reveal {
     }
 }
 
-/// Куда тоннель поведёт.
 fn config(state: &State) -> Vec<Line> {
     let strings = crate::i18n::s();
     let head = Line::Section(strings.configuration.to_uppercase());
 
     let Some(profile) = state.config.active() else {
-        // Профилей нет — говорить о конфигурации нечего, и столбец прочерков
-        // читался бы как поломка.
         return vec![head, pair(strings.profile, strings.no_profiles.to_owned())];
     };
 
@@ -180,10 +130,7 @@ fn config(state: &State) -> Vec<Line> {
     ]
 }
 
-/// Цифры под потоком.
-///
-/// Заголовка раздела здесь нет: поток над ними — и есть заголовок, а строка с
-/// чертой отняла бы у него высоту ни за что.
+/// Цифры под потоком; заголовком им служит сам поток.
 fn traffic(state: &State) -> Vec<Line> {
     let strings = crate::i18n::s();
     let connection = &state.connection;
@@ -199,8 +146,7 @@ fn traffic(state: &State) -> Vec<Line> {
 fn status(state: &State) -> Line {
     let connection = &state.connection;
 
-    // Остановка — первой: связь в этот момент ещё может быть жива, но
-    // показывать «Подключено» окну, которое уже закрывается, значит соврать.
+    // Остановка первой: «Подключено» закрывающемуся окну — вранье.
     let (label, tone) = if connection.stopping {
         (crate::i18n::s().daemon_stopping.to_owned(), Tone::Busy)
     } else if connection.online {
@@ -218,16 +164,11 @@ fn status(state: &State) -> Line {
     )
 }
 
-/// Строка «поле — значение» заглавными.
-///
-/// Регистр приводится здесь, а не в переводах: подписи те же, что и на других
-/// экранах, а заглавные — это про консоль. Держать ради неё второй набор
-/// переводов значило бы однажды поправить один и забыть другой.
+/// Строка «поле — значение»; заглавные только для консоли, переводы общие.
 fn pair(label: &str, value: String) -> Line {
     Line::Pair(label.to_uppercase(), value)
 }
 
-/// Единственное действие окна.
 fn button(state: &State) -> Element<'_, Message> {
     let (label, variant) = describe_button(&state.connection.tunnel);
 
@@ -239,12 +180,10 @@ fn button(state: &State) -> Element<'_, Message> {
         .into()
 }
 
-/// Скорость человеческими единицами.
 fn rate(bits: u64) -> String {
     format!("{}/с", size(bits / 8))
 }
 
-/// Объём человеческими единицами.
 fn size(bytes: u64) -> String {
     const STEP: f64 = 1024.0;
     const UNITS: [&str; 5] = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
@@ -275,9 +214,6 @@ mod tests {
     use super::*;
 
     /// Знаки, которых в моноширинном шрифте кита может не быть.
-    ///
-    /// Подставленный вместо такого знака системный глиф шире знака, и значение
-    /// уезжает за правый край — см. правило про глифы в [`crate::console`].
     const RISKY: [char; 3] = ['—', '–', '…'];
 
     fn with_profile() -> State {
@@ -292,9 +228,6 @@ mod tests {
 
     #[test]
     fn the_column_declares_its_own_size() {
-        // Растянутая консоль внутри группы «по содержимому» схлопывается в
-        // ноль, и на экране остаётся одна кнопка, прижатая к верхнему краю.
-        // Проверено на живом окне — выглядит как пустой экран.
         let state = State::default();
         let element = view(&state);
         let size = element.as_widget().size();
@@ -305,7 +238,6 @@ mod tests {
 
     #[test]
     fn renders_without_profiles() {
-        // Первый запуск: сервера ещё нет, а окно уже открыто.
         let state = State::default();
         let _ = view(&state);
     }
@@ -323,7 +255,6 @@ mod tests {
 
     #[test]
     fn the_console_opens_with_the_configuration() {
-        // Шапки с именем программы нет намеренно: имя стоит в заголовке окна.
         let state = with_profile();
         let Some(Line::Section(head)) = lines(&state).into_iter().next() else {
             panic!("первой строкой не заголовок раздела")
@@ -333,14 +264,11 @@ mod tests {
 
     #[test]
     fn without_a_connection_there_is_no_stream() {
-        // Строки стоят всегда, а потоку без соединения показывать нечего —
-        // ни без профилей, ни с профилем.
         for state in [State::default(), with_profile()] {
             let lines = lines(&state);
             assert!(!lines.iter().any(|line| matches!(line, Line::Stream(_))));
             assert!(matches!(lines.last(), Some(Line::Pair(..))), "цифр нет");
 
-            // Раздел трафика прижат к низу: пустота стоит прямо над ним.
             let at = lines
                 .iter()
                 .position(|line| matches!(line, Line::Space))
@@ -372,9 +300,6 @@ mod tests {
 
     #[test]
     fn a_stream_without_a_tunnel_stays_at_rest() {
-        // Когда тоннель падает, новых замеров больше не приходит, и в истории
-        // остаётся последняя ненулевая скорость: без этой проверки поток
-        // разогнался бы на связи, которой уже нет.
         let mut state = State::default();
         state.connection.apply_throughput(
             penguin_core::stats::Throughput {
@@ -397,8 +322,6 @@ mod tests {
 
     #[test]
     fn a_silent_tunnel_still_keeps_the_stream_going() {
-        // Поднятый тоннель без обмена — это всё-таки поднятый тоннель: полотно
-        // обязано идти, иначе связь на вид ничем не отличается от её отсутствия.
         let mut state = State::default();
         state.connection.online = true;
         state.connection.set_tunnel(TunnelState::Connected {
@@ -411,8 +334,6 @@ mod tests {
 
     #[test]
     fn the_stream_reads_the_freshest_sample_against_the_peak() {
-        // Загрузка — доля от наибольшего отсчёта окна, и она обязана остаться
-        // долей: за единицей поток быстрее не идёт, а меньше нуля не бывает.
         let mut state = State::default();
         state.connection.online = true;
         state.connection.set_tunnel(TunnelState::Connected {
@@ -450,8 +371,6 @@ mod tests {
 
     #[test]
     fn the_stream_stands_between_the_status_and_its_numbers() {
-        // Поток — единственная строка, которой достаётся высота; стоять она
-        // должна там, где раньше была пустота, а не под цифрами.
         let mut state = with_profile();
         state.connection.set_tunnel(TunnelState::Connected {
             profile: ProfileId::new("home"),
@@ -469,8 +388,6 @@ mod tests {
 
     #[test]
     fn the_status_line_says_what_is_happening() {
-        // Состояние стоит строкой консоли; потерять его значит оставить окно
-        // без единственного ответа, за которым его открывают.
         let mut state = State::default();
         state.connection.mark_offline("служба остановлена");
 
@@ -483,9 +400,6 @@ mod tests {
 
     #[test]
     fn a_service_we_are_stopping_ourselves_is_not_called_missing() {
-        // Окно закрывают: служба ушла со связи потому, что мы сами её гасим, и
-        // человек в этот момент отвечает на запрос пароля администратора.
-        // «Служба не отвечает» на экране — это обвинение самим себе.
         let mut state = State::default();
         state.connection.stopping = true;
         state.connection.mark_offline("служба остановлена");
@@ -498,7 +412,6 @@ mod tests {
 
     #[test]
     fn labels_read_as_console_labels() {
-        // Разнобой регистра в столбце подписей — первое, что видно в консоли.
         let Line::Pair(label, _) = pair(crate::i18n::s().mode, "TUN".to_owned()) else {
             panic!("не строка поля")
         };
@@ -507,17 +420,12 @@ mod tests {
 
     #[test]
     fn no_console_value_uses_a_glyph_the_font_may_lack() {
-        // Ровно так уезжала за правый край строка задержки: прочерк длинным
-        // тире брался из системного шрифта и рисовался шире, чем был измерен.
-        // Проверяется списком, а не глазами: увидеть это можно только на живом
-        // окне и только в той строке, где значение короткое.
         for line in &lines(&with_profile()) {
             let (label, value) = match line {
                 Line::Pair(label, value) | Line::Toned(label, value, _) => {
                     (label.as_str(), value.as_str())
                 }
                 Line::Section(label) => (label.as_str(), ""),
-                // У потока и пустоты знаков нет вовсе.
                 Line::Stream(_) | Line::Space => continue,
             };
 
@@ -536,7 +444,6 @@ mod tests {
 
     #[test]
     fn a_profile_without_a_latency_still_ends_at_the_right_edge() {
-        // Задержки нет — на её месте прочерк, и он обязан быть знаком шрифта.
         let latency = lines(&with_profile())
             .into_iter()
             .find_map(|line| match line {
@@ -560,8 +467,6 @@ mod tests {
 
     #[test]
     fn rate_is_bytes_per_second_not_bits() {
-        // Счётчики приходят в битах, а человек считает байтами: восьмикратная
-        // разница в подписи — это не мелочь.
         assert_eq!(rate(8 * 1024), "1.0 КБ/с");
     }
 }

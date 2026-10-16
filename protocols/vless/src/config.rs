@@ -10,34 +10,17 @@ use serde::{Deserialize, Serialize};
 use crate::error::{VlessError, VlessResult};
 use crate::reality::RealityConfig;
 
-/// Чем шифруется соединение до сервера.
-///
-/// Своего шифрования у VLESS нет вовсе — в этом его смысл: TLS внутри TLS
-/// стоит заметно, и второй раз шифровать то, что уже зашифровано, незачем.
-/// Значит, шифрует только это поле.
+/// Чем шифруется соединение до сервера (у самого VLESS шифрования нет).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Security {
-    /// TLS. Обычный случай.
+    /// TLS.
     #[default]
     Tls,
-    /// Ничего.
-    ///
-    /// Законно ровно в одном случае: когда TLS снимает кто-то другой — сеть
-    /// доставки перед сервером или соседний тоннель. Само по себе это значит,
-    /// что UUID и адрес назначения идут по сети открытым текстом.
+    /// Без TLS: UUID и адрес идут открытым текстом; законно, только если TLS снимает сеть доставки.
     None,
-    /// Reality: свой `ClientHello` с отпечатком браузера вместо обычного
-    /// TLS. Настройки — в [`VlessConfig::reality`].
-    ///
-    /// Рукопожатие доведено до прикладных ключей TLS 1.3
-    /// ([`crate::reality::handshake::connect`]) — канал несёт байты VLESS.
-    /// Но «канал открылся» здесь ещё не значит «сервер нас узнал»: HMAC над
-    /// сертификатом ([`crate::reality`], `auth.rs`) — формула, сверенная
-    /// только между `Xray-core` и `sing-box`, без опубликованных тестовых
-    /// векторов, и её ошибку сервер не покажет отказом — он просто
-    /// перешлёт `ClientHello` настоящему сайту, за который себя выдаёт, и
-    /// TLS 1.3 с этим сайтом тоже успешно откроется.
+    /// Reality ([`VlessConfig::reality`]). «Канал открылся» не значит «сервер узнал»: формула
+    /// сверена лишь между `Xray-core` и `sing-box`, а непризнанный клиент попадает на сайт-прикрытие.
     Reality,
 }
 
@@ -48,19 +31,11 @@ pub struct VlessConfig {
     /// Адрес сервера: `example.com:443`.
     pub server: String,
 
-    /// UUID пользователя.
-    ///
-    /// Единственное, что отличает своего от чужого: пароля рядом нет. В
-    /// журнал он не уходит — за этим следит сам тип.
+    /// UUID пользователя; пароля нет, в журнал не уходит.
     pub uuid: Uuid,
 
-    /// Дополнение к потоку: единственное, что здесь понимают, —
-    /// [`crate::frame::addons::FLOW_VISION`], и только вместе с
-    /// `security = "reality"` и `transport = "tcp"` — подробности и почему
-    /// именно так в [`crate::vision`]. Любое другое непустое значение,
-    /// `security = "none"`, обычный `security = "tls"` или перенос кроме
-    /// `tcp` — ошибка настроек ([`Self::validate`]), а не тихое
-    /// игнорирование.
+    /// Только [`crate::frame::addons::FLOW_VISION`] и только с Reality и `tcp`
+    /// ([`crate::vision`]); остальное — ошибка [`Self::validate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flow: Option<String>,
 
@@ -119,8 +94,7 @@ impl VlessConfig {
         self.path.as_deref().map_or("", str::trim)
     }
 
-    /// `flow`, обрезанный по краям и приведённый к `None`, если пуст — так
-    /// его пишут в ссылках: поле есть, значения нет.
+    /// `flow` без пробелов; пустой — `None` (так пишут в ссылках).
     pub fn flow(&self) -> Option<&str> {
         self.flow
             .as_deref()
@@ -163,37 +137,7 @@ impl VlessConfig {
             ));
         }
         if let Some(flow) = self.flow() {
-            if flow != crate::frame::addons::FLOW_VISION {
-                return Err(VlessError::config(format!(
-                    "`flow = {flow}` не поддерживается: понимаем только \
-                     `{vision}`",
-                    vision = crate::frame::addons::FLOW_VISION,
-                )));
-            }
-            match self.security {
-                Security::None => {
-                    return Err(VlessError::config(format!(
-                        "`flow = {flow}` вместе с `security = \"none\"`: Vision разбирает \
-                         записи TLS, а без TLS вообще их не будет — либо включите \
-                         `security = \"reality\"`, либо уберите `flow`"
-                    )));
-                }
-                Security::Tls => {
-                    return Err(VlessError::config(format!(
-                        "`flow = {flow}` поддержан только при `security = \"reality\"`: \
-                         Vision пишет TLS-записи в обход шифрования, а `rustls` \
-                         (`security = \"tls\"`) не даёт для этого доступа к своему \
-                         состоянию — см. `crate::vision`"
-                    )));
-                }
-                Security::Reality => {}
-            }
-            if self.transport != Transport::Tcp {
-                return Err(VlessError::config(format!(
-                    "`flow = {flow}` поддержан только с `transport = \"tcp\"`: перенос \
-                     рвёт прямую границу с внешним TLS, которая нужна для переключения"
-                )));
-            }
+            self.validate_flow(flow)?;
         }
         if self.security != Security::Reality && self.reality.is_some() {
             return Err(VlessError::config(
@@ -237,12 +181,45 @@ impl VlessConfig {
                 "путь и `host` заданы у голого потока: выберите `grpc` или `xhttp`",
             ));
         }
-        // QUIC несёт свой TLS 1.3: ни Reality, ни поток без шифрования
-        // поверх него не лягут.
         if self.transport.is_quic() && self.security != Security::Tls {
             return Err(VlessError::config(
                 "`transport = \"xhttp\"` идёт по HTTP/3 и требует `security = \"tls\"`",
             ));
+        }
+        Ok(())
+    }
+
+    /// Vision: только Reality и `tcp`, иначе нет доступа к записям внешнего TLS.
+    fn validate_flow(&self, flow: &str) -> VlessResult<()> {
+        if flow != crate::frame::addons::FLOW_VISION {
+            return Err(VlessError::config(format!(
+                "`flow = {flow}` не поддерживается: понимаем только `{vision}`",
+                vision = crate::frame::addons::FLOW_VISION,
+            )));
+        }
+        match self.security {
+            Security::None => {
+                return Err(VlessError::config(format!(
+                    "`flow = {flow}` вместе с `security = \"none\"`: Vision разбирает \
+                     записи TLS, а без TLS вообще их не будет — либо включите \
+                     `security = \"reality\"`, либо уберите `flow`"
+                )));
+            }
+            Security::Tls => {
+                return Err(VlessError::config(format!(
+                    "`flow = {flow}` поддержан только при `security = \"reality\"`: \
+                     Vision пишет TLS-записи в обход шифрования, а `rustls` \
+                     (`security = \"tls\"`) не даёт для этого доступа к своему \
+                     состоянию — см. `crate::vision`"
+                )));
+            }
+            Security::Reality => {}
+        }
+        if self.transport != Transport::Tcp {
+            return Err(VlessError::config(format!(
+                "`flow = {flow}` поддержан только с `transport = \"tcp\"`: перенос \
+                 рвёт прямую границу с внешним TLS, которая нужна для переключения"
+            )));
         }
         Ok(())
     }
@@ -280,8 +257,6 @@ mod tests {
 
     #[test]
     fn a_nil_uuid_is_refused() {
-        // Сервер отличает своих только по нему; нули означают незаполненное
-        // поле, а не «вход без имени».
         let config = VlessConfig {
             uuid: Uuid::nil(),
             ..config()
@@ -291,8 +266,6 @@ mod tests {
 
     #[test]
     fn an_unknown_flow_is_refused_by_name() {
-        // Принять его молча значит подключаться не тем способом, о котором
-        // договорились с сервером, — и получить молчание вместо ошибки.
         let config = VlessConfig {
             security: Security::Reality,
             reality: Some(reality()),
@@ -305,9 +278,6 @@ mod tests {
 
     #[test]
     fn vision_without_reality_is_refused() {
-        // Vision пишет TLS-записи в обход шифрования; `rustls` не даёт
-        // такого доступа — принять `flow` молча значило бы подключаться не
-        // тем способом, о котором договорились с сервером.
         let config = VlessConfig {
             flow: Some("xtls-rprx-vision".to_owned()),
             ..config()
@@ -358,7 +328,6 @@ mod tests {
 
     #[test]
     fn an_empty_flow_is_the_same_as_none() {
-        // Так его пишут в ссылках: поле есть, значения нет.
         let config = VlessConfig {
             flow: Some("  ".to_owned()),
             ..config()
@@ -368,8 +337,6 @@ mod tests {
 
     #[test]
     fn tls_settings_without_tls_are_refused() {
-        // Иначе человек задаёт SNI, видит сохранённый профиль и уверен, что
-        // TLS есть, — а UUID всё это время уходит открытым текстом.
         let mut config = VlessConfig {
             security: Security::None,
             ..config()
@@ -380,7 +347,6 @@ mod tests {
 
     #[test]
     fn security_none_alone_is_allowed() {
-        // Законно, когда TLS снимает сеть доставки перед сервером.
         let config = VlessConfig {
             security: Security::None,
             ..config()
@@ -411,8 +377,6 @@ mod tests {
 
     #[test]
     fn reality_settings_without_reality_security_are_refused() {
-        // Иначе человек заполняет блок `reality`, ничего не включив, и
-        // считает, что он уже действует.
         let config = VlessConfig {
             reality: Some(reality()),
             ..config()
@@ -422,8 +386,6 @@ mod tests {
 
     #[test]
     fn tls_settings_together_with_reality_are_refused() {
-        // Reality не использует обычный TLS вовсе — заданный SNI молча
-        // ничего не изменил бы.
         let mut config = VlessConfig {
             security: Security::Reality,
             reality: Some(reality()),
@@ -462,7 +424,6 @@ mod tests {
 
     #[test]
     fn xhttp_needs_plain_tls() {
-        // HTTP/3 несёт свой TLS 1.3 в QUIC: Reality и `none` на него не лягут.
         let over_quic = VlessConfig {
             security: Security::Reality,
             reality: Some(reality()),
@@ -495,8 +456,6 @@ mod tests {
 
     #[test]
     fn something_that_is_not_a_uuid_is_refused() {
-        // В поле UUID вставляют пароль — обычная ошибка, и ответ на неё
-        // должен быть «это не UUID», а не молчание.
         let params = json!({ "server": "a.io:443", "uuid": "просто-пароль" });
         assert!(serde_json::from_value::<VlessConfig>(params).is_err());
     }

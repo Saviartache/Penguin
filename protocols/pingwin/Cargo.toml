@@ -12,26 +12,20 @@ description = "Протокол Pingwin: прокси поверх HTTP/3 с о�
 workspace = true
 
 [dependencies]
-# Протокол зависит только от контракта, общих типов и крейта своего уровня
-# (AGENTS.md §1.1, §1.1.1). Ни одного крейта из `crates/`, кроме `core` и
-# `proto`.
 penguin-core.workspace = true
 penguin-proto.workspace = true
-# QUIC и свой HTTP/3 клиента.
 penguin-transport = { workspace = true, features = ["quic"] }
 
 tokio = { workspace = true, features = ["rt", "io-util", "sync", "time"] }
 async-trait.workspace = true
 bytes.workspace = true
 serde.workspace = true
-# Параметры протокола приходят от `penguin-config` непрозрачным JSON.
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# HKDF-SHA256 опознания — тот же провайдер, что у `penguin-transport`.
+# HKDF-SHA256 опознания
 ring.workspace = true
-# Постоянный ключ сервера участвует в согласовании на каждом соединении, а
-# `ring::agreement` тратит закрытый ключ первым же вызовом.
+# Многоразовый секрет: `ring::agreement` тратит ключ
 x25519-dalek.workspace = true
 
 [dev-dependencies]

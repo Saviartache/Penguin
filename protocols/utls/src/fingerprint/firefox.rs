@@ -1,53 +1,15 @@
-//! Firefox 120 (ноябрь 2023, `HelloFirefox_120` в uTLS, `u_parrots.go` на
-//! ревизии `23b1dac`).
+//! Firefox 120 (`HelloFirefox_120`, uTLS `u_parrots.go`, ревизия `23b1dac`).
 //!
-//! # Ни GREASE, ни перемешивания
-//!
-//! GREASE (RFC 8701) — придумка BoringSSL, а у Firefox своя криптобиблиотека,
-//! NSS, которая её не реализует вовсе. Список шифров, кривых и версий у
-//! Firefox настоящий целиком, без единой пустышки, а порядок расширений
-//! фиксирован и не меняется от соединения к соединению — то, что делает
-//! Chrome с версии 106, у Firefox не появилось. Отсутствие GREASE — тоже
-//! часть отпечатка: клиент, назвавшийся Firefox, но вставивший хоть одно
-//! значение `0x?A?A`, был бы виден с одного пакета.
-//!
-//! Единственное исключение с виду похоже на GREASE, но им не является:
-//! `encrypted_client_hello` в варианте «тревога» определён самим черновиком
-//! ECH (draft-ietf-tls-esni), а не BoringSSL, и его посылают все, кто
-//! поддержал черновик, включая NSS.
-//!
-//! # Два настоящих ключа в `key_share`
-//!
-//! Firefox предлагает не одну группу, а две — `X25519` и `P-256` — с
-//! настоящими точками у обеих. Если сервер (или сайт, которому Reality
-//! перешлёт `ClientHello` вхолостую) выберет вторую, рукопожатие всё ещё
-//! можно довершить: `crate::key_exchange::generate_p256` тоже отдаёт
-//! пригодный закрытый ключ, не только байты для вида.
-//!
-//! # Расширения без формы generic-кодировщиков
-//!
-//! `delegated_credentials` (34) и `record_size_limit` (28) у Firefox —
-//! черновики без общепринятого номера ("fake" в терминах uTLS: код есть,
-//! реализация неполная и у клиента, и часто у сервера). Первый по форме
-//! совпадает с `signature_algorithms` — список идентичный, отличается только
-//! код расширения, поэтому переиспользован тот же `generic::u16_list_u16_len`.
-//!
-//! Сверка: строка JA3, найденная поиском и подписанная «Firefox 120», не
-//! совпала с набором расширений и шифров из этого файла (в ней есть `padding`
-//! и ALPS, которых у Firefox не бывает, и шифры DHE, которых нет ни в одной
-//! версии Firefox из uTLS) — это чужой или ошибочно подписанный пример, а не
-//! настоящий захват. Доверять ему нельзя, и в решении он не участвовал:
-//! список ниже сверен только с исходником uTLS.
-
-use rand::RngCore;
+//! NSS: без GREASE и без перемешивания; в `key_share` настоящие X25519 и P-256.
+//! Сверено только с исходником uTLS.
 
 use crate::client_hello::ExtensionSlot;
 use crate::error::UtlsResult;
 use crate::extension::{ech_grease, fixed, generic, sni};
 use crate::key_exchange::{self, KeyExchange};
+use crate::rng::Rng;
 
-/// Шифры, точно в этом порядке. GREASE среди них нет ни одного — см. текст
-/// модуля.
+/// Шифры, точно в этом порядке.
 pub const CIPHER_SUITES: &[u16] = &[
     0x1301, // TLS_AES_128_GCM_SHA256
     0x1303, // TLS_CHACHA20_POLY1305_SHA256
@@ -68,26 +30,18 @@ pub const CIPHER_SUITES: &[u16] = &[
     0x0035, // TLS_RSA_WITH_AES_256_CBC_SHA
 ];
 
-/// Единственный метод сжатия — TLS 1.3 запрещает любой, кроме этого, но поле
-/// осталось от совместимости и должно быть заполнено.
+/// Метод сжатия: только `null`.
 pub const COMPRESSION_METHODS: &[u8] = &[0];
 
 const CURVE_X25519: u16 = 29;
 const CURVE_P256: u16 = 23;
 const CURVE_P384: u16 = 24;
 const CURVE_P521: u16 = 25;
-/// `ffdhe2048` (RFC 7919, §3) — Firefox называет и конечно-полевые группы,
-/// хотя ключ по ним не строит ни при каких настройках по умолчанию.
 const GROUP_FFDHE2048: u16 = 0x0100;
-/// `ffdhe3072`.
 const GROUP_FFDHE3072: u16 = 0x0101;
 
-/// Единственная длина открытого текста, которую предлагает GREASE ECH у
-/// Firefox, — в отличие от Chrome, у которого их четыре на выбор.
 const ECH_GREASE_PAYLOAD_LENS: &[u16] = &[223];
 
-/// В отличие от Chrome (`BoringGREASEECH()`), у Firefox два кандидата AEAD:
-/// сервер должен быть готов увидеть оба, и на разных соединениях увидит.
 const ECH_GREASE_AEADS: &[u16] = &[
     ech_grease::AEAD_AES_128_GCM,
     ech_grease::AEAD_CHACHA20_POLY1305,
@@ -95,16 +49,13 @@ const ECH_GREASE_AEADS: &[u16] = &[
 
 /// Собирает расширения и запрашивает пары ключей `X25519` и `P-256`.
 pub(crate) fn build(
-    rng: &mut impl RngCore,
+    rng: &mut impl Rng,
     host: &str,
 ) -> UtlsResult<(Vec<ExtensionSlot>, Vec<KeyExchange>)> {
     let system_rng = ring::rand::SystemRandom::new();
     let x25519 = key_exchange::generate_x25519();
     let p256 = key_exchange::generate_p256(&system_rng)?;
 
-    // Ни одно расширение здесь не якорь: Firefox не перемешивает порядок,
-    // и вся эта разметка нужна только для того, чтобы делить один и тот же
-    // тип слота с Chrome в общей сборке (`crate::client_hello::assemble`).
     let fixed_slot = |bytes: Vec<u8>| ExtensionSlot {
         bytes,
         anchored: true,
@@ -136,7 +87,7 @@ pub(crate) fn build(
         )),
         fixed_slot(fixed::status_request()),
         fixed_slot(generic::u16_list_u16_len(
-            34, // delegated_credentials (черновик, "fake" в терминах uTLS)
+            34, // delegated_credentials
             &[
                 0x0403, // ecdsa_secp256r1_sha256
                 0x0503, // ecdsa_secp384r1_sha384
@@ -155,7 +106,7 @@ pub(crate) fn build(
             },
         ])),
         fixed_slot(generic::u16_list_u8_len(
-            43, // supported_versions — без GREASE, см. текст модуля
+            43, // supported_versions
             &[0x0304, 0x0303],
         )),
         fixed_slot(generic::u16_list_u16_len(
@@ -189,10 +140,11 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rng::testing::StepRng;
 
     #[test]
     fn no_cipher_or_extension_is_grease() {
-        let mut rng = rand::rngs::mock::StepRng::new(1, 1);
+        let mut rng = StepRng::new(1, 1);
         for cipher in CIPHER_SUITES {
             assert!(!crate::grease::is_grease(*cipher));
         }
@@ -203,7 +155,7 @@ mod tests {
 
     #[test]
     fn the_second_key_is_a_real_p256_point() {
-        let mut rng = rand::rngs::mock::StepRng::new(9, 3);
+        let mut rng = StepRng::new(9, 3);
         let (_, keys) = build(&mut rng, "example.com").expect("собирается");
         assert_eq!(keys[0].public.len(), 32, "первый ключ — X25519");
         assert_eq!(keys[1].public.len(), 65, "второй — несжатая точка P-256");

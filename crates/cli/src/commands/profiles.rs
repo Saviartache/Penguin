@@ -1,8 +1,6 @@
 //! Профили: список и проверка настроек.
 //!
-//! Проверка идёт **без сети**: разбираются параметры протокола и его
-//! собственные требования к ним. Ошибку в адресе или в отсутствующем пароле
-//! пользователь узнаёт сразу, а не через минуту неудачного подключения.
+//! Проверка без сети: ошибка в адресе или пароле видна сразу, а не после неудачного подключения.
 
 use std::sync::Arc;
 
@@ -52,8 +50,6 @@ fn list(config: &RootConfig, format: Format) -> Result<()> {
             id: profile.id.to_string(),
             name: profile.name.clone(),
             protocol: profile.outbound.protocol.clone(),
-            // Адрес сервера показывается как есть, без разбора: интерфейсу
-            // незачем знать схему параметров протокола.
             server: profile
                 .outbound
                 .field("server")
@@ -95,9 +91,7 @@ fn list(config: &RootConfig, format: Format) -> Result<()> {
 }
 
 fn check(config: &RootConfig, wanted: Option<&str>, format: Format) -> Result<()> {
-    // Загрузочный разрешатель, как и везде, где спрашивают имя сервера:
-    // системный к этому моменту может отвечать подставными адресами, которые
-    // оставил после себя прошлый запуск (см. [`penguin_dns::bootstrap`]).
+    // Загрузочный резолвер: системный может отвечать подменой прошлого запуска (`penguin_dns::bootstrap`).
     let pool = OutboundPool::new(Arc::new(SystemDialer::new(
         penguin_dns::bootstrap::resolver_for(&config.dns),
     )));
@@ -182,14 +176,12 @@ mod tests {
     fn listing_marks_the_active_profile() {
         let config = config();
         let active = config.active().expect("есть активный");
-        // Явно выбранного нет — активным считается первый.
         assert_eq!(active.id.as_str(), "home");
     }
 
     #[cfg(feature = "hysteria2")]
     #[test]
     fn check_separates_good_from_broken() {
-        // Проверка идёт без сети: ошибку в поле надо показать сразу.
         let config = config();
         let pool = OutboundPool::new(Arc::new(SystemDialer::new(
             penguin_dns::bootstrap::resolver_for(&config.dns),

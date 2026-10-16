@@ -16,166 +16,153 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
             app.state_mut().servers.search = value;
             Task::none()
         }
-
-        ServersMessage::Select(id) => {
-            let profile = ProfileId::new(&id);
-
-            // Выбор профиля сохраняется сразу, без «Сохранить»: это не правка
-            // настроек, а действие — пользователь выбрал, куда подключаться.
-            app.state_mut().config.active_profile = Some(profile.clone());
-
-            Task::batch([
-                save(app),
-                // Если тоннель уже поднят, переключение профиля должно его
-                // переподключить: иначе выбор ничего не изменит до следующего
-                // запуска.
-                if app.state().connection.tunnel.is_active() {
-                    request(Request::Connect {
-                        profile: Some(profile),
-                    })
-                } else {
-                    Task::none()
-                },
-            ])
-        }
-
+        ServersMessage::Select(id) => select(app, &id),
         ServersMessage::Probe => {
             app.state_mut().servers.probing = true;
             app.state_mut().servers.latencies.clear();
             request(Request::Probe { profile: None })
         }
-
         ServersMessage::PickerOpened => {
             app.state_mut().servers.picker = true;
             app.state_mut().servers.link.clear();
             Task::none()
         }
-
         ServersMessage::PickerClosed => {
             app.state_mut().servers.picker = false;
             Task::none()
         }
-
-        ServersMessage::ProtocolChosen(id) => {
-            // Протокола нет в каталоге — значит, список собран не им, и
-            // открывать нечего. Такого не бывает: список и есть каталог.
-            let Some(spec) = crate::forms::protocol::by_id(id) else {
-                return Task::none();
-            };
-
-            let state = app.state_mut();
-            state.servers.picker = false;
-            state.servers.editor = Some(editor::Draft::new(spec));
-            state.servers.link.clear();
-            Task::none()
-        }
-
-        ServersMessage::EditorOpened(id) => {
-            // Профиль мог исчезнуть между отрисовкой списка и щелчком.
-            let Some(profile) = app.state().config.profile(&ProfileId::new(&id)) else {
-                return Task::none();
-            };
-
-            let draft = editor::Draft::from_profile(profile);
-            let state = app.state_mut();
-            state.servers.editor = Some(draft);
-            state.servers.picker = false;
-            state.servers.link.clear();
-            Task::none()
-        }
-
+        ServersMessage::ProtocolChosen(id) => choose_protocol(app, id),
+        ServersMessage::EditorOpened(id) => open_editor(app, &id),
         ServersMessage::EditorClosed => {
             let state = app.state_mut();
             state.servers.editor = None;
             state.servers.link.clear();
             Task::none()
         }
-
-        ServersMessage::LinkChanged(raw) => {
-            let state = app.state_mut();
-            state.servers.link = raw;
-
-            // Разбирается только то, что похоже на ссылку. Пока человек
-            // печатает, каждое нажатие клавиши давало бы новую ошибку — а он
-            // ещё не закончил.
-            if crate::forms::link::looks_like_link(&state.servers.link)
-                && let Ok(draft) = crate::forms::link::parse(&state.servers.link)
-            {
-                // Правка существующего профиля сохраняет его идентификатор: на
-                // него ссылаются правила, и вставка ссылки не должна их
-                // ломать.
-                let id = state
-                    .servers
-                    .editor
-                    .as_ref()
-                    .and_then(|open| open.id.clone());
-                state.servers.editor = Some(draft.with_id(id));
-            }
-            Task::none()
-        }
-
+        ServersMessage::LinkChanged(raw) => paste_link(app, raw),
         ServersMessage::EditorNameChanged(value) => {
             if let Some(draft) = app.state_mut().servers.editor.as_mut() {
                 draft.name = value;
             }
             Task::none()
         }
-
         ServersMessage::EditorChanged(index, value) => {
             if let Some(draft) = app.state_mut().servers.editor.as_mut() {
                 draft.set_at(index, value);
             }
             Task::none()
         }
-
         ServersMessage::EditorToggled(index, value) => {
             if let Some(draft) = app.state_mut().servers.editor.as_mut() {
                 draft.toggle_at(index, value);
             }
             Task::none()
         }
-
-        ServersMessage::EditorSubmitted => {
-            let Some(draft) = app.state().servers.editor.as_ref() else {
-                return Task::none();
-            };
-            // Неверный черновик не сохраняется молча: причина уже видна в
-            // самом редакторе, и закрывать его значило бы её спрятать.
-            let Ok(profile) = draft.to_profile() else {
-                return Task::none();
-            };
-
-            let state = app.state_mut();
-            match state
-                .config
-                .profiles
-                .iter_mut()
-                .find(|known| known.id == profile.id)
-            {
-                Some(existing) => *existing = profile,
-                None => state.config.profiles.push(profile),
-            }
-            state.servers.editor = None;
-            state.servers.link.clear();
-
-            save(app)
-        }
-
-        ServersMessage::Removed(id) => {
-            let profile = ProfileId::new(&id);
-            let state = app.state_mut();
-
-            state.config.profiles.retain(|known| known.id != profile);
-            state.servers.editor = None;
-            // Активный профиль удалён — выбор снимается, и активным
-            // становится первый в списке: указывать на удалённый нельзя.
-            if state.config.active_profile.as_ref() == Some(&profile) {
-                state.config.active_profile = None;
-            }
-
-            save(app)
-        }
+        ServersMessage::EditorSubmitted => submit(app),
+        ServersMessage::Removed(id) => remove(app, &id),
     }
+}
+
+/// Выбор сохраняется сразу; поднятый тоннель переподключается на новый профиль.
+fn select(app: &mut App, id: &str) -> Task<Message> {
+    let profile = ProfileId::new(id);
+    app.state_mut().config.active_profile = Some(profile.clone());
+
+    Task::batch([
+        save(app),
+        if app.state().connection.tunnel.is_active() {
+            request(Request::Connect {
+                profile: Some(profile),
+            })
+        } else {
+            Task::none()
+        },
+    ])
+}
+
+fn choose_protocol(app: &mut App, id: &str) -> Task<Message> {
+    // Список и есть каталог, чужого id быть не может.
+    let Some(spec) = crate::forms::protocol::by_id(id) else {
+        return Task::none();
+    };
+
+    let state = app.state_mut();
+    state.servers.picker = false;
+    state.servers.editor = Some(editor::Draft::new(spec));
+    state.servers.link.clear();
+    Task::none()
+}
+
+fn open_editor(app: &mut App, id: &str) -> Task<Message> {
+    // Профиль мог исчезнуть между отрисовкой и щелчком.
+    let Some(profile) = app.state().config.profile(&ProfileId::new(id)) else {
+        return Task::none();
+    };
+
+    let draft = editor::Draft::from_profile(profile);
+    let state = app.state_mut();
+    state.servers.editor = Some(draft);
+    state.servers.picker = false;
+    state.servers.link.clear();
+    Task::none()
+}
+
+/// Разбирается только похожее на ссылку: иначе каждая буква давала бы ошибку.
+/// Идентификатор правящегося профиля сохраняется: на него ссылаются правила.
+fn paste_link(app: &mut App, raw: String) -> Task<Message> {
+    let state = app.state_mut();
+    state.servers.link = raw;
+
+    if crate::forms::link::looks_like_link(&state.servers.link)
+        && let Ok(draft) = crate::forms::link::parse(&state.servers.link)
+    {
+        let id = state
+            .servers
+            .editor
+            .as_ref()
+            .and_then(|open| open.id.clone());
+        state.servers.editor = Some(draft.with_id(id));
+    }
+    Task::none()
+}
+
+fn submit(app: &mut App) -> Task<Message> {
+    let Some(draft) = app.state().servers.editor.as_ref() else {
+        return Task::none();
+    };
+    // Неверный черновик не закрывается: причина видна в редакторе.
+    let Ok(profile) = draft.to_profile() else {
+        return Task::none();
+    };
+
+    let state = app.state_mut();
+    match state
+        .config
+        .profiles
+        .iter_mut()
+        .find(|known| known.id == profile.id)
+    {
+        Some(existing) => *existing = profile,
+        None => state.config.profiles.push(profile),
+    }
+    state.servers.editor = None;
+    state.servers.link.clear();
+
+    save(app)
+}
+
+/// Удаляет профиль; выбор на удалённый снимается (активным станет первый).
+fn remove(app: &mut App, id: &str) -> Task<Message> {
+    let profile = ProfileId::new(id);
+    let state = app.state_mut();
+
+    state.config.profiles.retain(|known| known.id != profile);
+    state.servers.editor = None;
+    if state.config.active_profile.as_ref() == Some(&profile) {
+        state.config.active_profile = None;
+    }
+
+    save(app)
 }
 
 #[cfg(test)]
@@ -201,7 +188,6 @@ mod tests {
         app
     }
 
-    /// Открытый черновик.
     fn draft(app: &App) -> &editor::Draft {
         app.state()
             .servers
@@ -210,7 +196,7 @@ mod tests {
             .expect("редактор открыт")
     }
 
-    /// Набирает одно поле открытой формы по его имени.
+    /// Набирает поле открытой формы по имени.
     fn field(app: &mut App, key: &str, value: &str) {
         let index = draft(app)
             .spec()
@@ -219,7 +205,6 @@ mod tests {
         let _ = handle(app, ServersMessage::EditorChanged(index, value.to_owned()));
     }
 
-    /// Открывает форму нового профиля указанного протокола.
     fn new_profile(app: &mut App, protocol: &'static str) {
         let _ = handle(app, ServersMessage::PickerOpened);
         let _ = handle(app, ServersMessage::ProtocolChosen(protocol));
@@ -227,8 +212,6 @@ mod tests {
 
     #[test]
     fn selecting_a_profile_records_it() {
-        // Это не правка настроек, а действие: пользователь выбрал, куда
-        // подключаться, и ждать «Сохранить» здесь неуместно.
         let mut app = app_with_profiles(&["home", "office"]);
         let _ = handle(&mut app, ServersMessage::Select("office".to_owned()));
 
@@ -244,8 +227,6 @@ mod tests {
 
     #[test]
     fn probing_clears_previous_results() {
-        // Старые задержки рядом с крутящимся индикатором читаются как
-        // свежие — а они уже неверны.
         let mut app = app_with_profiles(&["home"]);
         app.state_mut().servers.latencies = vec![("home".to_owned(), Some(42))];
 
@@ -257,7 +238,6 @@ mod tests {
 
     #[test]
     fn adding_a_server_asks_for_the_protocol_first() {
-        // Полей у формы нет, пока не известно, чьи они.
         let mut app = app_with_profiles(&[]);
         let _ = handle(&mut app, ServersMessage::PickerOpened);
 
@@ -297,8 +277,6 @@ mod tests {
 
     #[test]
     fn opening_the_editor_on_a_profile_fills_it() {
-        // Пустая форма на правке существующего профиля означала бы, что
-        // сохранение стирает всё, чего в ней не набрали заново.
         let mut app = app_with_profiles(&["home"]);
         let _ = handle(&mut app, ServersMessage::EditorOpened("home".to_owned()));
 
@@ -310,8 +288,6 @@ mod tests {
 
     #[test]
     fn an_unknown_identifier_opens_nothing() {
-        // Список мог измениться между отрисовкой и щелчком; открывать пустую
-        // форму на месте правки значило бы завести профиль из ничего.
         let mut app = app_with_profiles(&["home"]);
         let _ = handle(
             &mut app,
@@ -344,8 +320,6 @@ mod tests {
 
     #[test]
     fn saving_a_proxy_profile_writes_its_protocol() {
-        // Ради этого выбор протокола и заводился: сохраниться обязан тот, что
-        // выбрали, а не тот, что был первым.
         let mut app = app_with_profiles(&[]);
         new_profile(&mut app, "socks5");
         field(&mut app, "server", "127.0.0.1:1080");
@@ -403,8 +377,6 @@ mod tests {
 
     #[test]
     fn an_invalid_draft_keeps_the_editor_open() {
-        // Причина уже видна в самой форме; закрыть её значило бы спрятать
-        // ошибку и молча ничего не сохранить.
         let mut app = app_with_profiles(&[]);
         new_profile(&mut app, "hysteria2");
         let _ = handle(&mut app, ServersMessage::EditorSubmitted);
@@ -415,8 +387,6 @@ mod tests {
 
     #[test]
     fn removing_the_active_profile_clears_the_choice() {
-        // Указывать на удалённый профиль нельзя: демон полез бы за ним и не
-        // нашёл.
         let mut app = app_with_profiles(&["home", "office"]);
         let _ = handle(&mut app, ServersMessage::Select("home".to_owned()));
 
@@ -424,7 +394,7 @@ mod tests {
 
         assert_eq!(app.state().config.profiles.len(), 1);
         assert!(app.state().config.active_profile.is_none());
-        // Активным становится первый в списке — им и остаётся выбор.
+        // Активным становится первый в списке.
         assert_eq!(
             app.state().config.active().map(|p| p.id.as_str()),
             Some("office")
@@ -448,13 +418,11 @@ mod tests {
         );
     }
 
-    /// Ссылка из задачи — та, ради которой импорт и заводился.
     const LINK: &str =
         "hy2://source:s3cret@example.net:3478?sni=example.net&alpn=h3&insecure=0#source";
 
     #[test]
     fn a_pasted_link_fills_the_form() {
-        // Ради этого импорт и заводился: вставил — остальное заполнилось само.
         let mut app = app_with_profiles(&[]);
         new_profile(&mut app, "hysteria2");
         let _ = handle(&mut app, ServersMessage::LinkChanged(LINK.to_owned()));
@@ -469,7 +437,6 @@ mod tests {
 
     #[test]
     fn a_pasted_link_switches_the_protocol_to_its_own() {
-        // Ссылка знает свой протокол лучше, чем тот, кого выбрали до неё.
         let mut app = app_with_profiles(&[]);
         new_profile(&mut app, "hysteria2");
         let _ = handle(
@@ -482,7 +449,6 @@ mod tests {
 
     #[test]
     fn a_pasted_link_saves_as_a_profile() {
-        // Заполнить форму мало: профиль обязан дойти до списка.
         let mut app = app_with_profiles(&[]);
         new_profile(&mut app, "hysteria2");
         let _ = handle(
@@ -498,8 +464,6 @@ mod tests {
 
     #[test]
     fn a_link_pasted_while_editing_keeps_the_identifier() {
-        // На идентификатор ссылаются правила: замена сервера по ссылке не
-        // должна их ломать.
         let mut app = app_with_profiles(&["home"]);
         let _ = handle(&mut app, ServersMessage::EditorOpened("home".to_owned()));
         let _ = handle(
@@ -514,8 +478,6 @@ mod tests {
 
     #[test]
     fn typing_a_name_is_not_taken_for_a_link() {
-        // Разбирать каждое нажатие клавиши и показывать ошибку на каждой букве
-        // — худший способ помочь.
         let mut app = app_with_profiles(&[]);
         new_profile(&mut app, "hysteria2");
         let _ = handle(&mut app, ServersMessage::LinkChanged("Дом".to_owned()));
@@ -543,8 +505,6 @@ mod tests {
 
     #[test]
     fn a_profile_of_an_unknown_protocol_still_opens() {
-        // Настройки мог написать человек или прислать новая версия. Кнопка,
-        // которая ничего не делает, читается как сломанная.
         let mut app = app_with_profiles(&[]);
         app.state_mut().config.profiles.push(Profile::new(
             "чужой",

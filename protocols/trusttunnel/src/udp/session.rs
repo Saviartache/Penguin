@@ -1,38 +1,19 @@
 //! Единый поток `CONNECT _udp2` на весь UDP-трафик направления.
 //!
-//! Спецификация мультиплексирует **все** UDP-«соединения» в один поток
-//! HTTP/2 или HTTP/3 (`PROTOCOL.md`, §6.1), а не заводит по потоку на каждый сокет
-//! приложения, как это устроено с TCP. Значит, здесь ровно одна пара
-//! читающей и пишущей задачи на направление, а не на вызов `bind_udp` —
-//! то же устройство, что у `protocols/hysteria2` (`src/session/udp.rs`),
-//! только канал там датаграммный (QUIC), а здесь потоковый (HTTP/2) и требует
-//! собственной сборки кадров из кусков произвольной длины.
-//!
-//! ```text
-//!                        ┌── сессия A (bind_udp #1) ──► приложение A
-//! кадры _udp2 ──► разбор ┤
-//!                        └── сессия B (bind_udp #2) ──► приложение B
-//! ```
-//!
-//! # Как сессии узнают свои кадры
-//!
-//! Формат кадра не несёт опорного идентификатора сессии — только настоящие
-//! сетевые адреса (`PROTOCOL.md`, §6.3–§6.5: сервер сам отслеживает
-//! «соединения» по 4-элементному ключу и в ответе меняет источник с
-//! назначением местами, см. `lib/src/forwarder.rs::UdpDatagramMeta::reversed`
-//! эталона). У нас нет настоящего локального адреса — `ProxyDatagram::send_to`
-//! его не принимает вовсе, — поэтому каждая сессия получает свой синтетический
-//! адрес источника: `SESSION_SOURCE_IP` и уникальный порт. Он никогда не
-//! используется для настоящей отправки — это просто метка, по которой кадр,
-//! вернувшийся с тем же адресом в поле «назначение», находит свою сессию.
+//! Все UDP-«соединения» направления идут в одном потоке (`PROTOCOL.md`, §6.1).
+//! Кадр не несёт идентификатора сессии, а сервер в ответе меняет источник с
+//! назначением местами (`lib/src/forwarder.rs::UdpDatagramMeta::reversed`),
+//! поэтому каждая сессия получает синтетический адрес источника
+//! (`SESSION_SOURCE_IP` и свой порт) — метку, по которой кадр находит сессию.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
-use dashmap::DashMap;
+use parking_lot::RwLock;
 use penguin_core::address::SocketAddress;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::dialer::Dialer;
@@ -47,30 +28,23 @@ use crate::error::{TrustTunnelError, TrustTunnelResult};
 use crate::transport::Link;
 use crate::udp::frame;
 
-/// Адрес источника у синтетических сессий этого крейта.
-///
-/// Не настоящий локальный адрес — здесь он и не нужен: сервер использует
-/// это поле только как ключ (`PROTOCOL.md`, §6.5), а не как адрес, куда
-/// действительно можно постучаться. Петлевой выбран затем, чтобы в журнале
-/// такой адрес сразу читался как «это наша метка», а не как случайный адрес
-/// сети клиента.
+/// Адрес источника синтетических сессий: только метка-ключ (`PROTOCOL.md`, §6.5).
 const SESSION_SOURCE_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-/// Сколько кадров держать в очереди сессии, которая их не забирает.
-///
-/// Переполнение — потеря кадра, то есть ровно то, что и так случается с UDP.
-/// Копить без предела значило бы, что забытый сокет приложения съедает
-/// память клиента (то же рассуждение, что у `protocols/hysteria2`).
+/// Длина очереди сессии; переполнение — потеря кадра, как у UDP.
 const SESSION_QUEUE: usize = 256;
 
 /// Размер одного чтения из потока `_udp2`.
 const READ_CHUNK: usize = 16 * 1024;
 
+/// Таблица сессий по синтетическому адресу.
+type Sessions = RwLock<HashMap<SocketAddr, mpsc::Sender<(Bytes, SocketAddress)>>>;
+
 /// Единый поток `_udp2`: пишущая и читающая половины плюс таблица сессий.
 pub struct UdpManager {
     dialer: Arc<dyn Dialer>,
     outbox: mpsc::Sender<Bytes>,
-    sessions: Arc<DashMap<SocketAddr, mpsc::Sender<(Bytes, SocketAddress)>>>,
+    sessions: Arc<Sessions>,
     next_port: AtomicU16,
     writer: JoinHandle<()>,
     reader: JoinHandle<()>,
@@ -79,7 +53,7 @@ pub struct UdpManager {
 impl std::fmt::Debug for UdpManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UdpManager")
-            .field("sessions", &self.sessions.len())
+            .field("sessions", &self.sessions.read().len())
             .finish()
     }
 }
@@ -96,8 +70,7 @@ impl UdpManager {
 
         let (read_half, write_half) = tokio::io::split(stream);
         let (outbox, inbox) = mpsc::channel(SESSION_QUEUE);
-        let sessions: Arc<DashMap<SocketAddr, mpsc::Sender<(Bytes, SocketAddress)>>> =
-            Arc::new(DashMap::new());
+        let sessions = Arc::new(Sessions::default());
 
         let writer = tokio::spawn(write_loop(write_half, inbox));
         let reader = tokio::spawn(read_loop(read_half, Arc::clone(&sessions)));
@@ -106,9 +79,6 @@ impl UdpManager {
             dialer,
             outbox,
             sessions,
-            // С единицы, а не с нуля: ноль слишком легко получить из
-            // неинициализированного значения, и путать его с настоящей
-            // сессией не хочется (тот же выбор, что у `hysteria2`).
             next_port: AtomicU16::new(1),
             writer,
             reader,
@@ -117,14 +87,11 @@ impl UdpManager {
 
     /// Открывает новую UDP-сессию поверх уже поднятого потока.
     pub fn open(self: &Arc<Self>) -> UdpSession {
-        // Оборачивается: занятых портов не бывает больше 65535, а сессия,
-        // владевшая портом раньше, к этому моменту почти наверняка уже
-        // закрыта. Тот же компромисс, что у настоящего NAT с портовым пулом.
         let port = self.next_port.fetch_add(1, Ordering::Relaxed);
         let local = SocketAddr::new(SESSION_SOURCE_IP, port);
 
         let (tx, rx) = mpsc::channel(SESSION_QUEUE);
-        self.sessions.insert(local, tx);
+        self.sessions.write().insert(local, tx);
 
         UdpSession {
             local,
@@ -140,11 +107,7 @@ impl UdpManager {
     }
 }
 
-/// Пишет кадры в поток `_udp2` по мере поступления.
-///
-/// Отдельная задача, а не блокировка вокруг `WriteHalf`: несколько сессий
-/// шлют кадры параллельно, а сам поток — один, и писать в него нужно
-/// строго по очереди.
+/// Пишет кадры в поток `_udp2` строго по очереди.
 async fn write_loop(
     mut write_half: WriteHalf<Box<dyn ProxyStream>>,
     mut inbox: mpsc::Receiver<Bytes>,
@@ -158,10 +121,7 @@ async fn write_loop(
 }
 
 /// Читает поток `_udp2`, собирает кадры и раскладывает их по сессиям.
-async fn read_loop(
-    mut read_half: ReadHalf<Box<dyn ProxyStream>>,
-    sessions: Arc<DashMap<SocketAddr, mpsc::Sender<(Bytes, SocketAddress)>>>,
-) {
+async fn read_loop(mut read_half: ReadHalf<Box<dyn ProxyStream>>, sessions: Arc<Sessions>) {
     let mut buffer = BytesMut::with_capacity(READ_CHUNK);
 
     loop {
@@ -189,28 +149,21 @@ async fn read_loop(
                 }
                 Ok(None) => break,
                 Err(err) => {
-                    // Кадр не разбирается — доверия к остальному потоку
-                    // больше нет: сдвиг на один байт мог бы «починить»
-                    // разбор молча, но с чужими данными в чужой сессии.
                     tracing::debug!(%err, "кадр _udp2 не разобрался, поток остановлен");
-                    sessions.clear();
+                    sessions.write().clear();
                     return;
                 }
             }
         }
     }
 
-    sessions.clear();
+    sessions.write().clear();
 }
 
-/// Передаёт разобранный кадр в его сессию по адресу назначения.
-fn dispatch(
-    sessions: &DashMap<SocketAddr, mpsc::Sender<(Bytes, SocketAddress)>>,
-    frame: frame::ServerFrame,
-) {
-    let Some(sender) = sessions.get(&frame.destination) else {
-        // Сессия уже закрыта: приложение закрыло сокет, а ответ был в пути.
-        // Обычное дело для UDP.
+/// Передаёт кадр в сессию по адресу назначения.
+fn dispatch(sessions: &Sessions, frame: frame::ServerFrame) {
+    let table = sessions.read();
+    let Some(sender) = table.get(&frame.destination) else {
         tracing::trace!(destination = %frame.destination, "кадр _udp2 для неизвестной сессии");
         return;
     };
@@ -241,8 +194,6 @@ impl ProxyDatagram for UdpSession {
     async fn send_to(&self, payload: Bytes, target: &SocketAddress) -> Result<(), ProtocolError> {
         let destination = resolve_numeric(self.manager.dialer.as_ref(), target).await?;
 
-        // Имя приложения этот крейт не знает (см. `crate::connect`) — идёт
-        // пустая строка, легальная по формату (длина `0`).
         let frame = frame::encode_client_frame(self.local, destination, "", &payload)
             .map_err(ProtocolError::from)?;
 
@@ -261,22 +212,18 @@ impl ProxyDatagram for UdpSession {
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        self.manager.sessions.remove(&self.local);
+        self.manager.sessions.write().remove(&self.local);
         Ok(())
     }
 }
 
 impl Drop for UdpSession {
     fn drop(&mut self) {
-        // Забытая запись в таблице означала бы, что чужие ответы копятся в
-        // очереди, которую никто больше не читает.
-        self.manager.sessions.remove(&self.local);
+        self.manager.sessions.write().remove(&self.local);
     }
 }
 
-/// Приводит адрес назначения к числовому: формат кадра не несёт имени
-/// (`PROTOCOL.md`, §6.3 — только 16-байтовое поле IP), поэтому домен
-/// разрешается здесь, а не на сервере, как это происходит с `CONNECT` у TCP.
+/// Приводит адрес назначения к числовому: кадр несёт только IP (`PROTOCOL.md`, §6.3).
 async fn resolve_numeric(
     dialer: &dyn Dialer,
     target: &SocketAddress,
@@ -296,15 +243,12 @@ mod tests {
 
     #[test]
     fn ports_do_not_start_at_zero() {
-        // Ноль слишком легко получить из неинициализированного значения.
         let counter = AtomicU16::new(1);
         assert_eq!(counter.fetch_add(1, Ordering::Relaxed), 1);
     }
 
     #[test]
     fn the_source_tag_is_loopback_not_a_routable_address() {
-        // Не адрес назначения ни для чего настоящего — только метка,
-        // которую сервер обязан вернуть нам же в поле «назначение».
         assert!(SESSION_SOURCE_IP.is_loopback());
     }
 

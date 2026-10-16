@@ -13,14 +13,13 @@ workspace = true
 
 [dependencies]
 penguin-core.workspace = true
-dashmap.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
 serde.workspace = true
 
 [features]
 default = []
-# Извлечение иконок из ресурсов PE. Нужно только интерфейсу.
+# Иконки из ресурсов PE, нужны интерфейсу
 icon = []
 
 [target.'cfg(windows)'.dependencies]
@@ -34,6 +33,5 @@ windows = { workspace = true, features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# `proc_pidfdinfo` и соседи: интерфейса «кому принадлежит порт» в macOS нет,
-# и ответ собирается перебором через libproc.
+# Прямого «кто владеет портом» в macOS нет — перебор через libproc
 libc.workspace = true

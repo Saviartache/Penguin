@@ -1,16 +1,12 @@
-//! Таблица активных сокетов и их переиспользование.
-//!
-//! Связывает три вещи, которые иначе разошлись бы: сокет внутри smoltcp,
-//! пятёрку соединения и очереди наружу. Разойтись им нельзя — соединение
-//! опознаётся по пятёрке, данные текут через очереди, а состояние живёт в
-//! сокете.
+//! Таблица активных сокетов: сокет smoltcp, пятёрка и очереди наружу.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use bytes::Bytes;
-
 use smoltcp::iface::SocketHandle;
+use tokio::sync::Notify;
 
 use super::conn::{ConnectionEnds, TcpConnection};
 
@@ -31,27 +27,13 @@ pub struct Entry {
     pub key: FlowKey,
     /// Очереди наружу.
     pub ends: ConnectionEnds,
-    /// Соединение, ещё не отданное движку.
-    ///
-    /// Оно создаётся вместе с сокетом, но отдаётся только после завершения
-    /// рукопожатия: до этого момента соединения ещё нет, и отдавать движку
-    /// нечего.
+    /// Соединение, ещё не отданное движку (отдаётся после рукопожатия).
     pub pending: Option<TcpConnection>,
-    /// Блок, взятый у приложения, но ещё не отданный движку.
-    ///
-    /// Очередь к движку бывает полной. Выбросить в этот момент блок нельзя:
-    /// он уже вынут из сокета, то есть для TCP отправлен и подтверждён.
-    /// Пропажа середины потока рвёт TLS, и соединение начинается заново —
-    /// снаружи это выглядит как медленный тоннель.
+    /// Блок, вынутый из сокета, но не принятый полной очередью; выбросить его нельзя — это дыра в потоке.
     pub to_engine: Option<Bytes>,
     /// Остаток блока движка, не поместившийся в сокет.
-    ///
-    /// `send_slice` записывает **сколько поместилось** и возвращает это
-    /// число. Считать его успехом целиком — потерять хвост.
-    ///
-    /// Не `to_app`: со стороны тоннеля за сокетом не приложение, а сервер.
     pub to_socket: Option<Bytes>,
-    /// Движок закрыл свою.
+    /// Движок закрыл свою сторону.
     pub engine_closed: bool,
 }
 
@@ -70,12 +52,18 @@ impl std::fmt::Debug for Entry {
 pub struct ConnectionTable {
     by_handle: HashMap<SocketHandle, Entry>,
     by_key: HashMap<FlowKey, SocketHandle>,
+    wake: Arc<Notify>,
 }
 
 impl ConnectionTable {
     /// Пустая таблица.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Будит цикл, когда у любого соединения таблицы появилась работа.
+    pub fn wake(&self) -> Arc<Notify> {
+        Arc::clone(&self.wake)
     }
 
     /// Добавляет соединение.
@@ -93,7 +81,7 @@ impl ConnectionTable {
                 handle,
                 key,
                 ends,
-                pending: Some(connection),
+                pending: Some(connection.with_wake(Arc::clone(&self.wake))),
                 to_engine: None,
                 to_socket: None,
                 engine_closed: false,
@@ -101,10 +89,7 @@ impl ConnectionTable {
         );
     }
 
-    /// Есть ли уже соединение с такой пятёркой.
-    ///
-    /// Повторный `SYN` — обычное дело: приложение перепосылает его, не
-    /// дождавшись ответа. Заводить под него второй сокет нельзя.
+    /// Есть ли соединение с такой пятёркой (повторный `SYN` второго сокета не заводит).
     pub fn contains_key(&self, key: &FlowKey) -> bool {
         self.by_key.contains_key(key)
     }
@@ -114,19 +99,18 @@ impl ConnectionTable {
         self.by_handle.get_mut(&handle)
     }
 
+    /// Все соединения для обхода; убирать их во время обхода нельзя.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (SocketHandle, &mut Entry)> {
+        self.by_handle
+            .iter_mut()
+            .map(|(handle, entry)| (*handle, entry))
+    }
+
     /// Убирает соединение.
     pub fn remove(&mut self, handle: SocketHandle) -> Option<Entry> {
         let entry = self.by_handle.remove(&handle)?;
         self.by_key.remove(&entry.key);
         Some(entry)
-    }
-
-    /// Все сокеты таблицы.
-    ///
-    /// Отдельным списком, потому что цикл опроса меняет таблицу во время
-    /// обхода: закрывшиеся соединения убираются прямо там.
-    pub fn handles(&self) -> Vec<SocketHandle> {
-        self.by_handle.keys().copied().collect()
     }
 
     /// Сколько соединений живо.
@@ -155,7 +139,7 @@ mod tests {
         }
     }
 
-    /// Заводит настоящий сокет: `SocketHandle` иначе не получить.
+    /// Настоящий сокет: иначе `SocketHandle` не получить.
     fn handle(sockets: &mut SocketSet<'static>) -> SocketHandle {
         let socket = tcp::Socket::new(
             tcp::SocketBuffer::new(vec![0u8; 64]),
@@ -180,8 +164,6 @@ mod tests {
 
     #[test]
     fn repeated_syn_does_not_create_a_second_socket() {
-        // Приложение перепосылает `SYN`, не дождавшись ответа; второй сокет
-        // под ту же пятёрку сломал бы соединение.
         let mut sockets = SocketSet::new(Vec::new());
         let mut table = ConnectionTable::new();
 
@@ -195,8 +177,6 @@ mod tests {
 
     #[test]
     fn removal_clears_both_indexes() {
-        // Забытая запись в одном из индексов означает, что пятёрка навсегда
-        // считается занятой и новое соединение не установится.
         let mut sockets = SocketSet::new(Vec::new());
         let mut table = ConnectionTable::new();
 
@@ -211,9 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn handles_snapshot_is_independent_of_the_table() {
-        // Цикл опроса убирает записи прямо во время обхода; список сокетов
-        // обязан пережить это.
+    fn iteration_visits_every_connection() {
         let mut sockets = SocketSet::new(Vec::new());
         let mut table = ConnectionTable::new();
 
@@ -224,11 +202,6 @@ mod tests {
             table.insert(socket, key(50000 + port), ends, conn);
         }
 
-        let snapshot = table.handles();
-        assert_eq!(snapshot.len(), 3);
-        for socket in snapshot {
-            table.remove(socket);
-        }
-        assert!(table.is_empty());
+        assert_eq!(table.iter_mut().count(), 3);
     }
 }

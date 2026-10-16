@@ -34,11 +34,10 @@ impl ProtocolFactory for TrojanFactory {
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
-        // Проверка без сети: интерфейс должен показать ошибку в поле сразу,
-        // а не через минуту неудачного подключения.
         Self::parse(params)?.validate().map_err(Into::into)
     }
 
+    /// Пробное подключение доходит до сертификата: иначе «Подключено» горело бы и без сервера.
     async fn build(
         &self,
         ctx: BuildContext,
@@ -46,14 +45,6 @@ impl ProtocolFactory for TrojanFactory {
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = Self::parse(params)?;
         let outbound = TrojanOutbound::new(ctx.id, config, ctx.dialer)?;
-
-        // Пробное подключение при подъёме направления. Оно доходит до
-        // сертификата и на этом останавливается: пароль сервер не
-        // подтверждает и не отвергает — он молчит одинаково в обоих случаях.
-        //
-        // Без него «Подключено» загоралось бы и на сервере, которого нет, и
-        // на профиле с чужим сертификатом — а выяснялось бы это на первой
-        // открытой вкладке, то есть выглядело бы сломанной страницей.
         outbound.verify().await?;
         Ok(Arc::new(outbound))
     }
@@ -88,16 +79,12 @@ mod tests {
 
     #[test]
     fn rejects_a_missing_password() {
-        // Сервер отличает своих только по нему: профиль без пароля молча
-        // уходит на чужой сайт.
         let params = json!({ "server": "example.com:443" });
         assert!(TrojanFactory::new().validate(&params).is_err());
     }
 
     #[test]
     fn rejects_an_address_without_a_port() {
-        // 443 у Trojan — обычай, а не правило: сервер за общим входом сидит
-        // где угодно, и молча подставить порт значит подключаться не туда.
         let params = json!({ "server": "example.com", "password": "secret" });
         assert!(TrojanFactory::new().validate(&params).is_err());
     }

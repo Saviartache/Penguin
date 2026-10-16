@@ -1,8 +1,7 @@
 //! Автомат состояний тоннеля и переходы между ними.
 //!
-//! Состояние живёт в [`penguin_core::state::TunnelState`] — его видит и
-//! интерфейс. Здесь остаётся то, что относится к переходам: какие из них
-//! законны и что при этом происходит.
+//! Само состояние — [`penguin_core::state::TunnelState`]; здесь переходы и
+//! рассылка событий.
 //!
 //! ```text
 //!   Disconnected ──connect──► Connecting ──► Connected
@@ -11,11 +10,6 @@
 //!        │                        ▼             ▼
 //!        └──── Disconnecting ◄── Failed ◄── Reconnecting
 //! ```
-//!
-//! Смысл автомата не в педантизме. Без него в коде заводятся булевы флаги,
-//! которые рано или поздно оказываются выставлены оба сразу — и интерфейс
-//! показывает то ли «подключено», то ли «подключаюсь», в зависимости от
-//! того, какой флаг проверили первым.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -45,10 +39,7 @@ impl StateMachine {
         }
     }
 
-    /// Текущее состояние.
-    ///
-    /// Время работы считается на месте, а не хранится: иначе его пришлось бы
-    /// обновлять по таймеру, а часы у демона и у интерфейса всё равно разные.
+    /// Текущее состояние; время работы считается на месте.
     pub fn current(&self) -> TunnelState {
         let state = (**self.state.load()).clone();
         match state {
@@ -68,9 +59,7 @@ impl StateMachine {
 
     /// Переходит в новое состояние и сообщает об этом.
     pub fn set(&self, state: TunnelState) {
-        // Момент установления запоминается ровно один раз: переход
-        // `Connected -> Connected` бывает при обновлении счётчиков, и
-        // сбрасывать им время работы нельзя.
+        // `Connected -> Connected` время работы не сбрасывает.
         match (&state, &**self.state.load()) {
             (TunnelState::Connected { .. }, TunnelState::Connected { .. }) => {}
             (TunnelState::Connected { .. }, _) => {
@@ -150,8 +139,6 @@ mod tests {
 
     #[tokio::test]
     async fn every_transition_is_announced() {
-        // Интерфейс подписан, а не опрашивает: пропущенный переход означает
-        // окно, застрявшее в прежнем состоянии.
         let (machine, mut events) = machine();
 
         machine.connecting(ProfileId::new("home"));
@@ -180,13 +167,11 @@ mod tests {
         let TunnelState::Connected { uptime_secs, .. } = machine.current() else {
             panic!("ожидалось подключённое состояние");
         };
-        // Время работы считается на месте; сразу после подключения оно нулевое.
         assert_eq!(uptime_secs, 0);
     }
 
     #[test]
     fn repeated_connected_does_not_reset_uptime() {
-        // Переход `Connected -> Connected` бывает при обновлении счётчиков.
         let (machine, _events) = machine();
         machine.connected(ProfileId::new("home"));
         let first = machine.connected_at.load().expect("момент запомнен");

@@ -1,26 +1,9 @@
-//! Датаграммы внутри потока.
+//! Датаграммы внутри потока: один поток на всю UDP-сессию (адрес стоит на каждой посылке).
 //!
-//! # Один поток на всю сессию
-//!
-//! Адрес назначения стоит на каждой посылке ([`crate::frame::udp`]), поэтому
-//! один поток обслуживает всю UDP-сессию приложения, сколько бы адресатов у
-//! неё ни было. Это дешевле, чем у SOCKS5: там на датаграммы открывается ещё
-//! и отдельный сокет, а здесь всё идёт по тому же соединению TLS.
-//!
-//! # Почему половины под замками
-//!
-//! [`ProxyDatagram`] принимает `&self`: один канал обслуживает и отправку, и
-//! приём, и зовут их разные задачи одновременно. Поток же принадлежит одной
-//! задаче — [`ProxyStream`] намеренно не `Sync`.
-//!
-//! Поэтому поток делится надвое и каждая половина кладётся под свой замок.
-//! Два замка, а не один: с одним чтение держало бы отправку всё время, пока
-//! ждёт следующую датаграмму, — то есть всегда.
-//!
-//! Замки асинхронные: под ними ждут ввод-вывод, а обычный `Mutex`, взятый
-//! через `.await`, блокирует исполнителя целиком.
+//! `ProxyDatagram` работает через `&self`, поэтому поток делится надвое под двумя
+//! асинхронными замками: с одним чтение держало бы отправку.
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use penguin_core::address::SocketAddress;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::error::ProtocolError;
@@ -36,11 +19,17 @@ const CHUNK: usize = 16 * 1024;
 
 /// Канал датаграмм поверх потока Trojan.
 pub struct TrojanDatagram {
-    send: Mutex<WriteHalf<Box<dyn ProxyStream>>>,
+    send: Mutex<Outgoing>,
     recv: Mutex<Incoming>,
 }
 
-/// Читающая половина вместе с тем, что уже прочитано, но ещё не разобрано.
+/// Пишущая половина и буфер сборки кадра.
+struct Outgoing {
+    io: WriteHalf<Box<dyn ProxyStream>>,
+    frame: Vec<u8>,
+}
+
+/// Читающая половина и прочитанное, но не разобранное.
 struct Incoming {
     io: ReadHalf<Box<dyn ProxyStream>>,
     buffer: BytesMut,
@@ -57,7 +46,10 @@ impl TrojanDatagram {
     pub fn new(stream: Box<dyn ProxyStream>) -> Self {
         let (io, send) = tokio::io::split(stream);
         Self {
-            send: Mutex::new(send),
+            send: Mutex::new(Outgoing {
+                io: send,
+                frame: Vec::new(),
+            }),
             recv: Mutex::new(Incoming {
                 io,
                 buffer: BytesMut::with_capacity(CHUNK),
@@ -68,44 +60,33 @@ impl TrojanDatagram {
 
 #[async_trait::async_trait]
 impl ProxyDatagram for TrojanDatagram {
-    async fn send_to(
-        &self,
-        payload: bytes::Bytes,
-        target: &SocketAddress,
-    ) -> Result<(), ProtocolError> {
-        let frame = udp::encode(target, &payload).map_err(ProtocolError::from)?;
+    async fn send_to(&self, payload: Bytes, target: &SocketAddress) -> Result<(), ProtocolError> {
+        let mut guard = self.send.lock().await;
+        let Outgoing { io, frame } = &mut *guard;
 
-        let mut send = self.send.lock().await;
-        // Одной записью: заголовок и данные, разъехавшиеся по разным пакетам,
-        // сервер соберёт, но по дороге они выглядят иначе, чем один пакет.
-        send.write_all(&frame).await?;
-        send.flush().await?;
+        // Одной записью, как один пакет
+        frame.clear();
+        udp::encode_into(frame, target, &payload).map_err(ProtocolError::from)?;
+        io.write_all(frame).await?;
+        io.flush().await?;
         Ok(())
     }
 
-    async fn recv_from(&self) -> Result<(bytes::Bytes, SocketAddress), ProtocolError> {
+    async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
         let mut guard = self.recv.lock().await;
-        // Половинки берутся врозь: читающая занимает буфер, и одолжить его
-        // ей вместе с сокетом одним заимствованием нельзя.
         let Incoming { io, buffer } = &mut *guard;
 
         loop {
-            if let Some((source, payload, used)) =
-                udp::decode(buffer).map_err(ProtocolError::from)?
-            {
-                let _ = buffer.split_to(used);
-                return Ok((payload, source));
+            if let Some((source, range)) = udp::decode(buffer).map_err(ProtocolError::from)? {
+                let mut frame = buffer.split_to(range.end);
+                return Ok((frame.split_off(range.start).freeze(), source));
             }
 
-            let before = buffer.len();
-            buffer.resize(before + CHUNK, 0);
-            let read = io.read(&mut buffer[before..]).await?;
-            buffer.truncate(before + read);
-
-            if read == 0 {
-                // Конец потока посреди датаграммы — это потерянные данные, а
-                // не тишина: приложение иначе примет обрывок за полный ответ.
-                return Err(TrojanError::Disconnected(if before == 0 {
+            let had_data = !buffer.is_empty();
+            buffer.reserve(CHUNK);
+            if io.read_buf(buffer).await? == 0 {
+                // Обрыв посреди датаграммы — потеря, не тишина
+                return Err(TrojanError::Disconnected(if !had_data {
                     "сервер закрыл канал датаграмм".to_owned()
                 } else {
                     "сервер оборвал датаграмму на середине".to_owned()
@@ -116,8 +97,7 @@ impl ProxyDatagram for TrojanDatagram {
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        let mut send = self.send.lock().await;
-        send.shutdown().await?;
+        self.send.lock().await.io.shutdown().await?;
         Ok(())
     }
 }
@@ -151,7 +131,6 @@ mod tests {
 
     #[tokio::test]
     async fn two_datagrams_in_one_chunk_are_read_one_by_one() {
-        // Внутри TLS границ нет: сервер вправе прислать обе одним куском.
         let (client, mut server) = duplex(4096);
         let channel = TrojanDatagram::new(Box::new(client));
 
@@ -187,7 +166,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stream_cut_mid_datagram_is_an_error() {
-        // Обрывок, отданный приложением за полный ответ, хуже потери.
         let (client, mut server) = duplex(4096);
         let channel = TrojanDatagram::new(Box::new(client));
 

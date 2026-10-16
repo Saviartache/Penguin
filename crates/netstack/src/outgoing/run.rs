@@ -1,8 +1,6 @@
 //! Главный цикл исходящей стороны: запросы в соединения, пакеты наружу.
 //!
-//! Зеркало `stack::run`, и различие ровно одно, зато оно во всём: там цикл
-//! ждёт входящих пакетов и превращает их в **принятые** соединения, здесь —
-//! ждёт запросов и **открывает** их сам.
+//! Зеркало `stack::run`: там пакеты превращаются в принятые соединения, здесь запросы — в открытые.
 //!
 //! ```text
 //!                    ┌──────────────── одна задача ────────────────┐
@@ -13,10 +11,6 @@
 //!                                                  ▼
 //!                                        интерфейс тоннеля
 //! ```
-//!
-//! TCP идёт через smoltcp: за состояние, окна и перепосылку отвечает он.
-//! UDP — мимо, как и на входящей стороне: состояния у него нет, и разобрать
-//! восьмибайтовый заголовок дешевле, чем держать сокет на каждый адрес.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -43,19 +37,13 @@ use crate::udp::session::build_datagram;
 use super::connect::{ConnectError, Request};
 use super::nat::{Flow, PortPool, UdpNat};
 
-/// Сколько ждать рукопожатия, прежде чем считать, что до той стороны не дошло.
-///
-/// Своим сроком, а не таймаутом smoltcp: тот молчит о причине, а различить
-/// «отказали» и «не дошло» здесь нужно — решения по ним разные.
+/// Срок рукопожатия; свой, а не таймаут smoltcp, чтобы отличать «отказали» от «не дошло».
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Как часто убирать молчащие потоки UDP.
-///
-/// Не каждый оборот: обход таблицы на каждый пакет стоил бы дороже самой
-/// работы, а спешить здесь некуда — сессия и так живёт минуту.
 const SWEEP_EVERY: Duration = Duration::from_secs(1);
 
-/// Сколько пакетов забирать из тоннеля за один заход.
+/// Пакетов из тоннеля за один заход.
 const RX_BATCH: usize = 64;
 
 /// Ожидающий ответа запрос.
@@ -99,9 +87,10 @@ pub async fn run(
         udp_ports: PortPool::new(),
         nat: UdpNat::new(),
     };
+    let wake = inner.connections.wake();
     let mut iface = build_interface(&config, &mut inner.device, clock.now());
     let mut last_sweep = Instant::now();
-    // Очередь, которую движок отпустил, выключается, а не останавливает цикл.
+    // Отпущенная движком очередь выключается: открытые потоки обязаны дожить.
     let mut requests_open = true;
     let mut udp_open = true;
 
@@ -113,12 +102,10 @@ pub async fn run(
 
             packet = device.recv() => match packet {
                 Ok(packet) => {
-                    handle_incoming(&packet, &mut inner, &udp_to_engine);
+                    handle_incoming(packet, &mut inner, &udp_to_engine);
                     for _ in 0..RX_BATCH {
-                        match device.try_recv() {
-                            Some(packet) => handle_incoming(&packet, &mut inner, &udp_to_engine),
-                            None => break,
-                        }
+                        let Some(packet) = device.try_recv() else { break };
+                        handle_incoming(packet, &mut inner, &udp_to_engine);
                     }
                 }
                 Err(err) => {
@@ -129,11 +116,6 @@ pub async fn run(
 
             request = requests.recv(), if requests_open => match request {
                 Some(request) => open_socket(request, &mut inner, &mut iface, &config),
-                // Движок отпустил свою сторону. Новых соединений не будет, но
-                // открытые обязаны дожить: закрыть их здесь значило бы рвать
-                // работающие потоки из-за того, что никто больше не просит
-                // новых. Ветка выключается, иначе закрытая очередь отвечала бы
-                // `None` без остановки и цикл крутился бы вхолостую.
                 None => requests_open = false,
             },
 
@@ -142,19 +124,22 @@ pub async fn run(
                 None => udp_open = false,
             },
 
+            () = wake.notified() => {}
+
             () = tokio::time::sleep(clamp_delay(
                 iface.poll_delay(clock.now(), &inner.sockets)
             )) => {}
         }
 
-        iface.poll(clock.now(), &mut inner.device, &mut inner.sockets);
-        pump_sockets(&mut inner, Instant::now());
-        iface.poll(clock.now(), &mut inner.device, &mut inner.sockets);
+        let now = clock.now();
+        iface.poll(now, &mut inner.device, &mut inner.sockets);
+        let instant = Instant::now();
+        pump_sockets(&mut inner, instant);
+        iface.poll(now, &mut inner.device, &mut inner.sockets);
 
-        let now = Instant::now();
-        if now.duration_since(last_sweep) >= SWEEP_EVERY {
-            inner.nat.expire(&mut inner.udp_ports, now);
-            last_sweep = now;
+        if instant.duration_since(last_sweep) >= SWEEP_EVERY {
+            inner.nat.expire(&mut inner.udp_ports, instant);
+            last_sweep = instant;
         }
 
         while let Some(packet) = inner.device.take_tx() {
@@ -163,15 +148,12 @@ pub async fn run(
             }
         }
 
-        // Движок отпустил обе очереди, и последнее соединение закрылось:
-        // делать больше нечего и уже некому.
         if !requests_open && !udp_open && inner.connections.is_empty() {
             break;
         }
     }
 
-    // Незавершённые запросы обязаны получить ответ: иначе движок будет ждать
-    // соединения, которого уже никто не откроет.
+    // Незавершённые запросы обязаны получить ответ.
     for (_, pending) in inner.replies.drain() {
         let _ = pending.reply.send(Err(ConnectError::Stopped));
     }
@@ -179,17 +161,12 @@ pub async fn run(
     tracing::info!("исходящий стек остановлен");
 }
 
-/// Собирает интерфейс smoltcp для исходящей стороны.
-///
-/// Отличие от входящей — в `any_ip`: там он нужен, потому что перехваченные
-/// пакеты адресованы кому угодно, только не нам. Здесь наоборот: мы обычный
-/// узел со своим адресом, и всё, что приходит не нам, нам и не нужно.
+/// Собирает интерфейс smoltcp; в отличие от входящего, без `any_ip`: мы обычный узел со своим адресом.
 fn build_interface(
     config: &StackConfig,
     device: &mut VirtualDevice,
     now: smoltcp::time::Instant,
 ) -> Interface {
-    // Канального уровня внутри тоннеля нет: пакеты идут сразу с заголовка IP.
     let mut iface_config = Config::new(HardwareAddress::Ip);
     iface_config.random_seed = crate::stack::rand_seed();
 
@@ -202,10 +179,7 @@ fn build_interface(
         }
     });
 
-    // Без маршрута по умолчанию smoltcp не отправит ни одного пакета за
-    // пределы своей подсети — а за её пределами тут всё. Шлюзом ставится
-    // собственный адрес: разрешать следующий узел внутри тоннеля не у кого,
-    // канального уровня нет, и пакет уходит как есть.
+    // Без маршрута по умолчанию smoltcp не шлёт ничего за пределы подсети; шлюз — свой адрес.
     if let Err(err) = iface.routes_mut().add_default_ipv4_route(config.ipv4.0) {
         tracing::error!(?err, "исходящий стек не отправит ни одного пакета");
     }
@@ -237,7 +211,6 @@ fn open_socket(request: Request, inner: &mut Inner, iface: &mut Interface, confi
         tcp::SocketBuffer::new(vec![0u8; config.tcp_rx_buffer]),
         tcp::SocketBuffer::new(vec![0u8; config.tcp_tx_buffer]),
     );
-    // Соединение, из которого перестали читать, не должно висеть вечно.
     socket.set_timeout(Some(smoltcp::time::Duration::from_secs(120)));
     socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(30)));
 
@@ -274,20 +247,18 @@ fn open_socket(request: Request, inner: &mut Inner, iface: &mut Interface, confi
 
 /// Отдаёт готовые соединения, отвечает на неудавшиеся, перекладывает данные.
 fn pump_sockets(inner: &mut Inner, now: Instant) {
-    for handle in inner.connections.handles() {
+    let mut dead = Vec::new();
+
+    for (handle, entry) in inner.connections.iter_mut() {
         let socket = inner.sockets.get_mut::<tcp::Socket>(handle);
-        let Some(entry) = inner.connections.get_mut(handle) else {
-            continue;
-        };
 
         if entry.pending.is_some() {
             match settle(handle, socket, now, &mut inner.replies) {
-                // Рукопожатие прошло — отдаём поток тому, кто его просил.
                 Some(Settled::Established(pending)) => {
                     if let Some(connection) = entry.pending.take()
                         && pending.reply.send(Ok(connection)).is_err()
                     {
-                        // Движок передумал ждать. Соединение никому не нужно.
+                        // Движок передумал ждать.
                         socket.abort();
                     }
                 }
@@ -303,17 +274,20 @@ fn pump_sockets(inner: &mut Inner, now: Instant) {
         pump_data(socket, entry);
 
         if !socket.is_open() {
-            if let Some(entry) = inner.connections.remove(handle) {
-                inner.tcp_ports.release(entry.key.source.port());
-            }
-            // Сокет закрылся, не дождавшись рукопожатия, и `settle` этого не
-            // застал: отвечаем здесь, иначе запрос повиснет навсегда.
-            if let Some(pending) = inner.replies.remove(&handle) {
-                let error = failure(&pending, now);
-                let _ = pending.reply.send(Err(error));
-            }
-            inner.sockets.remove(handle);
+            dead.push(handle);
         }
+    }
+
+    for handle in dead {
+        if let Some(entry) = inner.connections.remove(handle) {
+            inner.tcp_ports.release(entry.key.source.port());
+        }
+        // Закрылся, не дождавшись рукопожатия, и `settle` не застал: иначе запрос повиснет.
+        if let Some(pending) = inner.replies.remove(&handle) {
+            let error = failure(&pending, now);
+            let _ = pending.reply.send(Err(error));
+        }
+        inner.sockets.remove(handle);
     }
 }
 
@@ -325,7 +299,7 @@ enum Settled {
     Failed(Pending),
 }
 
-/// Решает судьбу ожидающего запроса. `None` — рукопожатие ещё идёт.
+/// Решает судьбу ожидающего запроса; `None` — рукопожатие ещё идёт.
 fn settle(
     handle: SocketHandle,
     socket: &tcp::Socket<'_>,
@@ -343,11 +317,7 @@ fn settle(
     None
 }
 
-/// Отказ или молчание.
-///
-/// Различаются по сроку, а не по состоянию сокета: smoltcp закрывает сокет и
-/// от `RST`, и по своему таймеру, и что именно случилось, не говорит. Зато
-/// известно, успел ли истечь наш срок, — а это ровно та же граница.
+/// Отказ или молчание: различаются по нашему сроку, smoltcp причину закрытия не сообщает.
 fn failure(pending: &Pending, now: Instant) -> ConnectError {
     if now >= pending.deadline {
         ConnectError::TimedOut(pending.destination)
@@ -356,24 +326,21 @@ fn failure(pending: &Pending, now: Instant) -> ConnectError {
     }
 }
 
-/// Разбирает пакет, пришедший из тоннеля.
-fn handle_incoming(packet: &[u8], inner: &mut Inner, udp_to_engine: &mpsc::Sender<Datagram>) {
-    let Some(parsed) = parse::parse(packet) else {
-        // ICMP и прочий фон интерфейса.
+/// Разбирает пакет из тоннеля; владение нужно, чтобы отдать TCP и срезать UDP без копии.
+fn handle_incoming(packet: BytesMut, inner: &mut Inner, udp_to_engine: &mpsc::Sender<Datagram>) {
+    let Some(parsed) = parse::parse(&packet) else {
         return;
     };
 
     match parsed.network {
-        // Состояние TCP ведёт smoltcp: сокеты здесь наши, и пакет ему.
-        penguin_core::network::Network::Tcp => inner.device.queue_rx(BytesMut::from(packet)),
+        penguin_core::network::Network::Tcp => inner.device.queue_rx(packet),
         penguin_core::network::Network::Udp => {
+            // Чужой порт или адрес отправителя — чужой ответ либо подделка.
             let Some(flow) =
                 inner
                     .nat
                     .flow_of(parsed.destination.port(), parsed.source, Instant::now())
             else {
-                // Порт не наш, или ответ пришёл не с того адреса, куда
-                // спрашивали. Второе — либо чужой ответ, либо подделка.
                 tracing::trace!(port = parsed.destination.port(), "датаграмма ничья");
                 return;
             };
@@ -383,8 +350,6 @@ fn handle_incoming(packet: &[u8], inner: &mut Inner, udp_to_engine: &mpsc::Sende
                 destination: flow.destination,
                 payload: Bytes::copy_from_slice(parsed.payload),
             };
-            // Переполнение — потеря датаграммы, то есть ровно то, что с UDP и
-            // так случается. Блокировать нельзя: встал бы весь стек.
             if udp_to_engine.try_send(datagram).is_err() {
                 tracing::trace!("очередь UDP переполнена, датаграмма отброшена");
             }
@@ -416,8 +381,7 @@ fn send_datagram(datagram: Datagram, inner: &mut Inner, config: &StackConfig) {
         return;
     };
 
-    // Фрагментации у нас нет, и отдавать пакет длиннее MTU нельзя: направление
-    // такой не возьмёт, а обрезать датаграмму значит испортить её молча.
+    // Фрагментации нет: слишком длинную датаграмму молча не режем.
     if packet.len() > usize::from(config.mtu) {
         tracing::debug!(
             length = packet.len(),
@@ -450,8 +414,6 @@ mod tests {
 
     #[test]
     fn a_v6_destination_needs_a_v6_address_on_the_interface() {
-        // Сервер выдал только IPv4 — на адрес IPv6 через него не дойти вовсе,
-        // и это не сбой сети, а свойство интерфейса.
         let v4: IpAddr = "93.184.216.34".parse().expect("адрес");
         let v6: IpAddr = "2001:db8::1".parse().expect("адрес");
 
@@ -467,7 +429,6 @@ mod tests {
 
     #[test]
     fn the_local_address_is_never_of_the_wrong_family() {
-        // Пакет с адресами разных семейств невыразим, и собрать его нельзя.
         let with_v6 = StackConfig {
             ipv6: Some((Ipv6Addr::LOCALHOST, 64)),
             ..config()
@@ -487,7 +448,6 @@ mod tests {
 
     #[test]
     fn a_closed_socket_before_the_deadline_reads_as_a_refusal() {
-        // Там кто-то есть, и он сказал «нет».
         let now = Instant::now();
         let error = failure(&pending(now + Duration::from_secs(5)), now);
         assert!(matches!(error, ConnectError::Refused(_)));
@@ -495,7 +455,6 @@ mod tests {
 
     #[test]
     fn an_expired_deadline_reads_as_silence() {
-        // До той стороны не дошло — это другая беда, и решение по ней другое.
         let now = Instant::now();
         let error = failure(&pending(now - Duration::from_secs(1)), now);
         assert!(matches!(error, ConnectError::TimedOut(_)));
@@ -503,8 +462,6 @@ mod tests {
 
     #[test]
     fn the_connect_timeout_is_shorter_than_the_socket_timeout() {
-        // Иначе сокет закрылся бы раньше, чем истёк наш срок, и молчание
-        // сервера показывалось бы как отказ.
         const { assert!(CONNECT_TIMEOUT.as_secs() < 120) };
     }
 }

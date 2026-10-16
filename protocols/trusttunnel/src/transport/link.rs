@@ -1,8 +1,4 @@
 //! Соединение с сервером независимо от переноса: открыть поток `CONNECT`.
-//!
-//! TCP, `_udp2` и `_check` — один и тот же `CONNECT`, различается только
-//! `:authority`; HTTP/2 и HTTP/3 — один и тот же `CONNECT`, различается
-//! только перенос. Здесь второе различие и прячется.
 
 use penguin_proto::dialer::Dialer;
 use penguin_proto::stream::ProxyStream;

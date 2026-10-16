@@ -7,11 +7,8 @@
 //! сервер → HTTP/1.1 200 Connection established
 //! ```
 //!
-//! Дальше по соединению идут просто байты. Разбирать сам HTTP не нужно и не
-//! нужно вовсе: обычные запросы (`GET http://…`) через этот прокси не идут,
-//! потому что для них пришлось бы переписывать заголовки, а незашифрованный
-//! HTTP через VPN-клиент — редкость, ради которой заводить в нём HTTP-сервер
-//! не стоит.
+//! Дальше идут просто байты. Обычные запросы (`GET http://…`) не поддерживаются:
+//! для них пришлось бы переписывать заголовки.
 
 use penguin_core::address::SocketAddress;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -19,8 +16,6 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use crate::error::{InboundError, InboundResult};
 
 /// Наибольшая длина строки запроса и заголовка.
-///
-/// Без потолка одна строка без перевода строки съедает память клиента.
 const MAX_LINE: usize = 8 * 1024;
 
 /// Наибольшее число заголовков.
@@ -31,33 +26,14 @@ pub async fn read_request<S>(stream: &mut BufReader<S>) -> InboundResult<SocketA
 where
     S: AsyncRead + Unpin,
 {
-    let line = read_line(stream).await?;
-    let mut parts = line.split_whitespace();
+    let mut line = Vec::with_capacity(256);
+    read_line(stream, &mut line).await?;
+    let target = parse_request_line(&line)?;
 
-    let method = parts.next().unwrap_or_default();
-    if !method.eq_ignore_ascii_case("CONNECT") {
-        return Err(InboundError::BadAddress(format!(
-            "поддерживается только CONNECT, получен `{method}`"
-        )));
-    }
-
-    let target = parts
-        .next()
-        .ok_or_else(|| InboundError::BadAddress(line.clone()))?;
-    // `CONNECT example.com:443` — порт в записи обязателен по RFC 9110,
-    // но встречаются клиенты, которые его опускают. 443 — единственное
-    // осмысленное умолчание: CONNECT используют ради TLS.
-    let target = if target.contains(':') {
-        target.parse()
-    } else {
-        format!("{target}:443").parse()
-    };
-    let target = target.map_err(|_| InboundError::BadAddress(line.clone()))?;
-
-    // Заголовки вычитываются до пустой строки: без этого они уехали бы в
-    // тоннель как прикладные данные.
+    // Заголовки вычитываются, иначе уедут в тоннель как данные.
     for _ in 0..MAX_HEADERS {
-        if read_line(stream).await?.is_empty() {
+        read_line(stream, &mut line).await?;
+        if line.is_empty() {
             return Ok(target);
         }
     }
@@ -66,15 +42,34 @@ where
     ))
 }
 
-/// Читает строку, обрезая перевод строки.
-async fn read_line<S>(stream: &mut BufReader<S>) -> InboundResult<String>
+/// Разбирает `CONNECT host[:port] HTTP/1.1`; порт по умолчанию 443 (CONNECT нужен ради TLS).
+fn parse_request_line(line: &[u8]) -> InboundResult<SocketAddress> {
+    let text = std::str::from_utf8(line)
+        .map_err(|_| InboundError::BadAddress("строка не в UTF-8".to_owned()))?;
+    let mut parts = text.split_whitespace();
+
+    let method = parts.next().unwrap_or_default();
+    if !method.eq_ignore_ascii_case("CONNECT") {
+        return Err(InboundError::BadAddress(format!(
+            "поддерживается только CONNECT, получен `{method}`"
+        )));
+    }
+
+    let bad = || InboundError::BadAddress(text.to_owned());
+    let target = parts.next().ok_or_else(bad)?;
+    if target.contains(':') {
+        target.parse().map_err(|_| bad())
+    } else {
+        format!("{target}:443").parse().map_err(|_| bad())
+    }
+}
+
+/// Читает строку в `line` без перевода строки; длина ограничена `MAX_LINE`.
+async fn read_line<S>(stream: &mut BufReader<S>, line: &mut Vec<u8>) -> InboundResult<()>
 where
     S: AsyncRead + Unpin,
 {
-    // Вручную по буферу, а не `read_line`: тот читает до перевода строки без
-    // предела, и одна строка, в которой перевода нет, съедает всю память
-    // клиента.
-    let mut line = Vec::new();
+    line.clear();
     loop {
         let available = stream.fill_buf().await?;
         if available.is_empty() {
@@ -83,29 +78,25 @@ where
             )));
         }
 
-        match available.iter().position(|byte| *byte == b'\n') {
-            Some(index) => {
-                line.extend_from_slice(&available[..index]);
-                stream.consume(index + 1);
-                break;
-            }
-            None => {
-                let len = available.len();
-                line.extend_from_slice(available);
-                stream.consume(len);
-            }
-        }
+        let (chunk, consumed, done) = match available.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (&available[..index], index + 1, true),
+            None => (available, available.len(), false),
+        };
+        line.extend_from_slice(chunk);
+        stream.consume(consumed);
 
         if line.len() > MAX_LINE {
             return Err(InboundError::BadAddress(
                 "слишком длинная строка".to_owned(),
             ));
         }
+        if done {
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(());
+        }
     }
-
-    let line = String::from_utf8(line)
-        .map_err(|_| InboundError::BadAddress("строка не в UTF-8".to_owned()))?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 /// Отвечает, что тоннель установлен.
@@ -168,7 +159,6 @@ mod tests {
 
     #[tokio::test]
     async fn consumes_headers_before_the_tunnel() {
-        // Оставленные в буфере заголовки уехали бы в тоннель как данные.
         let request = "CONNECT example.com:443 HTTP/1.1\r\nHost: x\r\nProxy-Connection: keep-alive\r\n\r\nDATA";
         let mut reader = BufReader::new(std::io::Cursor::new(request.as_bytes().to_vec()));
         read_request(&mut reader).await.expect("разбирается");

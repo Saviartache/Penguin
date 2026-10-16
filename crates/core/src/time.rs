@@ -4,11 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Источник времени.
-///
-/// Существует ради двух вещей, где ожидание настоящих секунд превращает тест
-/// в пытку: вытеснение UDP-сессий по таймауту (десятки секунд) и задержка
-/// между попытками переподключения (минуты).
+/// Источник времени: тесты двигают его сами, не ожидая секунд.
 pub trait Clock: Send + Sync + 'static {
     /// Сколько прошло с момента создания часов.
     fn elapsed(&self) -> Duration;
@@ -68,10 +64,7 @@ impl Clock for TestClock {
     }
 }
 
-/// Задержка перед следующей попыткой: удвоение с потолком и без дрожания.
-///
-/// Дрожание здесь не нужно: клиент один, стада запросов, которое надо
-/// размазать по времени, не бывает.
+/// Задержка перед следующей попыткой: удвоение с потолком, без дрожания.
 pub fn backoff(attempt: u32, base: Duration, max: Duration) -> Duration {
     let factor = 1u64 << attempt.min(16);
     base.saturating_mul(factor as u32).min(max)
@@ -88,7 +81,6 @@ mod tests {
         assert_eq!(backoff(0, base, max), Duration::from_secs(1));
         assert_eq!(backoff(3, base, max), Duration::from_secs(8));
         assert_eq!(backoff(10, base, max), max);
-        // Большой номер попытки не должен переполнить сдвиг.
         assert_eq!(backoff(u32::MAX, base, max), max);
     }
 

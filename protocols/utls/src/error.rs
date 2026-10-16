@@ -1,12 +1,5 @@
 //! Ошибки сборки и разбора.
 //!
-//! Крейт не ходит в сеть, поэтому большинство его ошибок — это не «сервер не
-//! ответил», а «то, что дали на входе, не годится» или «то, что пришло с
-//! провода, не по формату». Второе — не редкость и не повод падать: сервер
-//! может оборвать поток на середине `ServerHello`, прислать неизвестное
-//! расширение или указать длину больше, чем осталось байт. Разбор обязан
-//! вернуть ошибку, а не запаниковать (`AGENTS.md` §4.3) — сюда попадает и то,
-//! что прочитал бы `unwrap`, не будь он под запретом.
 
 use penguin_core::address::Address;
 use penguin_proto::error::ProtocolError;
@@ -22,20 +15,11 @@ pub enum UtlsError {
     #[error("настройки uTLS: {0}")]
     Config(String),
 
-    /// Байты `ServerHello` не по формату: обрезаны, испорчены или не то, что
-    /// ожидалось (не тот тип сообщения, не та версия записи).
-    ///
-    /// Не различается на «обрезано» и «испорчено»: клиенту в обоих случаях
-    /// нужно одно и то же — оборвать соединение, а не гадать, дочитается ли
-    /// оно само.
+    /// `ServerHello` обрезан, испорчен или не того типа.
     #[error("`ServerHello` не по формату: {0}")]
     Malformed(String),
 
     /// Генератор ключа `key_share` отказал.
-    ///
-    /// В `ring` это происходит только при исчерпании системного источника
-    /// случайности — событие настолько редкое, что для него нет отдельного
-    /// восстановимого пути, только отказ.
     #[error("не удалось сгенерировать пару ключей: {0}")]
     KeyGeneration(&'static str),
 }
@@ -51,8 +35,7 @@ impl UtlsError {
         Self::Malformed(message.into())
     }
 
-    /// SNI требует доменное имя: Reality и остальные протоколы с отпечатком
-    /// подделывают чужой сайт, а у сайта есть имя, а не только адрес.
+    /// SNI требует доменное имя.
     pub fn sni_requires_domain(address: &Address) -> Self {
         Self::config(format!(
             "SNI `{address}` — не доменное имя: отпечаток браузера подделывает \
@@ -65,10 +48,6 @@ impl From<UtlsError> for ProtocolError {
     fn from(err: UtlsError) -> Self {
         match err {
             UtlsError::Config(message) => Self::InvalidConfig(message),
-            // Не по формату — значит, на том конце не то, что ждали: обычный
-            // сайт вместо Reality, оборванная запись. Само оно не исправится,
-            // и это решение из того же ряда, что у `penguin-transport`
-            // (`TransportError::Malformed`): повторять нечего.
             err @ UtlsError::Malformed(_) => Self::InvalidConfig(err.to_string()),
             err @ UtlsError::KeyGeneration(_) => Self::InvalidConfig(err.to_string()),
         }
@@ -81,7 +60,6 @@ mod tests {
 
     #[test]
     fn malformed_server_hello_is_not_retried() {
-        // Испорченный или чужой ответ сам себя не исправит: повторять нечего.
         let err: ProtocolError = UtlsError::malformed("слишком короткая запись").into();
         assert!(!err.is_retryable());
         assert!(err.to_string().contains("слишком короткая запись"));

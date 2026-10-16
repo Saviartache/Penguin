@@ -2,10 +2,10 @@
 
 use ring::aead;
 
-/// Длина метки подлинности. У всех трёх алгоритмов она одна.
+/// Длина метки подлинности.
 pub const TAG_LEN: usize = 16;
 
-/// Длина нонса. Тоже одна у всех трёх.
+/// Длина нонса.
 pub const NONCE_LEN: usize = 12;
 
 /// Шифр, которым закрывается кусок.
@@ -53,8 +53,6 @@ mod tests {
 
     #[test]
     fn the_key_length_matches_the_one_ring_wants() {
-        // Разойтись им нельзя: `ring` откажется собрать ключ, и протокол
-        // объявит это ошибкой настроек там, где ошибка в таблице.
         for algorithm in [
             Algorithm::Aes128Gcm,
             Algorithm::Aes256Gcm,

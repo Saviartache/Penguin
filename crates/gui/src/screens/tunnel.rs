@@ -1,17 +1,10 @@
-//! Как называется состояние тоннеля и каким цветом его показывать.
-//!
-//! Отдельно от экрана: подписи и исходы нужны и компактному окну, и журналу, а
-//! перепутанный исход означает зелёную надпись на неработающем тоннеле — такое
-//! проверяется тестом, а не глазами.
+//! Подпись состояния тоннеля и его цвет. Отдельно от экрана: перепутанный исход —
+//! зелёная надпись на неработающем тоннеле, это проверяется тестом.
 
 use penguin_core::state::TunnelState;
 use uikit::widgets::ButtonVariant;
 
-/// Что состояние означает: хорошо, идёт, плохо.
-///
-/// Три исхода, а не шесть цветов: цвет здесь — не украшение, а способ понять
-/// состояние, не читая надписи, и различать больше трёх оттенков боковым
-/// зрением всё равно не выходит.
+/// Что состояние означает; три исхода, потому что больше оттенков боковым зрением не различить.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     /// Работает.
@@ -27,8 +20,7 @@ impl Tone {
     pub fn color(self, palette: &iced::theme::Palette) -> iced::Color {
         match self {
             Self::Good => palette.success,
-            // Переходное состояние — обычным цветом текста: красить его в
-            // тревожный значит пугать тем, что идёт по плану.
+            // Переходное красить тревожным значит пугать тем, что идёт по плану.
             Self::Busy => palette.text,
             Self::Trouble => palette.danger,
         }
@@ -36,9 +28,6 @@ impl Tone {
 }
 
 /// Подпись и исход для состояния тоннеля.
-///
-/// Свободная функция с тестом: перепутать здесь исход означает зелёную надпись
-/// на неработающем тоннеле.
 pub fn describe(tunnel: &TunnelState) -> (String, Tone) {
     match tunnel {
         TunnelState::Connected { uptime_secs, .. } => (
@@ -55,21 +44,15 @@ pub fn describe(tunnel: &TunnelState) -> (String, Tone) {
             Tone::Busy,
         ),
         TunnelState::Disconnecting => (crate::i18n::s().disconnecting.to_owned(), Tone::Busy),
-        // Причина показывается как есть: «ошибка» без объяснения не помогает
-        // никому, а места под неё в строке хватает.
+        // Причина как есть: «ошибка» без объяснения не помогает.
         TunnelState::Failed { reason } => (reason.clone(), Tone::Trouble),
         TunnelState::Disconnected => (crate::i18n::s().disconnected.to_owned(), Tone::Busy),
     }
 }
 
-/// Подпись и вид кнопки для состояния.
-///
-/// Свободная функция с тестом: перепутать здесь вид означает красную кнопку
-/// «Подключить» или зелёную «Отключить».
+/// Подпись и вид кнопки; в переходных состояниях она означает «прервать».
 pub fn describe_button(tunnel: &TunnelState) -> (&'static str, ButtonVariant) {
     match tunnel {
-        // Пока идёт переключение, кнопка означает «прервать»: другого
-        // осмысленного действия у пользователя нет.
         TunnelState::Connected { .. }
         | TunnelState::Connecting { .. }
         | TunnelState::Reconnecting { .. } => (crate::i18n::s().disconnect, ButtonVariant::Danger),
@@ -81,7 +64,7 @@ pub fn describe_button(tunnel: &TunnelState) -> (&'static str, ButtonVariant) {
     }
 }
 
-/// Переводит время работы в читаемый вид.
+/// Время работы: `1:30` или `1:01:01`.
 pub fn format_uptime(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
@@ -112,8 +95,6 @@ mod tests {
 
     #[test]
     fn failure_reads_as_trouble_and_shows_the_reason() {
-        // Зелёная надпись на сломанном тоннеле — худшее, что может показать
-        // экран.
         let (label, tone) = describe(&TunnelState::Failed {
             reason: "неверный пароль".to_owned(),
         });
@@ -123,8 +104,6 @@ mod tests {
 
     #[test]
     fn transitional_states_are_not_alarming() {
-        // Переходное состояние идёт по плану; красить его тревожным значит
-        // пугать тем, что должно происходить.
         assert_eq!(describe(&TunnelState::Disconnecting).1, Tone::Busy);
         assert_eq!(describe(&TunnelState::Disconnected).1, Tone::Busy);
     }
@@ -145,7 +124,6 @@ mod tests {
 
     #[test]
     fn after_a_failure_the_button_offers_to_try_again() {
-        // Отключать нечего: тоннеля нет.
         let (label, _) = describe_button(&TunnelState::Failed {
             reason: "не вышло".to_owned(),
         });

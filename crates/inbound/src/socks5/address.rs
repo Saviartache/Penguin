@@ -1,20 +1,10 @@
-//! Адрес в записи SOCKS5: вид, адрес, порт.
+//! Адрес в записи SOCKS5: `ATYP` (0x01 IPv4, 0x03 домен, 0x04 IPv6), адрес, порт BE.
 //!
-//! ```text
-//! ┌──────┬───────────────────┬────────┐
-//! │ ATYP │ адрес             │ порт   │
-//! │ 1 Б  │ 4 / 1+n / 16 Б    │ 2 Б BE │
-//! └──────┴───────────────────┴────────┘
-//!   0x01 IPv4 · 0x03 домен · 0x04 IPv6
-//! ```
-//!
-//! Домен в записи есть, и это важно: приложение, настроенное на прокси,
-//! отдаёт имя как есть, не разрешая его. Именно поэтому у SOCKS5-режима нет
-//! проблемы утечки DNS, которую в режиме TUN приходится решать отдельно.
+//! Домен приходит как есть, без разрешения, поэтому утечки DNS нет.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use bytes::{BufMut, BytesMut};
+use bytes::BufMut;
 use penguin_core::address::{Address, SocketAddress};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -33,40 +23,53 @@ where
     R: AsyncRead + Unpin + ?Sized,
 {
     let atyp = reader.read_u8().await?;
-    let host = match atyp {
-        ATYP_IPV4 => {
-            let mut octets = [0u8; 4];
-            reader.read_exact(&mut octets).await?;
-            Address::Ip(IpAddr::V4(Ipv4Addr::from(octets)))
-        }
-        ATYP_IPV6 => {
-            let mut octets = [0u8; 16];
-            reader.read_exact(&mut octets).await?;
-            Address::Ip(IpAddr::V6(Ipv6Addr::from(octets)))
-        }
-        ATYP_DOMAIN => {
-            let len = reader.read_u8().await? as usize;
-            let mut name = vec![0u8; len];
-            reader.read_exact(&mut name).await?;
-            let name = String::from_utf8(name)
-                .map_err(|_| InboundError::BadAddress("имя не в UTF-8".to_owned()))?;
-            // Клиент вполне может прислать домен, который на самом деле
-            // числовой адрес: так делают браузеры при вводе IP в строку.
-            // Разбирать его как имя — значит потом безуспешно спрашивать DNS
-            // про «1.2.3.4».
-            name.parse().map_err(|_| InboundError::BadAddress(name))?
-        }
-        other => return Err(InboundError::UnsupportedAddressType(other)),
-    };
-
-    let port = reader.read_u16().await?;
-    Ok(SocketAddress::new(host, port))
+    read_after_type(reader, atyp).await
 }
 
-/// Разбирает адрес из буфера. Возвращает адрес и сколько байт занято.
-///
-/// Для UDP: там пакет приходит целиком, и читать его по байту из потока
-/// незачем.
+/// Читает адрес и порт после уже прочитанного `ATYP`; по одному чтению на вид.
+pub async fn read_after_type<R>(reader: &mut R, atyp: u8) -> InboundResult<SocketAddress>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    match atyp {
+        ATYP_IPV4 => {
+            let mut raw = [0u8; 6];
+            reader.read_exact(&mut raw).await?;
+            let [a, b, c, d, hi, lo] = raw;
+            let host = Address::Ip(IpAddr::V4(Ipv4Addr::new(a, b, c, d)));
+            Ok(SocketAddress::new(host, u16::from_be_bytes([hi, lo])))
+        }
+        ATYP_IPV6 => {
+            let mut raw = [0u8; 18];
+            reader.read_exact(&mut raw).await?;
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&raw[..16]);
+            let host = Address::Ip(IpAddr::V6(Ipv6Addr::from(octets)));
+            Ok(SocketAddress::new(
+                host,
+                u16::from_be_bytes([raw[16], raw[17]]),
+            ))
+        }
+        ATYP_DOMAIN => {
+            let len = usize::from(reader.read_u8().await?);
+            let mut raw = [0u8; 257];
+            reader.read_exact(&mut raw[..len + 2]).await?;
+            let name = std::str::from_utf8(&raw[..len])
+                .map_err(|_| InboundError::BadAddress("имя не в UTF-8".to_owned()))?;
+            // Браузер присылает введённый IP как домен.
+            let host = name
+                .parse()
+                .map_err(|_| InboundError::BadAddress(name.to_owned()))?;
+            Ok(SocketAddress::new(
+                host,
+                u16::from_be_bytes([raw[len], raw[len + 1]]),
+            ))
+        }
+        other => Err(InboundError::UnsupportedAddressType(other)),
+    }
+}
+
+/// Разбирает адрес из буфера (UDP). Возвращает адрес и число занятых байт.
 pub fn decode(buf: &[u8]) -> Option<(SocketAddress, usize)> {
     let atyp = *buf.first()?;
     let (host, consumed) = match atyp {
@@ -92,7 +95,7 @@ pub fn decode(buf: &[u8]) -> Option<(SocketAddress, usize)> {
 }
 
 /// Записывает адрес.
-pub fn encode(address: &SocketAddress, buf: &mut BytesMut) {
+pub fn encode<B: BufMut>(address: &SocketAddress, buf: &mut B) {
     match &address.host {
         Address::Ip(IpAddr::V4(v4)) => {
             buf.put_u8(ATYP_IPV4);
@@ -104,9 +107,7 @@ pub fn encode(address: &SocketAddress, buf: &mut BytesMut) {
         }
         Address::Domain(name) => {
             buf.put_u8(ATYP_DOMAIN);
-            // Длина имени — один байт, длиннее 255 в SOCKS5 не выразить.
-            // Обрезать нельзя: получился бы другой домен. Такое имя
-            // недопустимо и по DNS (RFC 1035), так что до сюда не доходит.
+            // Длиннее 255 в SOCKS5 не выразить; по RFC 1035 такого имени не бывает.
             let bytes = name.as_bytes();
             let len = bytes.len().min(u8::MAX as usize);
             buf.put_u8(len as u8);
@@ -117,12 +118,14 @@ pub fn encode(address: &SocketAddress, buf: &mut BytesMut) {
 }
 
 /// Записывает адрес сокета — им отвечают на запрос.
-pub fn encode_socket_addr(address: SocketAddr, buf: &mut BytesMut) {
+pub fn encode_socket_addr<B: BufMut>(address: SocketAddr, buf: &mut B) {
     encode(&SocketAddress::from(address), buf);
 }
 
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+
     use super::*;
 
     fn round_trip(address: SocketAddress) {
@@ -142,18 +145,18 @@ mod tests {
 
     #[tokio::test]
     async fn reads_from_stream() {
-        let address: SocketAddress = "example.com:443".parse().expect("адрес");
-        let mut buf = BytesMut::new();
-        encode(&address, &mut buf);
+        for text in ["example.com:443", "1.2.3.4:80", "[2001:db8::1]:8443"] {
+            let address: SocketAddress = text.parse().expect("адрес");
+            let mut buf = BytesMut::new();
+            encode(&address, &mut buf);
 
-        let mut reader = std::io::Cursor::new(buf.to_vec());
-        assert_eq!(read(&mut reader).await.expect("читается"), address);
+            let mut reader = std::io::Cursor::new(buf.to_vec());
+            assert_eq!(read(&mut reader).await.expect("читается"), address);
+        }
     }
 
     #[tokio::test]
     async fn numeric_domain_becomes_an_address() {
-        // Браузер, которому ввели IP в адресную строку, пришлёт его как
-        // домен. Спрашивать про такой «домен» у DNS бессмысленно.
         let mut buf = BytesMut::new();
         buf.put_u8(ATYP_DOMAIN);
         buf.put_u8(7);

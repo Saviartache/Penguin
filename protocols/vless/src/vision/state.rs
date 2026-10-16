@@ -1,68 +1,43 @@
-//! Досмотр внутреннего TLS и решение о переключении в прямой режим.
-//!
-//! Повторяет `TrafficState` и `XtlsFilterTls` (`XTLS/Xray-core`,
-//! `proxy/proxy.go`): досматривает байты, которые VLESS всё равно несёт
-//! насквозь, ищет в них признаки TLS 1.3 самого приложения (не Reality —
-//! Reality уже открыта, это TLS **внутри** неё), и включает
-//! [`VisionState::enable_xtls`] только тогда, когда сервер этого внутреннего
-//! TLS согласовал версию 1.3 и не самый слабый из перечисленных шифров.
-//!
-//! **Здесь ошибка не видна сразу**: до срабатывания условия канал работает
-//! как обычный Reality/VLESS, и только с этого места начинается снятие
-//! второго слоя шифрования — оттого на записанных байтах у этого файла и
-//! `padding.rs` отдельные тесты (`stream.rs`), а не только круговой прогон.
+//! Досмотр внутреннего TLS и решение о прямом режиме: `TrafficState`/`XtlsFilterTls`
+//! (`XTLS/Xray-core`, `proxy/proxy.go`). `enable_xtls` — когда внутри согласован TLS 1.3
+//! и шифр не `TLS_AES_128_CCM_8_SHA256`. Ошибка здесь не видна сразу, поэтому тесты на записанных байтах.
 
-/// Сколько первых пакетов в каждом направлении вообще стоит осматривать —
-/// `NewTrafficState` (`proxy.go`): `NumberOfPacketToFilter: 8`.
+/// Сколько первых пакетов осматривать (`NumberOfPacketToFilter: 8`).
 pub const INITIAL_PACKETS_TO_FILTER: u32 = 8;
 
-/// Начало записи `ClientHello` — тип записи `handshake` (`0x16`), версия
-/// записи `0x03, 0x03` не проверяется здесь настолько строго, но эталон
-/// сверяет только первые два байта (`TlsClientHandShakeStart`).
+/// Начало `ClientHello` (`TlsClientHandShakeStart`).
 const TLS_CLIENT_HANDSHAKE_START: [u8; 2] = [0x16, 0x03];
-/// Начало записи `ServerHello` (`TlsServerHandShakeStart`).
+/// Начало `ServerHello` (`TlsServerHandShakeStart`).
 const TLS_SERVER_HANDSHAKE_START: [u8; 3] = [0x16, 0x03, 0x03];
-/// Начало записи `application_data` TLS 1.3 (`TlsApplicationDataStart`).
+/// Начало `application_data` TLS 1.3 (`TlsApplicationDataStart`).
 pub const TLS_APPLICATION_DATA_START: [u8; 3] = [0x17, 0x03, 0x03];
 
-/// Тип сообщения `ClientHello` (`TlsHandshakeTypeClientHello`).
+/// Тип сообщения `ClientHello`.
 const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 0x01;
-/// Тип сообщения `ServerHello` (`TlsHandshakeTypeServerHello`).
+/// Тип сообщения `ServerHello`.
 const HANDSHAKE_TYPE_SERVER_HELLO: u8 = 0x02;
 
-/// `supported_versions` со значением TLS 1.3 внутри расширений `ServerHello`
-/// (`Tls13SupportedVersions`).
+/// `supported_versions` = TLS 1.3 в `ServerHello` (`Tls13SupportedVersions`).
 const TLS13_SUPPORTED_VERSIONS: [u8; 6] = [0x00, 0x2b, 0x00, 0x02, 0x03, 0x04];
 
-/// Шифры TLS 1.3, которые `ServerHello` вообще может назвать
-/// (`Tls13CipherSuiteDic`, ключи словаря).
+/// Шифры, которые может назвать `ServerHello` (`Tls13CipherSuiteDic`).
 const KNOWN_TLS13_CIPHERS: [u16; 5] = [0x1301, 0x1302, 0x1303, 0x1304, 0x1305];
-/// `TLS_AES_128_CCM_8_SHA256` — единственный из них, при котором эталон
-/// сознательно не включает прямой режим (короткий тег MAC, аргумент из
-/// `proxy.go`: `else if v != "TLS_AES_128_CCM_8_SHA256" { EnableXtls = true }`).
+/// `TLS_AES_128_CCM_8_SHA256`: эталон прямой режим не включает (`proxy.go`).
 const CIPHER_AES_128_CCM_8_SHA256: u16 = 0x1305;
 
-/// Состояние одного направления Vision-канала — то, что в эталоне разложено
-/// по `TrafficState` и `OutboundState` (полей `InboundState` здесь нет: они
-/// нужны только серверу, принимающему реального клиента, а этот клиент сам
-/// всегда только исходящая сторона).
+/// Общее состояние досмотра обоих направлений (`TrafficState`).
 #[derive(Debug)]
 pub struct VisionState {
-    /// Сколько ещё пакетов досматривать в обе стороны вместе — общий
-    /// бюджет, как в эталоне.
+    /// Общий бюджет пакетов на досмотр.
     pub packets_to_filter: u32,
-    /// Хоть что-то похожее на `ClientHello`/`ServerHello` уже видели.
+    /// Видели `ClientHello`/`ServerHello`.
     pub is_tls: bool,
-    /// `ServerHello` уже видели, и версия записи была TLS 1.2 или новее.
+    /// `ServerHello` видели, версия записи TLS 1.2 или новее.
     pub is_tls12_or_above: bool,
-    /// TLS 1.3 внутри согласован, и шифр не самый слабый из перечисленных —
-    /// единственное условие, разрешающее направлению отправить `Direct`.
+    /// TLS 1.3 согласован с приемлемым шифром: условие для `Direct`.
     pub enable_xtls: bool,
     cipher: u16,
-    /// Сколько байт `ServerHello` ещё осталось досмотреть в поисках
-    /// `supported_versions`; отрицательного значения быть не может у самого
-    /// счётчика (`i64`, а не `i32`, только чтобы вычитание не переполнялось
-    /// без явной проверки на каждом шаге — как `int32` в Go).
+    /// Сколько байт `ServerHello` осталось досмотреть (`i64`, как `int32` в Go).
     remaining_server_hello: i64,
 }
 
@@ -80,11 +55,7 @@ impl Default for VisionState {
 }
 
 impl VisionState {
-    /// Досматривает один пакет содержимого (уже без конверта набивки) —
-    /// `XtlsFilterTls`. Вызывается из обоих направлений на одном и том же
-    /// состоянии: `ClientHello` обычно виден на встречном (для сервера —
-    /// входящем) направлении, `ServerHello` — на исходящем от сервера, но
-    /// эталон не различает их по направлению, и этот код тоже.
+    /// Досматривает пакет содержимого без конверта (`XtlsFilterTls`); зовётся из обоих направлений.
     pub fn filter(&mut self, data: &[u8]) {
         self.packets_to_filter = self.packets_to_filter.saturating_sub(1);
 
@@ -130,20 +101,14 @@ impl VisionState {
     }
 }
 
-/// `bytes.Contains` — здесь нет своей семантики сверх `slice::windows`.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.len() <= haystack.len()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
-/// `IsCompleteRecord` (`proxy.go`): весь срез — одна или несколько целых
-/// записей `application_data` (`0x17 0x03 0x03 <длина>`), без остатка.
-/// Только при этом условии эталон вообще рассматривает переключение в
-/// прямой режим на этом вызове — иначе разрезал бы запись внутреннего TLS
-/// пополам, и вторая сторона получила бы половину записи как есть, без
-/// внешнего шифрования, которое её раньше склеивало с остальным потоком.
+/// `IsCompleteRecord` (`proxy.go`): срез целиком состоит из записей `application_data`.
+/// Иначе переключение разрезало бы запись внутреннего TLS пополам.
 pub fn is_complete_tls_records(data: &[u8]) -> bool {
     let mut offset = 0;
     while offset < data.len() {
@@ -163,11 +128,7 @@ pub fn is_complete_tls_records(data: &[u8]) -> bool {
     true
 }
 
-/// `ServerHello`, версия записи и тип верны, `supported_versions` внутри
-/// того же пакета называет TLS 1.3, шифр — параметр. Общая для тестов этого
-/// файла и `vision::stream`: там нужен тот же байтовый образец, чтобы
-/// довести до переключения в прямой режим не только досмотр, но и запись
-/// целиком.
+/// `ServerHello` с TLS 1.3 и заданным шифром; общий образец для тестов.
 #[cfg(test)]
 pub(crate) fn server_hello_tls13(cipher: [u8; 2]) -> Vec<u8> {
     let mut packet = vec![0u8; 90];
@@ -217,11 +178,6 @@ mod tests {
 
     #[test]
     fn tls13_with_the_short_tag_cipher_does_not_enable_xtls() {
-        // Условие переключения — самое хрупкое место всего механизма: этот
-        // шифр (`TLS_AES_128_CCM_8_SHA256`) эталон сознательно исключает
-        // (`proxy.go`, `else if v != "TLS_AES_128_CCM_8_SHA256"`), а ошибка
-        // здесь не оборвала бы соединение сразу — тоннель просто остался бы
-        // без снятия второго слоя, что не видно на глаз.
         let mut state = VisionState::default();
         state.filter(&server_hello_tls13([0x13, 0x05]));
         assert!(state.is_tls12_or_above);
@@ -237,8 +193,6 @@ mod tests {
 
     #[test]
     fn a_tls12_server_hello_never_enables_xtls() {
-        // `supported_versions` не найден за весь `ServerHello` — TLS 1.2 или
-        // старше, прямой режим невозможен в принципе.
         let mut state = VisionState::default();
         let mut packet = vec![0u8; 90];
         packet[0..3].copy_from_slice(&TLS_SERVER_HANDSHAKE_START);
@@ -284,7 +238,7 @@ mod tests {
     #[test]
     fn a_trailing_partial_record_is_not_complete() {
         let mut data = vec![0x17, 0x03, 0x03, 0x00, 0x03];
-        data.extend_from_slice(b"ab"); // на байт короче объявленного
+        data.extend_from_slice(b"ab");
         assert!(!is_complete_tls_records(&data));
     }
 

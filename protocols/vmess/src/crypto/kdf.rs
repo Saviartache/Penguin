@@ -1,51 +1,26 @@
-//! Вложенный HMAC-SHA256 — «VMess AEAD KDF».
+//! Вложенный HMAC-SHA256 "VMess AEAD KDF" (`ring::hmac` не принимает свою хеш-функцию).
 //!
-//! Стандартным HKDF это не выражается, и `ring` его не считает: у HKDF один
-//! слой HMAC, а здесь их несколько, и хеш-функцией каждого следующего слоя
-//! служит целиком предыдущий, а не его выход.
-//!
-//! ```text
-//! H0(x) = SHA256(x)
-//! H1(x) = HMAC(key = "VMess AEAD KDF", hash = H0, x)
-//! H2(x) = HMAC(key = labels[0],        hash = H1, x)
-//! ...
-//! Hn(x) = HMAC(key = labels[n-1],      hash = H(n-1), x)
-//! KDF(key, labels) = Hn(key)
-//! ```
-//!
-//! Основание `"VMess AEAD KDF"` — ключ самого первого слоя HMAC, а не метка
-//! домена в общем ряду; оно неявное и есть у любого вызова. Дальше каждая
-//! строка из `labels` становится ключом следующего слоя, а исходный `key` —
-//! сообщением, которое хеширует самый внешний слой.
-//!
-//! Проверено внешним вектором из `proxy/vmess/aead/kdf_test.go` эталона
-//! (`v2fly/v2ray-core`, `master`): `KDFValue` со входом `"Demo Key for KDF
-//! Value Test"` и тремя метками `"Demo Path for KDF Value Test"` (с номерами
-//! 2 и 3 у второй и третьей) даёт ровно то значение, что зашито в тест ниже.
+//! `H0 = SHA256`, `Hi(x) = HMAC(key = keys[i-1], hash = H(i-1), x)`,
+//! `keys = ["VMess AEAD KDF", labels...]`, `KDF(key, labels) = Hn(key)`.
+//! Вектор из `proxy/vmess/aead/kdf_test.go` (`v2fly/v2ray-core`) в тесте ниже.
 
 use sha2::{Digest, Sha256};
 
-/// Основание — ключ самого внешнего вызова `SHA256`, а не метка домена.
+/// Ключ самого первого слоя HMAC.
 const BASE_KEY: &[u8] = b"VMess AEAD KDF";
 
-/// Длина блока `SHA-256` — она же длина набивки ключа HMAC на каждом слое,
-/// независимо от того, что этот слой хеширует на самом деле.
+/// Длина блока `SHA-256` и набивки ключа HMAC.
 const BLOCK_LEN: usize = 64;
 
-/// Выводит ключ вложенным HMAC-SHA256: основание плюс цепочка меток.
-///
-/// Возвращает все 32 байта: часть вызовов режет их до 16
-/// ([`kdf16`]), часть берёт первые 12 как нонс AEAD.
+/// Все 32 байта вывода; вызывается раз на заголовок, не на кадр.
 pub fn kdf(key: &[u8], labels: &[&[u8]]) -> [u8; 32] {
-    // Основание — ключ самого первого слоя HMAC, а не метка после него:
-    // `hash_at(1, ..)` обязан быть HMAC-SHA256, keyed именно этой строкой.
     let mut keys = Vec::with_capacity(labels.len() + 1);
     keys.push(BASE_KEY);
     keys.extend_from_slice(labels);
     hash_at(keys.len(), &keys, key)
 }
 
-/// То же самое, обрезанное до 16 байт — так эталон готовит ключи AES.
+/// Первые 16 байт [`kdf`]: ключи AES.
 pub fn kdf16(key: &[u8], labels: &[&[u8]]) -> [u8; 16] {
     let full = kdf(key, labels);
     let mut out = [0u8; 16];
@@ -53,12 +28,7 @@ pub fn kdf16(key: &[u8], labels: &[&[u8]]) -> [u8; 16] {
     out
 }
 
-/// Хеш-функция слоя `depth`: `0` — голый `SHA-256`, дальше — HMAC с ключом
-/// `labels[depth - 1]`, чья собственная хеш-функция — слой `depth - 1`.
-///
-/// Рекурсия глубиной в две-три метки — цена вложенности, которую эталон
-/// платит на каждый вызов KDF; сам вызов происходит не чаще раза на
-/// заголовок или на рукопожатие, а не на кусок тела.
+/// Хеш слоя `depth`: `0` — `SHA-256`, иначе HMAC с ключом `labels[depth - 1]` поверх слоя `depth - 1`.
 fn hash_at(depth: usize, labels: &[&[u8]], data: &[u8]) -> [u8; 32] {
     if depth == 0 {
         return Sha256::digest(data).into();
@@ -89,8 +59,6 @@ mod tests {
 
     #[test]
     fn matches_the_reference_test_vector() {
-        // `proxy/vmess/aead/kdf_test.go`, `TestKDFValue` — единственный
-        // опубликованный вектор на эту функцию, а не наш собственный расчёт.
         let got = kdf(
             b"Demo Key for KDF Value Test",
             &[
@@ -119,8 +87,6 @@ mod tests {
 
     #[test]
     fn the_base_is_implicit_not_a_label() {
-        // Основание не передаётся в `labels` — вызов без меток уже отличает
-        // это KDF от голого HMAC-SHA256 с тем же ключом.
         let ours = kdf(b"key", &[]);
         let plain = Sha256::digest(b"key");
         assert_ne!(ours.to_vec(), plain.to_vec());

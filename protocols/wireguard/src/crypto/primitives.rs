@@ -1,44 +1,19 @@
-//! Кирпичи рукопожатия: `HASH`, `HMAC`, KDF в один-два-три выхода, `MAC`,
-//! `AEAD` — ровно те примитивы, которыми оперирует псевдокод спецификации
-//! (`wireguard.com/protocol/`, разделы «First/Second Message»).
+//! Примитивы Noise: `HASH`, `HMAC`, KDF, `MAC`, `AEAD`
+//! (`wireguard.com/protocol/`; формулы - `device/noise-helpers.go`, `device/cookie.go`).
 //!
-//! Важное различие, о которое легко споткнуться: `HMAC()` из псевдокода — это
-//! **обычный HMAC** (RFC 2104) над BLAKE2s-256, а `MAC()` (для `mac1`/`mac2`)
-//! — это **керированный BLAKE2s**, то есть встроенный в сам алгоритм режим
-//! ключа, а не HMAC. Это два разных примитива с одинаковым словом «MAC» в
-//! названии; перепутать их — значит посчитать `mac1` так, что ни один сервер
-//! его не примет, и это будет выглядеть не ошибкой, а тишиной.
-//!
-//! Источник обоих: `device/noise-helpers.go` (`HMAC1`/`HMAC2`, через
-//! `blake2s.New256`) и `device/cookie.go` (`WGLabelMAC1`,
-//! `blake2s.New128(key)`) в `wireguard-go`; формулы `KDF1`/`KDF2`/`KDF3` там
-//! же, в `HMAC1`/`HMAC2`/`KDF1`/`KDF2`/`KDF3` (`device/noise-helpers.go`).
-//!
-//! # Почему `HMAC()` здесь не крейт `hmac`
-//!
-//! Генерический `hmac` из RustCrypto собирается только над хэшами с
-//! «нетерпеливой» (`Eager`) буферизацией блока. BLAKE2 буферизует «лениво»
-//! (`Lazy`) — ему нужно знать, последний это блок или нет, до того, как его
-//! сжать, — и это не подгонка реализации, а свойство самого алгоритма сжатия
-//! BLAKE2. Поэтому `Hmac<Blake2s256>` не собирается вовсе: `CoreWrapper`
-//! вокруг `Blake2sVarCore` не реализует типаж, который требует `hmac`
-//! (`BufferKindUser<BufferKind = Eager>`). Это не то же самое, что не найти
-//! подходящую версию зависимости, — конструкция несовместима на уровне
-//! типажей при любой версии обоих крейтов. HMAC-BLAKE2s ниже собран вручную
-//! по RFC 2104 поверх `Blake2s256::update`/`finalize`, которые «ленивости»
-//! не боятся: `Digest` сам решает, когда сообщение закончилось, только на
-//! вызове `finalize`.
+//! `HMAC()` - обычный HMAC (RFC 2104) над BLAKE2s-256, `MAC()` (`mac1`/`mac2`) -
+//! керированный BLAKE2s. Крейт `hmac` не подходит: у BLAKE2 «ленивая» буферизация
+//! блока, `Hmac<Blake2s256>` не собирается, поэтому HMAC собран вручную.
 
 use blake2::Blake2s256;
 use blake2::digest::Digest;
 use blake2::digest::consts::U16;
-use chacha20poly1305::aead::Aead;
+use chacha20poly1305::aead::AeadInOut;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit as AeadKeyInit, Nonce};
 
 use crate::crypto::constants::{AEAD_TAG_LEN, KEY_LEN, MAC_LEN};
 use crate::error::{WireguardError, WireguardResult};
 
-/// Размер блока BLAKE2s в байтах — нужен для ручного HMAC.
 const BLAKE2S_BLOCK_LEN: usize = 64;
 
 /// `HASH(data) = BLAKE2s-256(data)`.
@@ -50,13 +25,8 @@ pub fn hash(parts: &[&[u8]]) -> [u8; KEY_LEN] {
     hasher.finalize().into()
 }
 
-/// `HMAC(key, input)` — обычный HMAC-BLAKE2s-256 (RFC 2104), а не
-/// керированный BLAKE2s. Собран вручную — см. документ модуля.
+/// `HMAC(key, input)` - HMAC-BLAKE2s-256 по RFC 2104.
 fn hmac_blake2s(key: &[u8], parts: &[&[u8]]) -> [u8; KEY_LEN] {
-    // Ключ длиннее блока хэшируется до длины блока; короче — дополняется
-    // нулями. Оба случая здесь не встречаются (ключи этого протокола — 32
-    // байта, блок BLAKE2s — 64), но обычное поведение HMAC от этого не
-    // меняется.
     let mut key_block = [0u8; BLAKE2S_BLOCK_LEN];
     if key.len() > BLAKE2S_BLOCK_LEN {
         key_block[..KEY_LEN].copy_from_slice(&hash(&[key]));
@@ -84,17 +54,13 @@ fn hmac_blake2s(key: &[u8], parts: &[&[u8]]) -> [u8; KEY_LEN] {
     outer.finalize().into()
 }
 
-/// `Kdf1`: один выход. Используется там, где второй `HMAC`-раунд не нужен
-/// (раскладка `mixKey` в `wireguard-go`: `KDF1(dst, chainKey, dh)`).
+/// `Kdf1`: один выход.
 pub fn kdf1(chaining_key: &[u8; KEY_LEN], input: &[u8]) -> [u8; KEY_LEN] {
     let temp = hmac_blake2s(chaining_key, &[input]);
     hmac_blake2s(&temp, &[&[0x1]])
 }
 
-/// `Kdf2`: два выхода — новый `chaining_key` и производный ключ AEAD.
-///
-/// Источник: `KDF2` в `device/noise-helpers.go` — `prk = HMAC(key, input)`,
-/// `t0 = HMAC(prk, 0x1)`, `t1 = HMAC(prk, t0 || 0x2)`.
+/// `Kdf2`: новый `chaining_key` и ключ AEAD (`KDF2` в `device/noise-helpers.go`).
 pub fn kdf2(chaining_key: &[u8; KEY_LEN], input: &[u8]) -> ([u8; KEY_LEN], [u8; KEY_LEN]) {
     let temp = hmac_blake2s(chaining_key, &[input]);
     let ck = hmac_blake2s(&temp, &[&[0x1]]);
@@ -102,11 +68,7 @@ pub fn kdf2(chaining_key: &[u8; KEY_LEN], input: &[u8]) -> ([u8; KEY_LEN], [u8; 
     (ck, key)
 }
 
-/// `Kdf3`: три выхода — используется только при смешивании предварительного
-/// ключа во втором сообщении.
-///
-/// Источник: `KDF3` в `device/noise-helpers.go` — тот же `prk`, что и в
-/// `KDF2`, плюс третий раунд: `t2 = HMAC(prk, t1 || 0x3)`.
+/// `Kdf3`: три выхода, для предварительного ключа во втором сообщении.
 pub fn kdf3(
     chaining_key: &[u8; KEY_LEN],
     input: &[u8],
@@ -118,22 +80,11 @@ pub fn kdf3(
     (ck, tau, key)
 }
 
-/// `MAC(key, data)` для `mac1`/`mac2` — керированный BLAKE2s с шестнадцатью
-/// байтами выхода. **Не** HMAC: у BLAKE2 ключ участвует в самом алгоритме
-/// сжатия, а не оборачивает хэш снаружи, как в HMAC.
-///
-/// Вызовы ниже — через полный путь типажа (`<Type as Trait>::method`), а не
-/// через импорт типажей `KeyInit`/`Mac` в область видимости: оба объявляют
-/// `new_from_slice` (`Mac: KeyInit`, но переобъявляет её же для читаемости
-/// документации), и одновременный импорт обоих даёт неоднозначность на
-/// сборке, а не во время выполнения.
+/// `MAC(key, data)` для `mac1`/`mac2`: керированный BLAKE2s на 16 байт (не HMAC).
 pub fn mac(key: &[u8], data: &[u8]) -> [u8; MAC_LEN] {
     type Blake2sMac128 = blake2::Blake2sMac<U16>;
 
-    // Ключ здесь всегда есть (либо хэш метки со статическим ключом, либо
-    // полученная от сервера cookie) и не длиннее 32 байт — предела BLAKE2s;
-    // `expect` оправдан тем же, чем и выше: это свойство алгоритма, а не
-    // ввод с провода.
+    // Ключ не длиннее 32 байт - предела BLAKE2s.
     #[allow(clippy::expect_used)]
     let mut hasher = <Blake2sMac128 as blake2::digest::KeyInit>::new_from_slice(key)
         .expect("ключ MAC не длиннее предела BLAKE2s");
@@ -141,46 +92,66 @@ pub fn mac(key: &[u8], data: &[u8]) -> [u8; MAC_LEN] {
     blake2::digest::Mac::finalize(hasher).into_bytes().into()
 }
 
-/// `AEAD(key, counter, plaintext, auth_text)`: ChaCha20-Poly1305 с нонсом,
-/// собранным из счётчика (четыре нулевых байта, затем счётчик как u64 little
-/// endian — так и в рукопожатии со счётчиком 0, и в пакетах данных со своим).
+/// `AEAD(key, counter, plaintext, auth_text)`: ChaCha20-Poly1305, нонс - четыре
+/// нулевых байта и счётчик u64 little endian.
 pub fn aead_seal(key: &[u8; KEY_LEN], counter: u64, plaintext: &[u8], auth_text: &[u8]) -> Vec<u8> {
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let nonce = nonce_from_counter(counter);
-    let payload = chacha20poly1305::aead::Payload {
-        msg: plaintext,
-        aad: auth_text,
-    };
-    // Ключ и нонс здесь всегда верной длины (типы `Key`/`Nonce` из того же
-    // крейта их гарантируют) — шифрование с ними отказать не может.
+    let mut out = Vec::with_capacity(sealed_len(plaintext.len()));
+    out.extend_from_slice(plaintext);
+    // Длины рукопожатия малы: шифрование не отказывает.
     #[allow(clippy::expect_used)]
-    cipher
-        .encrypt(&nonce, payload)
-        .expect("шифрование с готовым ключом и нонсом не отказывает")
+    let tag = aead_seal_in_place(key, counter, &mut out, auth_text)
+        .expect("шифрование короткого сообщения не отказывает");
+    out.extend_from_slice(&tag);
+    out
 }
 
-/// Обратное к [`aead_seal`]. Ошибка здесь — это либо чужой ключ, либо
-/// испорченный на проводе пакет; отличить одно от другого по самому факту
-/// отказа AEAD нельзя, и не нужно: оба случая ведут себя одинаково — пакет
-/// отбрасывается.
+/// Шифрует `buf` на месте и возвращает метку.
+pub fn aead_seal_in_place(
+    key: &[u8; KEY_LEN],
+    counter: u64,
+    buf: &mut [u8],
+    auth_text: &[u8],
+) -> WireguardResult<[u8; AEAD_TAG_LEN]> {
+    let tag = ChaCha20Poly1305::new(key.into())
+        .encrypt_inout_detached(&nonce_from_counter(counter), auth_text, buf.into())
+        .map_err(|_| WireguardError::malformed("сообщение слишком длинное для AEAD"))?;
+    Ok(tag.into())
+}
+
+/// Обратное к [`aead_seal`]; ошибка - чужой ключ или испорченный пакет.
 pub fn aead_open(
     key: &[u8; KEY_LEN],
     counter: u64,
     ciphertext: &[u8],
     auth_text: &[u8],
 ) -> WireguardResult<Vec<u8>> {
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let nonce = nonce_from_counter(counter);
-    let payload = chacha20poly1305::aead::Payload {
-        msg: ciphertext,
-        aad: auth_text,
-    };
-    cipher
-        .decrypt(&nonce, payload)
-        .map_err(|_| WireguardError::Malformed("метка подлинности не сошлась".into()))
+    let mut buf = ciphertext.to_vec();
+    let len = aead_open_in_place(key, counter, &mut buf, auth_text)?.len();
+    buf.truncate(len);
+    Ok(buf)
 }
 
-/// Длина шифротекста AEAD для открытого текста данной длины — плюс метка.
+/// Расшифровывает `sealed` (шифротекст и метка) на месте; возвращает открытый текст.
+pub fn aead_open_in_place<'a>(
+    key: &[u8; KEY_LEN],
+    counter: u64,
+    sealed: &'a mut [u8],
+    auth_text: &[u8],
+) -> WireguardResult<&'a mut [u8]> {
+    let auth_failed = || WireguardError::Malformed("метка подлинности не сошлась".into());
+    let split = sealed
+        .len()
+        .checked_sub(AEAD_TAG_LEN)
+        .ok_or_else(auth_failed)?;
+    let (data, tag) = sealed.split_at_mut(split);
+    let tag = (&*tag).try_into().map_err(|_| auth_failed())?;
+    ChaCha20Poly1305::new(key.into())
+        .decrypt_inout_detached(&nonce_from_counter(counter), auth_text, data.into(), &tag)
+        .map_err(|_| auth_failed())?;
+    Ok(data)
+}
+
+/// Длина шифротекста AEAD: открытый текст плюс метка.
 pub const fn sealed_len(plaintext_len: usize) -> usize {
     plaintext_len + AEAD_TAG_LEN
 }
@@ -196,13 +167,7 @@ mod tests {
     use super::*;
     use crate::crypto::constants::{CONSTRUCTION, IDENTIFIER};
 
-    /// BLAKE2s-256 пустой строки — тестовый вектор из RFC 7693, приложение E
-    /// (официальный тестовый набор BLAKE2), сверен ещё и заново через
-    /// `openssl dgst -blake2s256` (OpenSSL 3.5) на пустом вводе — независимо
-    /// от остальной реализации. Черновик этого файла нёс тот же вектор без
-    /// последнего шестнадцатеричного разряда (63 символа вместо 64, `...eef`
-    /// вместо `...eef9`) — `hex32` падал на разборе, а не тихо принимал
-    /// усечённое значение.
+    /// BLAKE2s-256 пустой строки: RFC 7693, приложение E; сверено с OpenSSL.
     #[test]
     fn blake2s_matches_the_rfc_7693_test_vector() {
         let digest = hash(&[b""]);
@@ -212,13 +177,7 @@ mod tests {
         );
     }
 
-    /// `InitialChainKey` и `InitialHash` сверены двумя независимыми путями:
-    /// байты `boringtun` (`boringtun/src/noise/handshake.rs`,
-    /// `INITIAL_CHAIN_KEY`/`INITIAL_CHAIN_HASH`) и отдельно — BLAKE2s-256 из
-    /// OpenSSL 3.5 (`openssl` в среде разработки, алгоритм `blake2s256`),
-    /// посчитанный над теми же строками вне этого крейта и вне Rust вообще.
-    /// Оба совпали с числами ниже; это не прогон собственной формулы туда-
-    /// обратно.
+    /// `InitialChainKey` и `InitialHash` сверены с `boringtun` и с OpenSSL.
     #[test]
     fn the_initial_chaining_key_and_hash_match_an_independent_implementation() {
         let initial_chain_key = hash(&[CONSTRUCTION]);
@@ -250,9 +209,18 @@ mod tests {
     }
 
     #[test]
+    fn aead_in_place_matches_the_allocating_form() {
+        let key = [7u8; KEY_LEN];
+        let mut buf = b"hello".to_vec();
+        let tag = aead_seal_in_place(&key, 5, &mut buf, b"aad").expect("шифруется");
+        buf.extend_from_slice(&tag);
+        assert_eq!(buf, aead_seal(&key, 5, b"hello", b"aad"));
+        let opened = aead_open_in_place(&key, 5, &mut buf, b"aad").expect("расшифровывается");
+        assert_eq!(opened, b"hello");
+    }
+
+    #[test]
     fn aead_rejects_the_wrong_counter() {
-        // Тот же ключ, но нонс — часть договора: другой счётчик даёт другой
-        // нонс, и метка подлинности перестаёт сходиться.
         let key = [7u8; KEY_LEN];
         let sealed = aead_seal(&key, 5, b"hello", b"aad");
         assert!(aead_open(&key, 6, &sealed, b"aad").is_err());
@@ -266,6 +234,11 @@ mod tests {
     }
 
     #[test]
+    fn aead_rejects_input_shorter_than_the_tag() {
+        assert!(aead_open(&[7u8; KEY_LEN], 0, &[0u8; 3], &[]).is_err());
+    }
+
+    #[test]
     fn kdf2_outputs_differ_from_each_other() {
         let ck = [1u8; KEY_LEN];
         let (a, b) = kdf2(&ck, b"input");
@@ -274,9 +247,6 @@ mod tests {
 
     #[test]
     fn kdf3_first_two_outputs_match_kdf2() {
-        // `Kdf3` — это `Kdf2` с одним дополнительным раундом; первые два
-        // выхода обязаны совпасть, иначе где-то перепутан порядок аргументов
-        // в HMAC-раундах.
         let ck = [1u8; KEY_LEN];
         let (ck2, key2) = kdf2(&ck, b"input");
         let (ck3, tau3, _key3) = kdf3(&ck, b"input");
@@ -286,10 +256,6 @@ mod tests {
 
     #[test]
     fn kdf1_matches_the_first_two_rounds_of_kdf2() {
-        // `Kdf1` — первый раунд `HMAC1`/`HMAC1` без последующего смешивания
-        // `ck'`: значение обязано совпасть со вторым выходом `mixKey`,
-        // применённым к тому же ключу и входу, что и `Kdf1` использует внутри
-        // себя первым раундом.
         let ck = [1u8; KEY_LEN];
         let (ck2, _key2) = kdf2(&ck, b"input");
         assert_eq!(kdf1(&ck, b"input"), ck2);
@@ -303,7 +269,6 @@ mod tests {
         assert_ne!(mac_a, mac_b);
     }
 
-    /// Разбирает шестнадцатеричную запись в массив байт фиксированной длины.
     fn hex32(text: &str) -> [u8; 32] {
         let mut out = [0u8; 32];
         for (i, byte) in out.iter_mut().enumerate() {

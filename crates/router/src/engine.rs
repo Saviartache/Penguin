@@ -1,20 +1,5 @@
-//! `Router` — вычисление решения по контексту соединения.
-//!
-//! Порядок разбора целиком:
-//!
-//! ```text
-//!   контекст соединения
-//!         │
-//!         ├─ кэш решений ──► попадание ──► готово
-//!         │
-//!         ├─ правила по порядку ──► первое совпавшее ──► готово
-//!         │
-//!         └─ умолчание режима
-//! ```
-//!
-//! Набор правил лежит в [`arc_swap::ArcSwap`]: правки из интерфейса меняют
-//! его целиком и мгновенно, не останавливая работу и не блокируя разбор
-//! соединений. Читающая сторона при этом не платит ни одной блокировкой.
+//! `Router`: кэш, затем правила по порядку, затем умолчание режима. Состояние
+//! в [`arc_swap::ArcSwap`] — замена целиком без блокировок на чтении.
 
 use arc_swap::ArcSwap;
 use penguin_config::schema::routing::{RoutingConfig, TunnelMode};
@@ -74,7 +59,6 @@ impl Router {
         let rules = RuleSet::compile(config, ctx)?;
         self.rules.store(std::sync::Arc::new(rules));
         self.mode.store(std::sync::Arc::new(config.mode));
-        // Кэш обязан обнулиться: в нём лежат решения по прежним правилам.
         self.cache.clear();
         Ok(())
     }
@@ -82,7 +66,6 @@ impl Router {
     /// Меняет активный профиль.
     pub fn set_active(&self, active: OutboundId) {
         self.active.store(std::sync::Arc::new(active));
-        // Решения `ActiveTunnel` в кэше указывают на прежний профиль.
         self.cache.clear();
     }
 
@@ -101,11 +84,7 @@ impl Router {
         self.rules.load().len()
     }
 
-    /// Текущий набор правил.
-    ///
-    /// Снимок: правки из интерфейса заменят набор целиком, а уже взятая
-    /// ссылка продолжит указывать на прежний — именно этого и хочет тот, кто
-    /// обходит правила по порядку.
+    /// Снимок текущего набора правил.
     pub fn rule_set(&self) -> arc_swap::Guard<std::sync::Arc<RuleSet>> {
         self.rules.load()
     }
@@ -144,9 +123,6 @@ impl Router {
 }
 
 /// Решение для соединения, не подошедшего ни под одно правило.
-///
-/// Свободная функция: режим приходит из конфигурации, а исход — понятие
-/// маршрутизатора, и добавлять метод к чужому типу нельзя.
 pub fn default_decision(mode: TunnelMode, active: &OutboundId) -> ResolvedDecision {
     if mode.defaults_to_tunnel() {
         Decision::ActiveTunnel.resolve(active)
@@ -234,9 +210,6 @@ mod tests {
 
     #[test]
     fn allowlist_and_blocklist_coexist_in_one_set() {
-        // Ровно то, ради чего условие сделано деревом: «игры мимо тоннеля, но
-        // их обновления — через тоннель» записывается двумя правилами и
-        // разбирается порядком, а не отдельным режимом.
         let router = router(
             TunnelMode::Full,
             json!([
@@ -309,8 +282,6 @@ mod tests {
             .replace_rules(&config, &CompileContext::default())
             .expect("правила заменены");
 
-        // Кэш обязан обнулиться, иначе новое правило не подействует на уже
-        // виденные адреса.
         let verdict = router.resolve(&flow("1.2.3.4:443", None, None));
         assert_eq!(verdict.decision, ResolvedDecision::Direct);
     }
@@ -332,8 +303,6 @@ mod tests {
 
     #[test]
     fn unknown_process_falls_back_to_the_mode() {
-        // Владелец мог не определиться из-за гонки. Такое соединение уходит
-        // по умолчанию, а не блокируется: «не знаю чьё» и «ничьё» — разное.
         let router = router(
             TunnelMode::Full,
             json!([{ "id": "r1", "when": { "process_name": ["app.exe"] }, "action": "direct" }]),

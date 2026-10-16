@@ -1,17 +1,7 @@
-//! DNS-over-TLS.
+//! DNS-over-TLS (RFC 7858): порт 853, перед сообщением его длина двумя байтами.
 //!
-//! RFC 7858: тот же DNS, но внутри TLS на порту 853, и перед каждым
-//! сообщением идёт его длина двумя байтами — соединение потоковое, а границы
-//! сообщений нужны.
-//!
-//! Смысл здесь ровно один: скрыть от провайдера имя, которое спрашивают. Это
-//! важно для **загрузочного** разрешения — имени самого VPN-сервера, которое
-//! спрашивается до того, как тоннель поднят, и потому идёт открыто.
-//!
-//! TLS берётся тот же, что у протокола (`rustls` 0.23) и с той же проверкой
-//! сертификата через хранилище системы. Второй, отдельный TLS-стек ради DNS
-//! означал бы вторую реализацию, которую надо отдельно обновлять при каждой
-//! уязвимости.
+//! Прячет от провайдера имя VPN-сервера при загрузочном разрешении. TLS и
+//! проверка сертификата через хранилище системы те же, что у протоколов.
 
 use std::sync::Arc;
 
@@ -49,11 +39,7 @@ impl std::fmt::Debug for DotUpstream {
 }
 
 impl DotUpstream {
-    /// Создаёт апстрим.
-    ///
-    /// `address` — куда соединяться, `server_name` — какое имя проверять в
-    /// сертификате. Они различаются намеренно: адрес числовой (разрешать его
-    /// негде — мы и есть разрешатель), а имя нужно проверке сертификата.
+    /// Создаёт апстрим: `address` числовой (разрешать его некому), `server_name` проверяется в сертификате.
     pub fn new(address: impl Into<String>, server_name: impl Into<String>) -> DnsResult<Self> {
         let mut address = address.into();
         if !address.contains(':') {
@@ -91,9 +77,6 @@ impl Upstream for DotUpstream {
             })?;
             let mut stream = self.connector.connect(name, stream).await?;
 
-            // Длина перед сообщением: соединение потоковое, и без неё
-            // получатель не знает, где кончается один запрос и начинается
-            // следующий.
             let length = u16::try_from(request.len())
                 .map_err(|_| DnsError::Malformed("запрос длиннее 65 535 байт".to_owned()))?;
             stream.write_all(&length.to_be_bytes()).await?;
@@ -114,8 +97,7 @@ impl Upstream for DotUpstream {
             Ok::<Vec<u8>, DnsError>(response)
         };
 
-        // Бюджет общий на соединение, рукопожатие и обмен: приложение ждёт
-        // ответа, а не отдельно рукопожатия.
+        // Один бюджет на соединение, рукопожатие и обмен.
         tokio::time::timeout(UPSTREAM_TIMEOUT, exchange)
             .await
             .map_err(|_| DnsError::Upstream(format!("{} не ответил", self.address)))?
@@ -140,15 +122,12 @@ mod tests {
 
     #[test]
     fn address_and_name_are_separate() {
-        // Адрес числовой — разрешать его негде, мы и есть разрешатель. Имя
-        // нужно проверке сертификата.
         let upstream = DotUpstream::new("1.1.1.1", "cloudflare-dns.com").expect("собирается");
         assert_eq!(upstream.describe(), "tls://1.1.1.1:853#cloudflare-dns.com");
     }
 
     #[tokio::test]
     async fn unreachable_server_times_out() {
-        // Подсеть из RFC 5737: туда ничего не идёт.
         let upstream = DotUpstream::new("192.0.2.1", "example.com").expect("собирается");
         let started = std::time::Instant::now();
         assert!(upstream.query(&[0u8; 12]).await.is_err());

@@ -1,21 +1,7 @@
 //! Домены: точное совпадение, суффикс, подстрока, регулярное выражение.
 //!
-//! Четыре вида, и они не взаимозаменяемы:
-//!
-//! | Вид | `youtube.com` | `www.youtube.com` | `notyoutube.com` |
-//! |---|---|---|---|
-//! | точно `youtube.com` | ✓ | — | — |
-//! | суффикс `youtube.com` | ✓ | ✓ | — |
-//! | подстрока `youtube` | ✓ | ✓ | ✓ |
-//!
-//! Разница между суффиксом и подстрокой — самая важная. Суффикс проверяет
-//! **границу метки**: `youtube.com` совпадает с `www.youtube.com`, но не с
-//! `notyoutube.com`, потому что перед совпавшим хвостом стоит точка. Наивная
-//! проверка `ends_with` этого не даёт, и правило «весь YouTube в тоннель»
-//! утащило бы туда чужой сайт с похожим именем.
-//!
-//! Точные имена и суффиксы ищутся хеш-таблицами, подстроки — автоматом
-//! Ахо — Корасик за один проход по имени, сколько бы подстрок ни задали.
+//! Суффикс проверяет границу метки: `youtube.com` не совпадает с
+//! `notyoutube.com`. Подстроки ищет автомат Ахо — Корасик.
 
 use std::collections::HashSet;
 
@@ -77,8 +63,6 @@ impl DomainSet {
         Self::Suffix(
             entries
                 .into_iter()
-                // Ведущая точка в записи (`.example.com`) встречается в чужих
-                // конфигурациях и означает ровно то же самое.
                 .map(|e| normalize_domain(e.as_ref().trim_start_matches('.')))
                 .collect(),
         )
@@ -116,8 +100,6 @@ impl DomainSet {
         match self {
             Self::Exact(names) => names.contains(domain),
             Self::Suffix(names) => {
-                // Само имя и каждая его родительская метка. Так проверка
-                // стоит числа точек в имени, а не числа записей в наборе.
                 if names.contains(domain) {
                     return true;
                 }
@@ -138,10 +120,6 @@ impl DomainSet {
 
 impl Matcher for DomainSet {
     fn matches(&self, target: &MatchTarget<'_>) -> bool {
-        // Имени может не быть вовсе: приложение разрешило его заранее и пошло
-        // по адресу. Такое соединение доменному правилу не подходит — и это
-        // верно, а не досадно: подставлять сюда обратное разрешение адреса
-        // значило бы гадать.
         target
             .domain
             .is_some_and(|domain| self.matches_domain(domain))
@@ -177,8 +155,6 @@ mod tests {
 
     #[test]
     fn suffix_respects_label_boundaries() {
-        // Главная тонкость всего файла: наивный `ends_with` утащил бы в
-        // тоннель чужой сайт с похожим именем.
         let set = DomainSet::suffix(["youtube.com"]);
         assert!(set.matches_domain("youtube.com"));
         assert!(set.matches_domain("www.youtube.com"));
@@ -219,8 +195,6 @@ mod tests {
     #[test]
     fn matching_is_case_insensitive() {
         let set = DomainSet::suffix(["YouTube.COM"]);
-        // Имена нормализуются при создании набора, а на вход всегда приходит
-        // уже нормализованное имя — см. `penguin_core::address`.
         assert!(set.matches_domain("www.youtube.com"));
     }
 

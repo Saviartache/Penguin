@@ -1,10 +1,4 @@
-//! Поток запроса HTTP/2 как `AsyncRead + AsyncWrite` над
-//! `h2::SendStream`/`RecvStream`.
-//!
-//! `h2` даёт обеим половинам поллинговый API: `poll_capacity` и `poll_data`
-//! ложатся на `AsyncWrite`/`AsyncRead` напрямую, без задачи-посредника.
-//! Общий для всех, кто ходит по HTTP/2: `CONNECT` у naive и TrustTunnel,
-//! перенос gRPC.
+//! Поток запроса HTTP/2 как `AsyncRead + AsyncWrite` (naive, TrustTunnel, gRPC).
 
 use std::future::Future;
 use std::io;
@@ -25,8 +19,7 @@ fn to_io_error(err: h2::Error) -> io::Error {
 pub struct H2Stream {
     send: SendStream<Bytes>,
     recv: Recv,
-    /// Кусок последнего полученного кадра `DATA`, ещё не отданный читателю:
-    /// кадр обычно больше, чем просит вызывающий `poll_read`.
+    /// Остаток последнего кадра `DATA`.
     leftover: Bytes,
 }
 
@@ -46,9 +39,7 @@ impl H2Stream {
         }
     }
 
-    /// Поток, ответ на который ещё не пришёл: его ждёт первое чтение, а
-    /// писать можно сразу. Нужен там, где сервер отвечает только на данные,
-    /// как gRPC-сервер Xray. Код вне `2xx` — ошибка чтения.
+    /// Поток без ответа: писать можно сразу, ответ ждёт первое чтение (не `2xx` — ошибка).
     pub fn awaiting(send: SendStream<Bytes>, response: ResponseFuture) -> Self {
         Self {
             send,
@@ -96,15 +87,12 @@ impl AsyncRead for H2Stream {
             match Pin::new(&mut *body).poll_data(cx) {
                 Poll::Ready(Some(Ok(data))) => {
                     let len = data.len();
-                    // Окно приёма возвращается сразу: иначе сервер решит, что
-                    // мы не успеваем читать, и перестанет слать данные.
                     if let Err(err) = body.flow_control().release_capacity(len) {
                         return Poll::Ready(Err(to_io_error(err)));
                     }
                     this.leftover = data;
                 }
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(to_io_error(err))),
-                // Конец потока: сервер закрыл его штатно.
                 Poll::Ready(None) => return Poll::Ready(Ok(())),
                 Poll::Pending => return Poll::Pending,
             }
@@ -129,7 +117,6 @@ impl AsyncWrite for H2Stream {
             match this.send.poll_capacity(cx) {
                 Poll::Ready(Some(Ok(_))) => {}
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Err(to_io_error(err))),
-                // Поток закрыт с той стороны — писать больше некуда.
                 Poll::Ready(None) => {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -148,14 +135,10 @@ impl AsyncWrite for H2Stream {
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // `h2` отправляет кадры `DATA` сразу же при `send_data` — отдельного
-        // буфера на этом уровне нет, и ждать нечего.
         Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Пустой кадр `DATA` с `END_STREAM` — аналог `FIN` в TCP: писать мы
-        // больше не будем, чтение при этом не обрывается.
         self.get_mut()
             .send
             .send_data(Bytes::new(), true)

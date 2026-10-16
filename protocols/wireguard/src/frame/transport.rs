@@ -1,21 +1,6 @@
-//! Пакет с данными (тип 4): заголовок плюс шифротекст ChaCha20-Poly1305.
-//!
-//! ```text
-//! ┌──────┬────────┬────────────┬──────────┬─────────────────────────┐
-//! │ тип  │ резерв │ получатель │ счётчик  │ шифротекст (+метка 16)  │
-//! │ (1)  │ (3)    │ (4)        │ (8)      │ переменной длины        │
-//! └──────┴────────┴────────────┴──────────┴─────────────────────────┘
-//! ```
-//!
-//! Заголовок — 16 байт ([`TRANSPORT_HEADER_LEN`]), источник —
-//! `MessageTransportHeaderSize` и раскладка `MessageTransport` в
-//! `device/noise-protocol.go`. Пустой пакет-подтверждение (keepalive) —
-//! это тот же формат с шифротекстом нулевой длины: 16 байт заголовка плюс
-//! 16 байт одной метки Poly1305, и ни байта открытого текста.
-//!
-//! Счётчик — не индекс в потоке, а нонс AEAD для этого направления: значения
-//! обязаны не повторяться, но необязаны идти подряд без пропусков (see
-//! `crate::crypto::replay`).
+//! Пакет данных (тип 4): заголовок 16 байт ([`TRANSPORT_HEADER_LEN`]: тип 1, резерв 3,
+//! получатель 4, счётчик 8) и шифротекст с меткой (`MessageTransport` в
+//! `device/noise-protocol.go`). Keepalive - пустой открытый текст. Счётчик - нонс AEAD.
 
 use crate::crypto::constants::{MESSAGE_TRANSPORT_DATA, TRANSPORT_HEADER_LEN};
 use crate::error::{WireguardError, WireguardResult};
@@ -33,9 +18,7 @@ pub struct TransportHeader {
     pub counter: u64,
 }
 
-/// Собирает заголовок в готовые байты.
-///
-/// `reserved` — три байта после типа; см. `crate::config::WireguardConfig::reserved`.
+/// Собирает заголовок; `reserved` - см. `crate::config::WireguardConfig::reserved`.
 pub fn encode_header(header: &TransportHeader, reserved: [u8; 3]) -> [u8; TRANSPORT_HEADER_LEN] {
     let mut out = [0u8; TRANSPORT_HEADER_LEN];
     out[OFF_TYPE] = MESSAGE_TRANSPORT_DATA;
@@ -45,7 +28,7 @@ pub fn encode_header(header: &TransportHeader, reserved: [u8; 3]) -> [u8; TRANSP
     out
 }
 
-/// Собирает целый пакет: заголовок плюс уже готовый шифротекст (с меткой).
+/// Собирает пакет из заголовка и готового шифротекста.
 pub fn build(header: &TransportHeader, reserved: [u8; 3], ciphertext: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(TRANSPORT_HEADER_LEN + ciphertext.len());
     out.extend_from_slice(&encode_header(header, reserved));
@@ -53,11 +36,7 @@ pub fn build(header: &TransportHeader, reserved: [u8; 3], ciphertext: &[u8]) -> 
     out
 }
 
-/// Разбирает заголовок и возвращает его вместе со срезом шифротекста,
-/// который идёт следом.
-///
-/// Не проверяет содержимое шифротекста — это работа
-/// `crate::crypto::session`, у которой есть ключ.
+/// Разбирает заголовок; возвращает его и шифротекст следом (без проверки).
 pub fn split(bytes: &[u8]) -> WireguardResult<(TransportHeader, &[u8])> {
     if bytes.len() < TRANSPORT_HEADER_LEN {
         return Err(WireguardError::malformed(format!(
@@ -120,8 +99,6 @@ mod tests {
 
     #[test]
     fn a_keepalive_is_a_header_with_no_content_before_the_tag() {
-        // Само подтверждение — пустой открытый текст; шифротекст здесь уже с
-        // меткой, поэтому даже "пустой" keepalive несёт 16 байт тега.
         let packet = build(&sample(), [0, 0, 0], &[0u8; 16]);
         assert_eq!(packet.len(), TRANSPORT_HEADER_LEN + 16);
     }

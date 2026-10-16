@@ -1,31 +1,9 @@
-//! Список профилей — символьная панель терминала во всю вкладку.
+//! Список профилей — таблица терминала во всю вкладку.
 //!
-//! Таблица, а не карточки: у профиля три значения — имя, адрес, задержка, — и
-//! сравнивают их **между строками**, по столбцам. Карточки ставят те же
-//! значения в разных местах каждой строки, и глазу приходится искать их заново
-//! на каждом сервере.
-//!
-//! Сама таблица — общая: рамка, черта под шапкой, поиск, прокрутка и волна на
-//! строке живут в [`crate::screens::table`], а здесь остаётся только то, что у
-//! серверов своё, — какие столбцы и что в них.
-//!
-//! # Выбор — щелчок по строке
-//!
-//! Кнопки «Выбрать» в строке нет: строка и есть кнопка. Кнопка в каждой строке
-//! повторяла то, что и так делает щелчок по записи в любом списке, и занимала
-//! место у столбца задержки — того самого, ради которого список читают.
-//!
-//! Выбранная строка помечена не стрелкой и не чертой сбоку, а одним акцентом:
-//! волной, сходящей на нет вправо. Знака в первом столбце здесь быть не может
-//! вовсе — ни стрелки, ни полублока: в моноширинном шрифте кита их нет, `iced`
-//! берёт такой знак из системного шрифта, а там он шириной в кегль, а не в
-//! ячейку, и вся строка съезжает вправо относительно соседних
-//! (см. [`crate::console`]). Заливка ничего не занимает в сетке и потому
-//! ничего не двигает.
-//!
-//! Задержка показывается не ради цифры, а ради выбора: из пяти серверов
-//! человек берёт ближайший, и «нет ответа» здесь такое же полезное значение,
-//! как «42 мс», — оно означает «этот не трогай».
+//! Таблица общая ([`crate::screens::table`]), здесь только столбцы. Выбор —
+//! щелчок по строке, выбранная помечена волной: знак в первом столбце сдвинул
+//! бы строку (нет в шрифте кита, см. [`crate::console`]). Задержка нужна для
+//! выбора, «нет ответа» значит «этот не трогай».
 
 use iced::widget::{Space, button};
 use iced::{Alignment, Element, Length};
@@ -43,24 +21,13 @@ use crate::screens::table::{
 };
 use crate::ui;
 
-/// Ширина столбца имени в знаках.
-///
-/// Имя профиля человек придумывает сам и делает коротким; восемнадцати знаков
-/// хватает с запасом, а всё, что длиннее, важнее обрезать, чем сдвинуть за
-/// ним остальные столбцы.
+/// Ширина столбца имени в знаках; длинное режется, а не двигает остальное.
 const NAME_WIDTH: usize = 18;
 
 /// Ширина столбца адреса в знаках.
 const SERVER_WIDTH: usize = 26;
 
-/// Ширина столбца протокола в знаках.
-///
-/// Двенадцать: `hysteria2` — девять, `shadowsocks` — одиннадцать, и столбец
-/// заведён с запасом на те, которых ещё нет — имена протоколов короткие, и
-/// обрезанное имя перестаёт отвечать на свой единственный вопрос. Обрезка тут
-/// всё же есть, но только как страховка от испорченного файла настроек:
-/// столбец, съехавший из-за чужой строки в тридцать знаков, ломает таблицу
-/// целиком.
+/// Ширина столбца протокола: самое длинное имя (`shadowsocks`) — 11 знаков.
 const PROTOCOL_WIDTH: usize = 12;
 
 /// Ширина столбца задержки в знаках.
@@ -69,29 +36,21 @@ const LATENCY_WIDTH: usize = 8;
 /// Ширина столбца действия в точках.
 const ACTION_WIDTH: f32 = 76.0;
 
-/// Собирает вкладку целиком: кнопки и панель под ними.
-///
-/// Вкладка растянута по обеим осям — панель занимает всё, что осталось от
-/// кнопок. Страницы с прокруткой вокруг неё нет: прокручивается список внутри
-/// панели, а сама панель стоит на месте, как окно терминала.
+/// Собирает вкладку: кнопки и панель под ними; прокручивается список внутри панели.
 pub fn view(state: &State) -> Element<'_, Message> {
     Flex::col()
         .w(Size::FILL)
         .h(Size::FILL)
         .push_auto(toolbar(state))
         .push(panel(state))
-        // Тот же зазор, что между вкладками и от полосы вкладок до кнопок:
-        // одно расстояние на всю вкладку.
         .gap(TAB_GAP)
         .build()
 }
 
-/// Две кнопки над панелью.
 fn toolbar(state: &State) -> Element<'_, Message> {
     let mut probe =
         ui::button(ButtonVariant::Secondary, crate::i18n::s().probe).h(px(BUTTON_HEIGHT));
-    // Пока идёт проверка, повторное нажатие сбросило бы уже собранные
-    // задержки и началось бы заново.
+    // Повторное нажатие во время проверки сбросило бы собранное.
     if !state.servers.probing {
         probe = probe.on_press(Message::Servers(ServersMessage::Probe));
     }
@@ -100,8 +59,6 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         .push_auto(
             ui::button(ButtonVariant::Primary, crate::i18n::s().add_server)
                 .h(px(BUTTON_HEIGHT))
-                // Сначала протокол, потом его форма: полей у формы нет, пока
-                // не известно, чьи они.
                 .on_press(Message::Servers(ServersMessage::PickerOpened)),
         )
         .push_auto(probe)
@@ -111,7 +68,6 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         .build()
 }
 
-/// Панель терминала: таблица на прямоугольнике консоли.
 fn panel(state: &State) -> Element<'_, Message> {
     table::panel(
         &state.palette,
@@ -124,7 +80,7 @@ fn panel(state: &State) -> Element<'_, Message> {
     )
 }
 
-/// Шапка таблицы — имена столбцов над своими значениями.
+/// Шапка с тем же отступом и местом под действие, что у строки.
 fn head(state: &State) -> Element<'_, Message> {
     let strings = crate::i18n::s();
     let dim = ink::level(&state.palette, ink::TERTIARY);
@@ -139,21 +95,16 @@ fn head(state: &State) -> Element<'_, Message> {
 
     Flex::row()
         .w(Size::FILL)
-        // Тот же отступ, что у строки: заголовок столбца обязан стоять ровно
-        // над значениями, а не рядом с ними.
         .push(
             iced::widget::container(titles)
                 .padding(ROW_PADDING)
                 .width(Length::Fill),
         )
-        // Место столбца действия: без него заголовок задержки уехал бы к краю
-        // панели, а значения остались бы левее.
         .push_auto(Space::new().width(Length::Fixed(ACTION_WIDTH)))
         .gap(gap::NONE)
         .build()
 }
 
-/// Прокручиваемое тело таблицы.
 fn rows(state: &State) -> Element<'_, Message> {
     let profiles = &state.config.profiles;
     if profiles.is_empty() {
@@ -164,8 +115,6 @@ fn rows(state: &State) -> Element<'_, Message> {
         .iter()
         .filter(|profile| found(profile, &state.servers.search))
         .collect();
-    // Пустой список после поиска — не то же, что пустой список: во втором
-    // случае надо добавить сервер, в первом — переписать запрос.
     if shown.is_empty() {
         return table::empty(&state.palette, crate::i18n::s().nothing_found);
     }
@@ -184,10 +133,7 @@ fn rows(state: &State) -> Element<'_, Message> {
     table::scroll(list)
 }
 
-/// Подходит ли профиль под строку поиска.
-///
-/// Свободная функция с тестом: искать по одному только имени мало — сервер
-/// вспоминают и по адресу, и по протоколу.
+/// Подходит ли профиль под поиск: по имени, адресу и протоколу.
 fn found(profile: &Profile, query: &str) -> bool {
     let server = crate::screens::servers::server_of(profile).unwrap_or_default();
 
@@ -202,7 +148,7 @@ fn found(profile: &Profile, query: &str) -> bool {
     )
 }
 
-/// Строка профиля: сама строка выбирает, кнопка справа открывает правку.
+/// Строка профиля: сама выбирает, кнопка справа открывает правку.
 fn row<'a>(
     state: &'a State,
     profile: &'a Profile,
@@ -212,8 +158,7 @@ fn row<'a>(
     let selected = active == Some(&profile.id);
     let palette = &state.palette;
 
-    // Выбранный ярче остальных: список читают ради вопроса «какой сейчас», и
-    // ответ на него должен находиться боковым зрением.
+    // Выбранный ярче: «какой сейчас» должно находиться боковым зрением.
     let (name_ink, server_ink) = if selected {
         (palette.text, ink::level(palette, ink::SECONDARY))
     } else {
@@ -222,16 +167,11 @@ fn row<'a>(
             ink::level(palette, ink::TERTIARY),
         )
     };
-    // Протокол тише адреса в любой строке: его читают, когда протоколов в
-    // списке несколько, а не когда выбирают сервер.
     let protocol_ink = ink::level(palette, ink::TERTIARY);
-    let managed = profile.is_managed().then(|| {
-        // Правки в таком профиле пропадут при обновлении подписки.
-        glyphs(
-            crate::i18n::s().managed.to_owned(),
-            ink::level(palette, ink::TERTIARY),
-        )
-    });
+    // Правки в профиле подписки пропадут при её обновлении.
+    let managed = profile
+        .is_managed()
+        .then(|| glyphs(crate::i18n::s().managed, ink::level(palette, ink::TERTIARY)));
 
     let server = crate::screens::servers::server_of(profile)
         .map_or_else(|| DASH.to_string(), |server| cell(server, SERVER_WIDTH));
@@ -254,8 +194,7 @@ fn row<'a>(
         .width(Length::Fill)
         .padding(ROW_PADDING)
         .style(table::row_style(selected));
-    // Выбранную строку выбирать некуда: нажатие без последствий читается как
-    // сломанное.
+    // Нажатие без последствий читается как сломанное.
     if !selected {
         select = select.on_press(Message::Servers(ServersMessage::Select(id.clone())));
     }
@@ -272,10 +211,7 @@ fn row<'a>(
         .build()
 }
 
-/// Ряд ячеек таблицы — один на шапку и на строки.
-///
-/// Общий, потому что столбец, съехавший на знак, — единственное, что видно в
-/// таблице, а два похожих ряда рядом расходятся сами собой.
+/// Ряд ячеек — общий для шапки и строк, чтобы столбцы не разъезжались.
 fn columns<'a, Message: 'a>(
     name: Element<'a, Message>,
     server: Element<'a, Message>,
@@ -289,8 +225,7 @@ fn columns<'a, Message: 'a>(
         .push_auto(server)
         .push_auto(protocol);
 
-    // Метка подписки стоит **до** распорки: за ней столбец задержки съезжал бы
-    // влево ровно на тех строках, где она есть.
+    // Метка подписки стоит до распорки, иначе задержка съезжает на таких строках.
     if let Some(managed) = managed {
         line = line.push_auto(managed);
     }
@@ -302,7 +237,6 @@ fn columns<'a, Message: 'a>(
         .build()
 }
 
-/// Задержка до сервера словом или цифрой.
 fn latency(state: &State, id: &ProfileId) -> String {
     let strings = crate::i18n::s();
     if state.servers.probing {
@@ -318,7 +252,6 @@ fn latency(state: &State, id: &ProfileId) -> String {
             || DASH.to_string(),
             |(_, rtt)| match rtt {
                 Some(rtt) => format!("{rtt} {}", strings.millis),
-                // «Нет ответа» — это тоже ответ: он означает «этот не трогай».
                 None => strings.no_answer.to_owned(),
             },
         )
@@ -342,7 +275,6 @@ mod tests {
 
     #[test]
     fn an_empty_list_says_so() {
-        // Пустая рамка читается как «не загрузилось».
         let state = State::default();
         assert!(state.config.profiles.is_empty());
         let _ = view(&state);
@@ -350,8 +282,6 @@ mod tests {
 
     #[test]
     fn the_tab_fills_the_panel() {
-        // Панель — окно терминала: она занимает вкладку целиком, а
-        // прокручивается список внутри неё.
         let mut state = State::default();
         state.config.profiles.push(profile("home"));
 
@@ -362,8 +292,6 @@ mod tests {
 
     #[test]
     fn columns_keep_their_width() {
-        // Таблицу читают по столбцам; съехавший на знак столбец рушит весь
-        // смысл затеи.
         assert_eq!(pad("source", NAME_WIDTH).chars().count(), NAME_WIDTH);
         assert_eq!(
             cell("hysteria2", PROTOCOL_WIDTH).chars().count(),
@@ -374,9 +302,6 @@ mod tests {
 
     #[test]
     fn the_chosen_row_never_shifts_its_columns() {
-        // Знак-метка в первом столбце сдвигал бы выбранную строку относительно
-        // соседних: в шрифте кита его нет, и системный рисует его шириной в
-        // кегль, а не в ячейку.
         let dim = Color::WHITE;
         let head: Element<'_, Message> = columns(
             glyphs(pad("ПРОФИЛЬ", NAME_WIDTH), dim),
@@ -408,7 +333,6 @@ mod tests {
 
     #[test]
     fn search_finds_a_profile_by_any_of_its_columns() {
-        // Сервер вспоминают то по имени, то по адресу, то по протоколу.
         let profile = profile("home");
         assert!(found(&profile, ""));
         assert!(found(&profile, "HOME"));
@@ -419,8 +343,6 @@ mod tests {
 
     #[test]
     fn a_search_that_finds_nothing_says_so() {
-        // «Ничего не нашлось» и «профилей нет» требуют разных действий: в
-        // одном случае переписать запрос, в другом — добавить сервер.
         let mut state = State::default();
         state.config.profiles.push(profile("home"));
         state.servers.search = "нет такого".to_owned();
@@ -429,8 +351,6 @@ mod tests {
 
     #[test]
     fn the_protocol_column_holds_the_names_that_are_coming() {
-        // Столбец заведён под протоколы, которых ещё нет; обрезанное имя
-        // протокола перестаёт отвечать на свой единственный вопрос.
         for protocol in ["hysteria2", "shadowsocks", "wireguard", "vless"] {
             assert!(
                 protocol.chars().count() <= PROTOCOL_WIDTH,
@@ -441,14 +361,12 @@ mod tests {
 
     #[test]
     fn a_profile_without_an_address_shows_a_dash_not_its_protocol() {
-        // Иначе одно и то же значение стояло бы в двух соседних клетках.
         let profile = Profile::new("x", "x", RawOutbound::new("vless", json!({})));
         assert_eq!(crate::screens::servers::server_of(&profile), None);
     }
 
     #[test]
     fn a_probe_in_flight_shows_itself_in_every_row() {
-        // Пустая клетка во время проверки читается как «не ответил».
         let mut state = State::default();
         state.config.profiles.push(profile("home"));
         state.servers.probing = true;
@@ -461,7 +379,6 @@ mod tests {
 
     #[test]
     fn no_answer_is_a_value_too() {
-        // Оно означает «этот не трогай» и полезно ровно так же, как цифра.
         let mut state = State::default();
         state.servers.latencies.push(("home".to_owned(), None));
 
@@ -473,8 +390,6 @@ mod tests {
 
     #[test]
     fn an_unknown_latency_is_a_dash_the_font_has() {
-        // Длинного тире в моноширинном шрифте может не быть, и тогда оно
-        // занимает не свою ячейку — столбец съезжает.
         let state = State::default();
         assert_eq!(latency(&state, &ProfileId::new("home")), DASH.to_string());
     }

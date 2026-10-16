@@ -1,10 +1,6 @@
 //! Сериализуемая форма правила: условия и действие.
 //!
-//! Условие — дерево, а не плоский список полей. Плоский список («приложение И
-//! адрес И порт») выражает только конъюнкцию, и первое же настоящее желание
-//! пользователя — «Chrome и Firefox напрямую, но их обращения к банку — в
-//! тоннель» — в нём уже не записывается. Дерево из `all` / `any` / `not` над
-//! листьями-условиями записывает это буквально и не требует новых полей.
+//! Условие — дерево `all` / `any` / `not` над листьями.
 //!
 //! ```toml
 //! [[routing.rules]]
@@ -18,9 +14,7 @@
 //! ]
 //! ```
 //!
-//! Пример проверяется тестом (`the_documented_example_parses`): пример,
-//! который не разбирается, хуже отсутствующего — по нему пишут файл и получают
-//! отказ там, где ошибки не делали.
+//! Пример проверяется тестом `the_documented_example_parses`.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +27,6 @@ pub struct RuleConfig {
     #[serde(default)]
     pub name: String,
     /// Выключенное правило остаётся в файле, но не участвует в разборе.
-    /// Это и есть «попробовать без него», не удаляя настройку.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Чем меньше число, тем раньше проверяется правило.
@@ -47,17 +40,12 @@ pub struct RuleConfig {
 
 /// Действие правила.
 ///
-/// В файле пишется двумя способами, и оба обязаны работать:
+/// В файле пишется коротко или с профилем (перевод — [`ActionRepr`]):
 ///
 /// ```toml
 /// action = "tunnel"                        # в активный профиль
 /// action = { tunnel = { profile = "office" } }   # в конкретный
 /// ```
-///
-/// Первый — тот, который человек пишет в девяти случаях из десяти. Без него
-/// «в тоннель» нельзя было бы записать так же коротко, как «напрямую», хотя
-/// это ровно такое же однословное решение. Перевод между записью в файле и
-/// этим перечислением — [`ActionRepr`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "ActionRepr", into = "ActionRepr")]
 pub enum RuleAction {
@@ -74,9 +62,7 @@ pub enum RuleAction {
 
 /// Как действие выглядит в файле.
 ///
-/// `untagged`: сначала пробуется короткая запись словом, потом подробная.
-/// Порядок важен — `"tunnel"` обязан читаться как действие без профиля, а не
-/// как ошибка разбора подробной формы.
+/// `untagged`: порядок вариантов важен — сначала короткая запись.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ActionRepr {
@@ -124,8 +110,6 @@ impl From<ActionRepr> for RuleAction {
 impl From<RuleAction> for ActionRepr {
     fn from(action: RuleAction) -> Self {
         match action {
-            // Без профиля — короткой записью: файл, перезаписанный клиентом,
-            // должен читаться так же, как написанный руками.
             RuleAction::Tunnel { profile: None } => Self::Bare(BareAction::Tunnel),
             RuleAction::Tunnel { profile } => Self::Detailed(DetailedAction::Tunnel { profile }),
             RuleAction::Direct => Self::Bare(BareAction::Direct),
@@ -136,8 +120,7 @@ impl From<RuleAction> for ActionRepr {
 
 /// Условие: лист или узел.
 ///
-/// `untagged` ради читаемого файла: в TOML и JSON условие выглядит как
-/// объект с одним понятным ключом, без служебной обёртки `{ "type": ... }`.
+/// `untagged`: без служебной обёртки `{ "type": ... }`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Condition {
@@ -162,8 +145,7 @@ pub enum Condition {
 
 /// Элементарное условие.
 ///
-/// Каждый вариант — отдельный ключ в файле. Списки, а не одиночные значения:
-/// «пять браузеров напрямую» — одно правило, а не пять.
+/// Каждый вариант — отдельный ключ в файле; значения — списки.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Leaf {
@@ -216,8 +198,6 @@ mod tests {
 
     #[test]
     fn the_documented_short_form_works() {
-        // Запись из шапки файла и из README. Если она не разбирается,
-        // документация врёт ровно в самом частом месте.
         let rule = from_toml(
             r#"
             id = "r1"
@@ -263,10 +243,6 @@ mod tests {
 
     #[test]
     fn a_rewritten_file_reads_like_a_handwritten_one() {
-        // Клиент перезаписывает файл целиком по «Сохранить». Если он выберет
-        // подробную запись там, где хватает короткой, файл начнёт отличаться
-        // от того, что человек в него написал, — без единого изменения по
-        // смыслу.
         let rule = from_toml(
             "id = \"r1\"
 action = \"tunnel\"
@@ -301,7 +277,6 @@ dest_port = [443]
 
     #[test]
     fn the_documented_example_parses() {
-        // Ровно то, что написано в шапке этого файла.
         let rule = from_toml(
             r#"
             id     = "bank"
@@ -320,8 +295,6 @@ dest_port = [443]
 
     #[test]
     fn a_rule_is_enabled_unless_it_says_otherwise() {
-        // Правило, приехавшее выключенным из-за умолчания, выглядит как не
-        // сработавшее — и ищут причину не там.
         let rule = from_toml("id = \"r1\"\naction = \"direct\"\n[when]\ndest_port = [443]\n");
         assert!(rule.enabled);
     }

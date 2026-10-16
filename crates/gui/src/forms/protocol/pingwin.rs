@@ -7,14 +7,12 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
-/// Поля формы в том порядке, в каком они показываются.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
         .required(|s| s.need_server)
         .check(check::server_address),
-    // Имя поля в форме и его место в настройках нарочно разные: в профиле
-    // ключ лежит коротко (`key`), а в форме зовётся так же, как у WireGuard.
+    // В профиле ключ лежит как `key`, в форме зовётся как у WireGuard.
     FieldSpec::text("server_public_key", &["key"], |s| s.server_public_key)
         .example(|s| s.pingwin_key_example)
         .required(|s| s.need_server_public_key),
@@ -22,16 +20,12 @@ static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("sni", &["sni"], |s| s.sni).example(|s| s.sni_example),
 ];
 
-/// Как ссылка-приглашение ложится в поля.
+/// Как ссылка-приглашение ложится в поля:
+/// `pingwin://<пароль>@<хост>:<порт>?key=<ключ>&sni=<имя в сертификате>#<профиль>`.
 ///
-/// ```text
-/// pingwin://<пароль>@<хост>:<порт>?key=<ключ>&sni=<имя в сертификате>#<профиль>
-/// ```
-///
-/// Собирает её сервер (`pingwin-server link`), формат описан на его стороне —
-/// `penguin_pingwin::link`. Разбор здесь свой: окно не вправе зависеть от
-/// крейта протокола (`AGENTS.md` §1). Связывает две стороны образец — одна и
-/// та же строка в тесте здесь и там.
+/// Ссылку собирает `pingwin-server link` (`penguin_pingwin::link`); разбор свой,
+/// окно не зависит от протокола (AGENTS §1). Стороны сверяет один образец в
+/// тестах здесь и там.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let password = link.userinfo();
     if password.is_empty() {
@@ -68,10 +62,7 @@ mod tests {
     use super::*;
     use crate::forms::link;
 
-    /// Образец, по которому сверяются обе стороны.
-    ///
-    /// Ровно эта строка стоит в тесте `penguin_pingwin::link`, который её и
-    /// собирает. Правка формата ломает оба теста сразу — в этом и смысл.
+    /// Образец, общий с тестом `penguin_pingwin::link`: правка формата ломает оба.
     const SAMPLE: &str = "pingwin://s3cret@203.0.113.5:443\
 ?key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\
 &sni=vpn.example.com#%D0%94%D0%BE%D0%BC%D0%B0";

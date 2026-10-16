@@ -44,9 +44,6 @@ impl ProtocolFactory for TuicFactory {
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = Self::parse(params)?;
 
-        // Соединение поднимается здесь, а не при первом потоке: у TUIC оно
-        // постоянное, и рукопожатие QUIC с проверкой подлинности платятся
-        // один раз на весь профиль.
         let outbound = TuicOutbound::connect(ctx.id, config, ctx.dialer).await?;
         Ok(Arc::new(outbound))
     }
@@ -103,8 +100,6 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_congestion_controller() {
-        // Опечатка не должна молча превращаться в умолчание: разница между
-        // ними видна только под нагрузкой, и искать её будут в сети.
         let params = json!({
             "server": "example.com:443",
             "uuid": TEXT,

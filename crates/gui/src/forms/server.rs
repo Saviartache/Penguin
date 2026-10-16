@@ -1,17 +1,8 @@
 //! Черновик профиля: что набрали в форме сервера и во что это превращается.
 //!
-//! Полей у формы нет — они приходят описанием протокола
-//! ([`crate::forms::protocol`]). До этого `Draft` знал поля Hysteria 2
-//! поимённо, и добавление второго протокола означало правку самого черновика,
-//! редактора, сообщений и всех их тестов разом.
-//!
-//! # Профиль протокола, которого окно не знает
-//!
-//! Настройки может написать рукой человек или прислать новая версия. Такой
-//! профиль показывается в списке и правится по имени, а его параметры
-//! **сохраняются как есть** ([`Body::Foreign`]). Выбор здесь простой: либо
-//! окно бережёт то, чего не понимает, либо переименование сервера стирает
-//! половину его настроек — и узнаётся это при следующем подключении.
+//! Поля приходят описанием протокола ([`crate::forms::protocol`]). Параметры
+//! профиля неизвестного протокола сохраняются как есть ([`Body::Foreign`]):
+//! иначе переименование стёрло бы половину настроек.
 
 use penguin_config::schema::outbound::RawOutbound;
 use penguin_config::schema::profile::Profile;
@@ -49,10 +40,10 @@ impl Value {
 /// Чем заполнен черновик.
 #[derive(Debug, Clone, PartialEq)]
 enum Body {
-    /// Протокол известен: значения лежат по полям его описания.
+    /// Протокол известен.
     Known {
         spec: &'static ProtocolSpec,
-        /// Значения в том же порядке, что и [`ProtocolSpec::fields`].
+        /// Значения в порядке [`ProtocolSpec::fields`].
         values: Vec<Value>,
     },
     /// Протокол окну неизвестен: параметры держатся нетронутыми.
@@ -91,10 +82,7 @@ impl Draft {
         }
     }
 
-    /// Заполняет редактор из существующего профиля.
-    ///
-    /// Пароль тоже: иначе правка имени стирала бы пароль, и узналось бы это
-    /// только при следующем подключении.
+    /// Заполняет редактор из существующего профиля, пароль тоже.
     pub fn from_profile(profile: &Profile) -> Self {
         let params = &profile.outbound.params;
 
@@ -141,16 +129,13 @@ impl Draft {
         }
     }
 
-    /// Поля формы. У неизвестного протокола их нет — только имя.
+    /// Поля формы; у неизвестного протокола их нет.
     pub fn fields(&self) -> &'static [FieldSpec] {
         self.spec().map_or(&[], |spec| spec.fields)
     }
 
-    /// Ставит идентификатор правящегося профиля.
-    ///
-    /// Нужно ровно там, где черновик заменяют целиком — при вставке ссылки:
-    /// на идентификатор ссылаются правила, и новый сервер по ссылке не должен
-    /// их ломать.
+    /// Ставит идентификатор правящегося профиля: при вставке ссылки черновик
+    /// заменяют целиком, а на идентификатор ссылаются правила.
     pub fn with_id(mut self, id: Option<String>) -> Self {
         self.id = id;
         self
@@ -166,11 +151,8 @@ impl Draft {
         self.at(key).is_some_and(Value::flag)
     }
 
-    /// Записывает строку в поле по его месту в форме.
-    ///
-    /// Место, а не имя: сообщение о правке приходит от виджета, который знает
-    /// только свой номер в форме. Номер за пределами формы пропускается —
-    /// такое сообщение могло уехать до смены протокола.
+    /// Записывает строку в поле по месту в форме; чужой номер пропускается
+    /// (сообщение могло уехать до смены протокола).
     pub fn set_at(&mut self, index: usize, value: String) {
         if let Body::Known { values, .. } = &mut self.body
             && let Some(slot) = values.get_mut(index)
@@ -179,7 +161,7 @@ impl Draft {
         }
     }
 
-    /// Переключает флажок по его месту в форме.
+    /// Переключает флажок по месту в форме.
     pub fn toggle_at(&mut self, index: usize, value: bool) {
         if let Body::Known { values, .. } = &mut self.body
             && let Some(slot) = values.get_mut(index)
@@ -188,10 +170,7 @@ impl Draft {
         }
     }
 
-    /// Кладёт значение в поле по имени.
-    ///
-    /// Так заполняет форму разбор ссылки: там значения приходят строками, а
-    /// переключатель — строкой `1`.
+    /// Кладёт значение в поле по имени; переключатель — строкой `1`/`true`/`yes`/`on`.
     pub fn set_text(&mut self, key: &'static str, value: String) {
         let Some(index) = self.spec().and_then(|spec| spec.index_of(key)) else {
             return;
@@ -208,7 +187,6 @@ impl Draft {
         }
     }
 
-    /// Значение поля по имени.
     fn at(&self, key: &str) -> Option<&Value> {
         let index = self.spec()?.index_of(key)?;
         match &self.body {
@@ -217,22 +195,14 @@ impl Draft {
         }
     }
 
-    /// Собирает профиль.
-    ///
-    /// `Err` — текст, который можно показать как есть: разбирать код ошибки в
-    /// интерфейсе всё равно некому.
+    /// Собирает профиль; `Err` — текст для показа как есть.
     pub fn to_profile(&self) -> Result<Profile, String> {
         let outbound = match &self.body {
             Body::Known { spec, values } => RawOutbound::new(spec.id, params(spec, values)?),
-            // Чужие параметры не трогаются вовсе: окно не знает, что в них
-            // обязательно, а что нет, и «прибрать» их значило бы сломать
-            // профиль правкой имени.
             Body::Foreign { protocol, params } => RawOutbound::new(protocol, params.clone()),
         };
 
         let name = match self.name.trim() {
-            // Безымянный профиль неотличим в списке от соседнего; адрес
-            // сервера — единственное, что про него точно известно.
             "" => fallback_name(&outbound),
             name => name.to_owned(),
         };
@@ -242,35 +212,27 @@ impl Draft {
     }
 }
 
-/// Пустое значение поля.
 fn blank(field: &FieldSpec) -> Value {
     if field.is_flag() {
         Value::Flag(field.default_on)
     } else {
-        // У поля выбора пусто не бывает: пустой список в форме обещает выбор,
-        // которого в нём нет. У остальных `default_text` — пустая строка, и
-        // поведение не меняется.
+        // У поля выбора пусто не бывает.
         Value::Text(field.default_text().to_owned())
     }
 }
 
-/// Читает значение поля из параметров профиля.
 fn read(field: &FieldSpec, params: &serde_json::Value) -> Value {
     let found = std::iter::once(field.path)
         .chain(field.also.iter().copied())
         .find_map(|path| at_path(params, path));
 
     if field.is_flag() {
-        // Нет в настройках — значит, стоит умолчание протокола. Прочитать это
-        // как «выключено» значило бы показать снятый флажок там, где на самом
-        // деле всё работает.
+        // Нет в настройках — стоит умолчание протокола.
         Value::Flag(found.map_or(field.default_on, |value| {
             value.as_bool().unwrap_or(field.default_on)
         }))
     } else {
         let text = found.and_then(as_text).unwrap_or_default();
-        // Профиль, где поля нет, открывается на умолчании протокола, а не
-        // пустым: пустой выбор человек прочитает как поломку формы.
         if text.is_empty() {
             return Value::Text(field.default_text().to_owned());
         }
@@ -278,7 +240,6 @@ fn read(field: &FieldSpec, params: &serde_json::Value) -> Value {
     }
 }
 
-/// Значение по пути внутри параметров.
 fn at_path<'a>(params: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
     let mut current = params;
     for step in path {
@@ -287,10 +248,7 @@ fn at_path<'a>(params: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde
     Some(current)
 }
 
-/// Значение строкой — как его показывать в поле.
-///
-/// Числа тоже: полосу пишут и `"100 mbps"`, и просто `100`, а поле в форме
-/// одно, и увидеть в нём пустоту вместо своего числа человек не должен.
+/// Значение строкой для поля; числа тоже (полосу пишут и `100`).
 fn as_text(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) => Some(text.clone()),
@@ -301,19 +259,15 @@ fn as_text(value: &serde_json::Value) -> Option<String> {
 
 /// Складывает параметры протокола из набранного.
 ///
-/// Незаполненное поле **пропускается**, а не пишется пустым. Разница не
-/// косметическая: настройки лежат в TOML, а в нём пустого значения не
-/// существует вовсе. `serde_json::Value::Null` сериализуется как «единица», и
-/// `toml` отвечает `unsupported unit type` — профиль перестаёт сохраняться
-/// целиком, причём молча для того, кто просто не заполнил необязательное поле.
+/// Пустое поле пропускается, не пишется `Null`: в TOML пустого значения нет,
+/// профиль перестал бы сохраняться (`unsupported unit type`).
 fn params(spec: &ProtocolSpec, values: &[Value]) -> Result<serde_json::Value, String> {
     let mut out = serde_json::Map::new();
 
     for (field, value) in spec.fields.iter().zip(values) {
         match value {
+            // Только отличие от умолчания: файл короче.
             Value::Flag(on) => {
-                // Пишется, только когда отличается от умолчания: так файл
-                // остаётся коротким, а прочитанное совпадает с записанным.
                 if *on != field.default_on {
                     put(&mut out, field.path, serde_json::Value::Bool(*on));
                 }
@@ -349,10 +303,7 @@ fn params(spec: &ProtocolSpec, values: &[Value]) -> Result<serde_json::Value, St
     Ok(serde_json::Value::Object(out))
 }
 
-/// Кладёт значение по пути, заводя по дороге вложенные объекты.
-///
-/// Группа, у которой не осталось ни одного поля, не заводится вовсе: пустой
-/// `tls` в файле выглядит как настройка, которую кто-то трогал.
+/// Кладёт значение по пути, заводя вложенные объекты; пустые группы не появляются.
 fn put(
     out: &mut serde_json::Map<String, serde_json::Value>,
     path: &[&str],
@@ -370,17 +321,14 @@ fn put(
 
         match entry.as_object_mut() {
             Some(nested) => current = nested,
-            // Место занято не объектом. Такого не бывает: пути описаны
-            // константами, и пересечься они могут только опечаткой в
-            // описании. Уронить из-за неё окно нельзя — поле просто не
-            // запишется, и это увидит тест протокола.
+            // Пути — константы, пересечься могут лишь опечаткой; увидит тест протокола.
             None => return,
         }
     }
     current.insert((*last).to_owned(), value);
 }
 
-/// Имя, которым назвать профиль, если его не назвали.
+/// Имя безымянного профиля: адрес сервера.
 fn fallback_name(outbound: &RawOutbound) -> String {
     outbound
         .field("server")
@@ -388,10 +336,7 @@ fn fallback_name(outbound: &RawOutbound) -> String {
         .map_or_else(|| outbound.protocol.clone(), str::to_owned)
 }
 
-/// Делает из имени идентификатор.
-///
-/// Идентификатор постоянный, а имя пользователь меняет: на него ссылаются
-/// правила, и переименование сервера не должно их ломать.
+/// Делает из имени постоянный идентификатор: имя меняют, правила ссылаются на id.
 pub fn slug(name: &str) -> String {
     let slug: String = name
         .trim()
@@ -414,7 +359,6 @@ mod tests {
 
     use super::*;
 
-    /// Есть ли где-нибудь в значении пустота.
     fn has_null(value: &serde_json::Value) -> bool {
         match value {
             serde_json::Value::Null => true,
@@ -450,12 +394,8 @@ mod tests {
         );
     }
 
-    /// Годное значение для обязательного поля по его имени.
-    ///
-    /// Таблица, а не выдумка на месте: у поля бывает проверка, и случайная
-    /// строка её не пройдёт. Пустая строка означает «образца нет» — и тест
-    /// ниже на этом падает, чтобы новый протокол с новым обязательным полем
-    /// не проехал молча.
+    /// Годное значение обязательного поля; пустая строка — образца нет, и тест
+    /// ниже падает, чтобы новое обязательное поле не проехало молча.
     fn sample(key: &str) -> &'static str {
         match key {
             "server" => "example.com:443",
@@ -464,9 +404,7 @@ mod tests {
             "psk" => "общий ключ",
             "username" => "penguin",
             "host_fingerprint" => "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
-            // Ключи из примеров самого WireGuard: настоящие по длине и по
-            // записи, чужие по происхождению — выдуманные не прошли бы проверку
-            // длины в `validate()`.
+            // Ключи из примеров WireGuard: проходят проверку длины в `validate()`.
             "private_key" => "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=",
             "server_public_key" => "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=",
             "address_ipv4" => "10.0.0.2/32",
@@ -476,7 +414,6 @@ mod tests {
 
     #[test]
     fn every_protocol_makes_a_profile_of_its_own_name() {
-        // Иначе выбор протокола ничего не решает: сохранится всё равно первый.
         for spec in protocol::ALL {
             let mut draft = Draft::new(spec);
 
@@ -484,7 +421,7 @@ mod tests {
                 if field.required.is_none() || field.is_flag() {
                     continue;
                 }
-                // Поле выбора заполнено умолчанием из описания.
+                // Поле выбора заполнено умолчанием.
                 if field.is_choice() {
                     continue;
                 }
@@ -505,10 +442,6 @@ mod tests {
 
     #[test]
     fn an_unfilled_field_is_left_out_not_written_empty() {
-        // Настройки лежат в TOML, а пустого значения в нём не существует.
-        // Раньше «не заполнил SNI, но снял проверку сертификата» давало
-        // `sni: null`, и профиль переставал сохраняться — с сообщением
-        // `unsupported unit type`, из которого понять ничего нельзя.
         let mut draft = draft();
         draft.set_text("insecure", "1".to_owned());
 
@@ -539,7 +472,6 @@ mod tests {
 
     #[test]
     fn empty_groups_are_not_written() {
-        // Пустой `tls` в файле выглядит как настройка, которую кто-то трогал.
         let profile = draft().to_profile().expect("профиль собирается");
         assert!(profile.outbound.field("tls").is_none());
         assert!(profile.outbound.field("obfs").is_none());
@@ -548,8 +480,6 @@ mod tests {
 
     #[test]
     fn a_companion_value_comes_with_its_field() {
-        // Пароль обфускации без типа не значит ничего, а спрашивать тип не о
-        // чем: Salamander — единственный, какой есть.
         let mut draft = draft();
         draft.set_text("obfs", "соль".to_owned());
 
@@ -580,7 +510,6 @@ mod tests {
         let profile = draft.to_profile().expect("профиль собирается");
         let back = Draft::from_profile(&profile);
 
-        // Правка имени не должна стирать всё остальное.
         assert_eq!(back.text("sni"), "cdn.example.com");
         assert_eq!(back.text("obfs"), "соль");
         assert_eq!(back.text("up"), "50 mbps");
@@ -591,9 +520,6 @@ mod tests {
 
     #[test]
     fn a_flag_that_is_on_by_default_survives_the_round_trip() {
-        // UDP у SOCKS5 включён и в форме, и в самом протоколе. Записать его
-        // как есть и прочитать обратно надо одинаково, иначе флажок в окне
-        // покажет не то, что происходит.
         let profile = socks().to_profile().expect("профиль собирается");
         assert!(
             profile.outbound.field("udp").is_none(),
@@ -614,8 +540,6 @@ mod tests {
 
     #[test]
     fn a_field_reads_from_its_other_name_too() {
-        // Конфигурацию приносят от провайдера как есть: у Hysteria 2 пароль
-        // зовётся то `password`, то `auth`.
         let profile = Profile::new(
             "home",
             "Дом",
@@ -629,8 +553,6 @@ mod tests {
 
     #[test]
     fn a_broken_address_is_reported_before_saving() {
-        // Профиль, который сохраняется, но не подключается, — худший исход:
-        // виновата будет «служба».
         let mut draft = draft();
         draft.set_text("server", "просто-текст".to_owned());
         assert!(draft.to_profile().is_err());
@@ -655,7 +577,6 @@ mod tests {
 
     #[test]
     fn a_proxy_needs_neither_name_nor_password() {
-        // Прокси без пароля — обычное дело: `ssh -D` поднимает именно такой.
         let profile = socks().to_profile().expect("профиль собирается");
         assert!(profile.outbound.field("username").is_none());
         assert!(profile.outbound.field("password").is_none());
@@ -663,8 +584,6 @@ mod tests {
 
     #[test]
     fn editing_keeps_the_identifier() {
-        // На идентификатор ссылаются правила; переименование сервера не должно
-        // их ломать.
         let profile = draft().to_profile().expect("профиль собирается");
         let mut back = Draft::from_profile(&profile);
         back.name = "Совсем другое имя".to_owned();
@@ -692,8 +611,6 @@ mod tests {
 
     #[test]
     fn every_field_round_trips_through_the_form() {
-        // Поле, которое читается не оттуда, куда пишется, — это поле, которое
-        // молча теряет введённое.
         for spec in protocol::ALL {
             let mut draft = Draft::new(spec);
             for (index, field) in spec.fields.iter().enumerate() {
@@ -716,8 +633,6 @@ mod tests {
 
     #[test]
     fn a_message_for_a_field_that_is_gone_is_ignored() {
-        // Сообщение о правке могло уехать до смены протокола: паниковать из-за
-        // этого нельзя, а молча писать не в то поле — тем более.
         let mut draft = draft();
         draft.set_at(99, "мимо".to_owned());
         draft.toggle_at(99, true);
@@ -726,8 +641,6 @@ mod tests {
 
     #[test]
     fn an_unknown_protocol_keeps_its_settings() {
-        // Настройки мог написать человек или прислать новая версия. Правка
-        // имени не должна стирать то, чего окно не понимает.
         let params = json!({ "server": "example.com:443", "reality": { "key": "x" } });
         let profile = Profile::new("x", "Чужой", RawOutbound::new("телепатия", params.clone()));
 
@@ -744,8 +657,6 @@ mod tests {
 
     #[test]
     fn a_number_in_the_settings_shows_up_in_the_field() {
-        // Полосу пишут и `"100 mbps"`, и просто числом; пустое поле на месте
-        // своего числа человек прочитает как потерю настройки.
         let profile = Profile::new(
             "home",
             "Дом",

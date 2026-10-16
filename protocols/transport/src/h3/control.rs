@@ -1,8 +1,6 @@
 //! Фоновая задача соединения: входящие однонаправленные потоки и датаграммы.
 //!
-//! Сервер открывает поток управления и, возможно, потоки QPACK; их надо
-//! читать всё время жизни соединения, иначе не узнать ни настроек, ни
-//! `GOAWAY`. Здесь же разбираются датаграммы, если их просили.
+//! Читает потоки управления и QPACK сервера, а также датаграммы, если они включены.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,8 +33,7 @@ struct Seen {
 
 /// Крутит соединение, пока оно живо.
 ///
-/// `control` — свой поток управления. Он держится здесь, а не отпускается:
-/// закрыть его — ошибка соединения (RFC 9114, §6.2.1).
+/// `control` держится открытым: его закрытие — ошибка соединения (RFC 9114, §6.2.1).
 pub(super) async fn drive(
     quic: quinn::Connection,
     control: quinn::SendStream,
@@ -75,8 +72,7 @@ pub(super) async fn drive(
     tracing::debug!(%err, "соединение HTTP/3 завершено");
 }
 
-/// Читает одну датаграмму и отдаёт её потоку. Без маршрутизатора не
-/// читает вовсе: датаграммы соединения тогда принадлежат не HTTP/3.
+/// Читает одну датаграмму; без маршрутизатора не читает (они не для HTTP/3).
 async fn read_datagram(quic: &quinn::Connection, router: Option<&Router>) -> H3Result<()> {
     let Some(router) = router else {
         return std::future::pending().await;
@@ -116,8 +112,7 @@ async fn handle_uni(
             "проталкивание без MAX_PUSH_ID",
         )),
         _ => {
-            // Незнакомый тип не ошибка соединения (§6.2); поток мог
-            // закрыться сам — тогда и останавливать нечего.
+            // Незнакомый тип не ошибка (§6.2)
             let _ = recv.stop(var_int(H3_STREAM_CREATION_ERROR));
             Ok(())
         }
@@ -183,8 +178,7 @@ fn is_unexpected_on_control(kind: u64) -> bool {
     ) || frame::is_reserved_http2(kind)
 }
 
-/// Поток QPACK. При нулевой ёмкости таблицы в нём нечего применять; он
-/// читается, чтобы не стоять на окне потока, и не должен закрываться.
+/// Поток QPACK: читается вхолостую, закрываться не должен.
 async fn drain_critical(mut recv: quinn::RecvStream) -> H3Result<()> {
     loop {
         match recv.read_chunk(usize::MAX, true).await {

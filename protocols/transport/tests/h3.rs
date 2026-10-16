@@ -1,10 +1,7 @@
 //! Свой HTTP/3 против чужого: клиент `penguin_transport::h3`, сервер — крейт
 //! `h3` 0.0.8 поверх настоящих сокетов на петле.
 //!
-//! Разбор кадров, QPACK и настроек проверен тестами модулей на векторах RFC.
-//! Здесь — то, чего они увидеть не могут: что независимая реализация
-//! понимает наш поток управления, `SETTINGS` и блоки полей, а мы — её.
-//! Это не живой сервер прокси: только то, что HTTP/3 сходится.
+//! Проверяет взаимопонимание двух реализаций; живой сервер прокси не задействован.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -21,6 +18,8 @@ use penguin_transport::quic;
 use penguin_transport::tls::{ALPN_H3, TlsConfig};
 use penguin_transport::xhttp::{XhttpClient, XhttpTarget};
 use quinn::crypto::rustls::QuicServerConfig;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
@@ -49,12 +48,11 @@ impl Dialer for Direct {
 /// Поднимает сервер `h3` на свободном порту: эхо тела и ответ, по которому
 /// видно, что сервер понял в запросе.
 fn start_server() -> SocketAddr {
-    let certs: Vec<_> = rustls_pemfile::certs(&mut &include_bytes!("fixtures/localhost.crt")[..])
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(include_bytes!("fixtures/localhost.crt"))
         .collect::<Result<_, _>>()
         .expect("сертификат");
-    let key = rustls_pemfile::private_key(&mut &include_bytes!("fixtures/localhost.key")[..])
-        .expect("ключ")
-        .expect("ключ есть");
+    let key =
+        PrivateKeyDer::from_pem_slice(include_bytes!("fixtures/localhost.key")).expect("ключ");
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut tls = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -243,9 +241,7 @@ async fn datagrams_go_only_when_both_sides_agree() {
 
 #[tokio::test]
 async fn xhttp_stream_one_carries_the_body_both_ways() {
-    // Сервер — эхо, а не Xray: проверяется, что `stream-one` — обычный
-    // поток HTTP/3, тело которого идёт туда и обратно, и что ответа он не
-    // ждёт до первой записи.
+    // `stream-one` — обычный поток HTTP/3, ответа до первой записи не ждёт
     let server = start_server();
     let target = XhttpTarget {
         host: Address::Ip(server.ip()),

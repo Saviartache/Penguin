@@ -12,36 +12,33 @@ use crate::route::Route;
 
 /// Ставит маршрут.
 pub fn add(route: &Route) -> PlatformResult<()> {
-    #[allow(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "вид сообщения помещается в байт"
-    )]
-    let mut message = Message::new(libc::RTM_ADD as u8, flags(route));
-    describe(&mut message, route);
-    pfroute::talk(message, false).map(|_| ())
+    send(libc::RTM_ADD, route)
 }
 
 /// Снимает маршрут.
 pub fn remove(route: &Route) -> PlatformResult<()> {
-    #[allow(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "вид сообщения помещается в байт"
-    )]
-    let mut message = Message::new(libc::RTM_DELETE as u8, flags(route));
+    send(libc::RTM_DELETE, route)
+}
+
+fn send(kind: libc::c_int, route: &Route) -> PlatformResult<()> {
+    let mut message = Message::new(kind_byte(kind), flags(route));
     describe(&mut message, route);
     pfroute::talk(message, false).map(|_| ())
 }
 
+/// Вид сообщения помещается в байт.
+#[allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation,
+    reason = "вид сообщения помещается в байт"
+)]
+fn kind_byte(kind: libc::c_int) -> u8 {
+    kind as u8
+}
+
 /// Спрашивает у ядра, как дойти до адреса.
 pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
-    #[allow(
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "вид сообщения помещается в байт"
-    )]
-    let mut message = Message::new(libc::RTM_GET as u8, 0);
+    let mut message = Message::new(kind_byte(libc::RTM_GET), 0);
     message.address(libc::RTA_DST, &pfroute::sockaddr(destination));
 
     let reply = pfroute::talk(message, true)?;
@@ -51,8 +48,7 @@ pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
         .find(|(slot, _)| *slot == libc::RTA_GATEWAY)
         .and_then(|(_, bytes)| pfroute::to_address(bytes));
 
-    // Адрес интерфейса ядро в ответе не называет: его спрашивают у сокета —
-    // он выбирает тот же самый, потому что смотрит в ту же таблицу.
+    // Адрес интерфейса в ответе не назван; сокет выбирает тот же, глядя в ту же таблицу.
     let address = crate::interface::source_address_towards(destination).ok_or_else(|| {
         PlatformError::Interface("система не назвала адрес интерфейса".to_owned())
     })?;
@@ -60,23 +56,19 @@ pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
     Ok(DefaultRoute {
         interface_index: pfroute::interface_index(&reply),
         address,
-        // Маршрут «на интерфейс» шлюза не имеет: следующего узла за ним нет.
         gateway: gateway.unwrap_or(address),
-        // Метрик у маршрутов в macOS нет — предпочтение решает длина
-        // префикса, и поэтому же тоннель ставится двумя половинами.
+        // Метрик в macOS нет: предпочтение решает длина префикса.
         metric: 0,
     })
 }
 
-/// Флаги маршрута.
+/// Флаги маршрута; `RTF_HOST` нужен, когда маски нет.
 fn flags(route: &Route) -> libc::c_int {
     let mut flags = libc::RTF_UP | libc::RTF_STATIC;
     if route.gateway.is_some() {
         flags |= libc::RTF_GATEWAY;
     }
     if is_host(route) {
-        // Маршрут до одного адреса. Без этого флага ядро ждёт маску, а
-        // маршрут до узла её не имеет.
         flags |= libc::RTF_HOST;
     }
     flags
@@ -91,15 +83,11 @@ fn is_host(route: &Route) -> bool {
     route.destination.prefix_len() == full
 }
 
-/// Дописывает назначение, шлюз и маску.
-///
-/// Порядок обязателен: ядро читает адреса подряд и разбирает их по порядку
-/// битов в `rtm_addrs`, а не по содержимому.
+/// Дописывает назначение, шлюз и маску; порядок задан битами `rtm_addrs`.
 fn describe(message: &mut Message, route: &Route) {
     message.address(libc::RTA_DST, &pfroute::sockaddr(route.destination.addr()));
 
-    // За TUN никого нет, и шлюзом маршрута становится сам интерфейс: это
-    // единственный способ сказать «отдавай сюда» без адреса следующего узла.
+    // Без шлюза («отдавай сюда») шлюзом становится сам интерфейс.
     match route.gateway {
         Some(gateway) => message.address(libc::RTA_GATEWAY, &pfroute::sockaddr(gateway)),
         None => message.address(
@@ -124,7 +112,6 @@ mod tests {
 
     #[test]
     fn a_host_route_carries_no_mask() {
-        // Маршрут до одного адреса маски не имеет, и ядро её не ждёт.
         let route = Route::via_gateway(
             "203.0.113.5/32".parse::<IpNet>().expect("подсеть"),
             "192.168.0.1".parse().expect("шлюз"),
@@ -140,18 +127,14 @@ mod tests {
         let route = Route::via_interface("0.0.0.0/1".parse::<IpNet>().expect("подсеть"), 7);
         assert!(!is_host(&route));
         assert_eq!(flags(&route) & libc::RTF_HOST, 0);
-        // За TUN никого нет: шлюза у такого маршрута тоже нет.
         assert_eq!(flags(&route) & libc::RTF_GATEWAY, 0);
     }
 
     #[test]
     fn a_route_to_the_interface_names_it_as_the_gateway() {
-        // Это единственный способ сказать «отдавай сюда», не имея адреса
-        // следующего узла.
         let route = Route::via_interface("0.0.0.0/1".parse::<IpNet>().expect("подсеть"), 7);
 
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let mut message = Message::new(libc::RTM_ADD as u8, flags(&route));
+        let mut message = Message::new(kind_byte(libc::RTM_ADD), flags(&route));
         describe(&mut message, &route);
         let bytes = message.finish(1);
 

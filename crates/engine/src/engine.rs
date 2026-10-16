@@ -1,23 +1,7 @@
 //! `Engine` — запуск, остановка, смена профиля на лету.
 //!
-//! Здесь собирается всё: настройки, маршрутизатор, направления, входящие
-//! точки, платформа. Ровно один тип, который держит тоннель, и ровно один
-//! способ его попросить что-то сделать.
-//!
-//! ```text
-//!   connect(профиль)
-//!     ├─ поднять направление (протокол)
-//!     ├─ открыть адаптер, поставить маршруты      ─┐
-//!     ├─ запустить стек и перехват DNS             ├─ только режим тоннеля
-//!     └─ включить kill switch                     ─┘
-//!
-//!   disconnect()
-//!     └─ всё то же самое в обратном порядке, включая аварийный путь
-//! ```
-//!
-//! Порядок отката важнее порядка запуска. Маршрут, оставшийся от упавшего
-//! клиента, ведёт в несуществующий адаптер, и сеть у пользователя не работает
-//! вовсе — причём он не свяжет это с VPN, который уже закрыл.
+//! Единственный владелец тоннеля: настройки, маршрутизатор, направления,
+//! платформа. `disconnect` откатывает всё в обратном порядке.
 
 use std::sync::Arc;
 
@@ -43,10 +27,7 @@ use crate::pipeline::Pipeline;
 use crate::state::StateMachine;
 use crate::tunnel::TunnelSession;
 
-/// Шаг между замерами скорости.
-///
-/// Секунда — шаг графика в окне. Реже — рваная линия, чаще — обмен по каналу
-/// ради цифр, которые глазом всё равно не различить.
+/// Шаг между замерами скорости (шаг графика в окне).
 const METRICS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Движок клиента.
@@ -54,20 +35,14 @@ pub struct Engine {
     config: ArcSwap<RootConfig>,
     router: Arc<Router>,
     outbounds: Arc<OutboundPool>,
-    /// Набиратель прямого выхода — тот самый, что лежит в пуле направлений.
-    ///
-    /// Держится отдельно ради одного: пока тоннель поднят, его сокеты надо
-    /// защищать физическим интерфейсом, а пул отдаёт направления, а не
-    /// набирателя (см. [`SystemDialer::protect_with`]).
+    /// Набиратель из пула: его сокеты защищаются физическим интерфейсом
+    /// ([`SystemDialer::protect_with`]).
     dialer: Arc<SystemDialer>,
     processes: Arc<dyn FlowOwnerResolver>,
     metrics: Arc<Metrics>,
     state: Arc<StateMachine>,
     events: EventBus,
-    /// Поднятый тоннель, если он есть.
-    ///
-    /// Под `Mutex`, потому что подключение и отключение не должны идти
-    /// одновременно: два нажатия «подключить» подряд — обычное дело.
+    /// Поднятый тоннель; `Mutex` разводит подключение и отключение.
     session: Mutex<Option<TunnelSession>>,
 }
 
@@ -85,14 +60,8 @@ impl Engine {
     pub fn new(config: RootConfig) -> EngineResult<Arc<Self>> {
         let events = EventBus::new();
 
-        // Загрузочный, а не системный. Имя своего сервера клиент обязан
-        // спрашивать мимо системы: системный резолвер он сам же и подменяет —
-        // и на вопрос об имени сервера отвечает подставным адресом из подсети
-        // тоннеля, которого ещё нет. Клиент звонит сам себе, и это выглядит как
-        // «рукопожатие не завершилось» (см. [`penguin_dns::bootstrap`]).
-        //
-        // Системный остаётся запасным: без загрузочных апстримов в настройках
-        // разрешать имена лучше плохо, чем никак.
+        // Загрузочный, а не системный: тот подменён и отвечает fake-IP
+        // ([`penguin_dns::bootstrap`]).
         let resolver = penguin_dns::bootstrap::resolver_for(&config.dns);
         let dialer = Arc::new(SystemDialer::new(resolver));
         let outbounds = Arc::new(OutboundPool::new(Arc::clone(&dialer) as Arc<dyn Dialer>));
@@ -107,9 +76,6 @@ impl Engine {
                 .map_err(EngineError::Router)?,
         );
 
-        // Владелец соединения ищется, только если правила по процессам вообще
-        // есть: чтение таблицы соединений стоит системного вызова на каждое
-        // новое соединение.
         let processes: Arc<dyn FlowOwnerResolver> = if config.routing.resolve_process {
             Arc::from(penguin_process::resolver::system_resolver())
         } else {
@@ -170,16 +136,11 @@ impl Engine {
                 Arc::clone(&self.metrics),
             )
             .with_process_lookup(config.routing.resolve_process)
-            // Решения по соединениям уезжают в окно: без них журнал знает
-            // только про подъём и падение тоннеля.
             .with_events(self.events.clone()),
         )
     }
 
-    /// Поднимает тоннель.
-    ///
-    /// Повторный вызов при уже поднятом тоннеле — не ошибка: пользователь мог
-    /// нажать «подключить» дважды.
+    /// Поднимает тоннель; при уже поднятом — не ошибка.
     pub async fn connect(&self, profile: Option<ProfileId>) -> EngineResult<()> {
         let mut session = self.session.lock().await;
         if session.is_some() {
@@ -197,12 +158,7 @@ impl Engine {
             format!("подключение к профилю «{}»", profile.name),
         ));
 
-        // Путь наружу запоминается до набора и остаётся у набирателя на всё
-        // время тоннеля. Первое рукопожатие уходит и без этого — тоннеля ещё
-        // нет, — но соединение с сервером живёт дольше рукопожатия, а
-        // переподключение случается уже при поднятом тоннеле. Без защиты такой
-        // сокет уезжает в собственный тоннель, и клиент разговаривает сам с
-        // собой: «рукопожатие не завершилось».
+        // Без защиты переподключение при поднятом тоннеле уйдёт в сам тоннель.
         match penguin_platform::default_route() {
             Ok(outside) => self.dialer.protect_with(outside.interface_index),
             Err(err) => {
@@ -210,8 +166,6 @@ impl Engine {
             }
         }
 
-        // Направление поднимается первым: без него остальное бессмысленно, а
-        // откатывать ещё нечего.
         let outbound = match self.outbounds.get_or_connect(profile).await {
             Ok(outbound) => outbound,
             Err(err) => {
@@ -237,8 +191,6 @@ impl Engine {
                 Ok(())
             }
             Err(err) => {
-                // Направление уже поднято — закрываем, иначе останется висеть
-                // соединение к серверу без всякого тоннеля.
                 self.outbounds.close(&outbound.id()).await;
                 self.dialer.protect_with(0);
                 self.state.failed(err.to_string());
@@ -247,15 +199,7 @@ impl Engine {
         }
     }
 
-    /// Запускает рассылку замеров скорости.
-    ///
-    /// Интерфейс не опрашивает демона, а слушает его — и перерисовывается
-    /// только на событиях. Без этих замеров график скорости стоит на нуле, а
-    /// счётчик времени работы показывает `0:00` до самого отключения: тоннель
-    /// работает, а по окну этого не видно.
-    ///
-    /// Задача живёт ровно столько же, сколько сеанс: отмена приходит тем же
-    /// признаком, что и всему остальному в тоннеле.
+    /// Рассылает замеры скорости событиями до отмены сеанса.
     fn spawn_metrics_ticker(&self, cancel: CancellationToken) {
         let metrics = Arc::clone(&self.metrics);
         let events = self.events.clone();
@@ -263,11 +207,8 @@ impl Engine {
         tokio::spawn(async move {
             let mut history = History::new();
             let mut ticker = tokio::time::interval(METRICS_INTERVAL);
-            // Пропущенные тики не навёрстываются пачкой: скорость за уже
-            // прошедшее время никому не интересна.
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            // Первый тик срабатывает немедленно; его надо съесть, иначе первая
-            // скорость посчиталась бы делением на нулевое время.
+            // Первый тик мгновенный: съедаем, чтобы не делить на нулевое время.
             ticker.tick().await;
 
             loop {
@@ -288,15 +229,10 @@ impl Engine {
         });
     }
 
-    /// Опускает тоннель.
-    ///
-    /// Возвращает первую ошибку, но продолжает откат до конца: недоснятый
-    /// маршрут не повод оставить в системе ещё и правила брандмауэра.
+    /// Опускает тоннель; возвращает первую ошибку, откат идёт до конца.
     pub async fn disconnect(&self) -> EngineResult<()> {
         let mut session = self.session.lock().await;
-        // Защита снимается в любом случае, даже когда тоннеля не было: она
-        // держит сокеты на интерфейсе, которого после смены сети может уже не
-        // быть, и оставленная лишний раз она вреднее, чем не поставленная.
+        // Снимается всегда: интерфейса после смены сети может не быть.
         self.dialer.protect_with(0);
 
         let Some(started) = session.take() else {
@@ -314,9 +250,7 @@ impl Engine {
         result
     }
 
-    /// Заменяет настройки на лету.
-    ///
-    /// Правила и режим применяются сразу; тоннель при этом не перезапускается.
+    /// Заменяет настройки на лету, не перезапуская тоннель.
     pub fn reload(&self, config: RootConfig) -> EngineResult<()> {
         self.router
             .replace_rules(&config.routing, &CompileContext::default())
@@ -402,8 +336,6 @@ mod tests {
 
     #[tokio::test]
     async fn disconnect_without_connect_is_not_an_error() {
-        // Пользователь нажимает «отключить» на уже отключённом клиенте —
-        // обычное дело.
         let engine = Engine::new(config_with_profiles(&["home"])).expect("собирается");
         engine.disconnect().await.expect("отключение проходит");
         assert_eq!(engine.state(), TunnelState::Disconnected);
@@ -426,8 +358,6 @@ mod tests {
 
     #[tokio::test]
     async fn reload_with_broken_rules_keeps_the_old_ones() {
-        // Половина применённых правил хуже, чем неприменённые: трафик пошёл
-        // бы не туда, а пользователь считал бы, что настройки в силе.
         let engine = Engine::new(config_with_profiles(&["home"])).expect("собирается");
 
         let mut good = config_with_profiles(&["home"]);

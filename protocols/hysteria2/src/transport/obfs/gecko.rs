@@ -1,11 +1,6 @@
-//! Gecko: дробление длинных пакетов рукопожатия.
-//!
-//! Salamander убирает узнаваемый вид байт, но не трогает размеры и порядок
-//! пакетов. Рукопожатие QUIC при этом остаётся узнаваемым по форме: первый
-//! пакет клиента дополнен до 1200 байт, ответ сервера идёт характерной
-//! пачкой. Gecko ломает эту форму, разрезая каждый пакет с длинным
-//! заголовком на 2–8 частей случайного размера, каждая со своим случайным
-//! дополнением.
+//! Gecko: дробление пакетов рукопожатия (длинный заголовок QUIC) на 2–8 частей
+//! случайного размера со случайным дополнением; затем Salamander, каждая часть
+//! отдельной датаграммой.
 //!
 //! ```text
 //! ┌──────┬───────┬───────────────────────┬────────┬───────────┬───────┐
@@ -14,16 +9,8 @@
 //! └──────┴───────┴───────────────────────┴────────┴───────────┴───────┘
 //! ```
 //!
-//! Порядок слоёв: сначала кадр Gecko, потом Salamander поверх него, и каждая
-//! часть уходит отдельной датаграммой.
-//!
-//! Признак кадра — первый байт ровно `0x80`. Спутать его с настоящим QUIC
-//! нельзя: у пакета с длинным заголовком обязательно взведён и бит `0x40`
-//! (RFC 9000, §17.2), так что первый байт настоящего пакета не меньше `0xC0`.
-//!
-//! Пакеты с коротким заголовком — то есть весь трафик после рукопожатия —
-//! идут мимо Gecko: дробить каждый пакет в установившемся соединении значило
-//! бы утроить их число и заметно потерять в скорости.
+//! Первый байт `0x80` не встречается у QUIC с длинным заголовком (там `>= 0xC0`,
+//! RFC 9000 §17.2). Короткие заголовки идут мимо Gecko.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -31,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{BufMut, BytesMut};
 use parking_lot::Mutex;
-use rand::Rng;
+use penguin_proto::random;
 
 /// Признак кадра Gecko в первом байте.
 const MARKER: u8 = 0x80;
@@ -42,28 +29,16 @@ const HEADER_LEN: usize = 1 + 1 + 1 + 2;
 /// Наименьшее число частей.
 const MIN_CHUNKS: u8 = 2;
 
-/// Наибольшее число частей. Больше и не выразить: под счётчик отведены
-/// четыре бита, но верхняя граница задана самой спецификацией.
+/// Наибольшее число частей.
 const MAX_CHUNKS: u8 = 8;
 
-/// Пределы случайного дополнения.
-///
-/// Верхняя граница выбрана так, чтобы кадр вместе с дополнением и солью
-/// Salamander заведомо оставался меньше исходного пакета: разрезание не
-/// должно приводить к тому, что части перестают проходить по пути.
+/// Наибольшее дополнение: кадр с солью остаётся меньше исходного пакета.
 const MAX_PADDING: usize = 256;
 
 /// Сколько держать недособранный пакет.
-///
-/// Части одного пакета уходят подряд и приходят с разбросом в единицы
-/// миллисекунд. Секунда — с запасом; всё, что не собралось за это время,
-/// уже не нужно, потому что QUIC успел его перепослать.
 const REASSEMBLY_TTL: Duration = Duration::from_secs(1);
 
-/// Сколько недособранных пакетов помнить одновременно.
-///
-/// Потолок обязателен: собеседник, приславший по одной части от тысячи
-/// пакетов, иначе занял бы память под тысячу буферов, ничего не завершив.
+/// Потолок недособранных пакетов: защита от занятия памяти.
 const MAX_PENDING: usize = 256;
 
 /// Дробление и сборка кадров Gecko.
@@ -100,34 +75,27 @@ impl Gecko {
         }
     }
 
-    /// Нужно ли дробить этот пакет.
-    ///
-    /// Только длинный заголовок, то есть только рукопожатие.
+    /// Нужно ли дробить пакет: только длинный заголовок (рукопожатие).
     pub fn applies_to(packet: &[u8]) -> bool {
         packet.first().is_some_and(|first| first & 0x80 != 0)
     }
 
-    /// Режет пакет на кадры.
-    ///
-    /// Каждый кадр отправляется отдельной датаграммой — после Salamander.
-    /// Возвращает `None`, если пакет слишком короток, чтобы делить его хотя
-    /// бы надвое.
+    /// Режет пакет на кадры; `None`, если пакет короче двух байт.
     pub fn fragment(&self, packet: &[u8]) -> Option<Vec<BytesMut>> {
         if packet.len() < MIN_CHUNKS as usize {
             return None;
         }
 
-        let mut rng = rand::thread_rng();
         let max_chunks = MAX_CHUNKS.min(packet.len() as u8);
-        let count = rng.gen_range(MIN_CHUNKS..=max_chunks);
-        let msg_id: u8 = rng.r#gen();
+        let count = random::range(u64::from(MIN_CHUNKS)..u64::from(max_chunks) + 1) as u8;
+        let msg_id = random::u64() as u8;
 
-        let bounds = split_points(packet.len(), count, &mut rng);
+        let bounds = split_points(packet.len(), count);
         let mut frames = Vec::with_capacity(count as usize);
 
         for (index, window) in bounds.windows(2).enumerate() {
             let chunk = &packet[window[0]..window[1]];
-            let padding_len = rng.gen_range(0..=MAX_PADDING);
+            let padding_len = random::range(0..MAX_PADDING as u64 + 1) as usize;
 
             let mut frame = BytesMut::with_capacity(HEADER_LEN + padding_len + chunk.len());
             frame.put_u8(MARKER);
@@ -135,7 +103,7 @@ impl Gecko {
             frame.put_u8((index as u8) << 4 | count);
             frame.put_u16(padding_len as u16);
             frame.resize(HEADER_LEN + padding_len, 0);
-            rand::RngCore::fill_bytes(&mut rng, &mut frame[HEADER_LEN..]);
+            fill_fast(&mut frame[HEADER_LEN..]);
             frame.put_slice(chunk);
 
             frames.push(frame);
@@ -174,9 +142,7 @@ impl Gecko {
             started: Instant::now(),
         });
 
-        // Пришла часть от другого пакета с тем же однобайтовым номером:
-        // номеров всего 256, и совпадения неизбежны. Прежний буфер при этом
-        // уже не соберётся — начинаем заново.
+        // Номер пакета однобайтовый: коллизия с другим пакетом — начинаем заново.
         if entry.chunks.len() != count as usize {
             *entry = Pending {
                 chunks: vec![None; count as usize],
@@ -207,12 +173,7 @@ impl Gecko {
         let now = Instant::now();
         pending.retain(|_, entry| now.duration_since(entry.started) < REASSEMBLY_TTL);
 
-        // Если потолок всё равно превышен, выбрасывается самый старый: он
-        // ближе всех к тому, чтобы стать бесполезным.
-        //
-        // Сравнение нестрогое, потому что вызывающий сразу после этого
-        // добавит запись: место под неё надо освободить заранее, иначе
-        // потолок оказывается на единицу выше заявленного.
+        // Нестрого: следом добавится запись; вытесняется самый старый.
         while pending.len() >= MAX_PENDING {
             let Some(oldest) = pending
                 .iter()
@@ -232,28 +193,29 @@ impl Default for Gecko {
     }
 }
 
-/// Выбирает границы частей: `count` кусков, каждый не пустой.
-///
-/// Случайные точки разреза, а не равные доли: равные доли дали бы всем частям
-/// одинаковую длину, и форма, которую слой прячет, вернулась бы — просто в
-/// другом виде.
-fn split_points(len: usize, count: u8, rng: &mut impl Rng) -> Vec<usize> {
+/// Заполняет буфер быстрой случайностью (дополнение не секретно).
+fn fill_fast(buf: &mut [u8]) {
+    for chunk in buf.chunks_mut(8) {
+        chunk.copy_from_slice(&random::u64().to_ne_bytes()[..chunk.len()]);
+    }
+}
+
+/// Границы `count` непустых частей в случайных точках разреза.
+fn split_points(len: usize, count: u8) -> Vec<usize> {
     let count = count as usize;
     let mut points: Vec<usize> = (0..count.saturating_sub(1))
-        .map(|_| rng.gen_range(1..len))
+        .map(|_| random::range(1..len as u64) as usize)
         .collect();
     points.push(0);
     points.push(len);
     points.sort_unstable();
 
-    // После сортировки соседние точки могут совпасть — такая часть была бы
-    // пустой. Границы раздвигаются, сохраняя порядок.
+    // Совпавшие точки раздвигаются вперёд, затем выравниваются с хвоста.
     for index in 1..points.len() {
         if points[index] <= points[index - 1] {
             points[index] = (points[index - 1] + 1).min(len);
         }
     }
-    // Раздвигание могло упереться в конец; выравниваем с хвоста.
     for index in (1..points.len()).rev() {
         if points[index] <= points[index - 1] {
             points[index - 1] = points[index].saturating_sub(1);

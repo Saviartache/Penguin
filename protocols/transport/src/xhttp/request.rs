@@ -1,18 +1,12 @@
-//! Запрос XHTTP `stream-one` — без сети.
-//!
-//! Сверено по Xray-core `v26.3.27`, `transport/internet/splithttp`:
-//! `config.go` (`GetNormalizedPath`, `GetNormalizedQuery`,
-//! `FillStreamRequest`), `xpadding.go` (длина и место отступа),
-//! `client.go` (`OpenStream`) и `common/utils/browser.go` (заголовки
-//! `fetch` от Chrome).
+//! Запрос XHTTP `stream-one` без сети. Эталон: Xray-core v26.3.27,
+//! `transport/internet/splithttp` (`config.go`, `xpadding.go`, `client.go`) и `common/utils/browser.go`.
 
-use rand::Rng;
+use penguin_proto::random;
 
 use crate::browser::{CHROME_USER_AGENT, CHROME_VERSION};
 use crate::h3::Request;
 
-/// Длина отступа: умолчание Xray (`GetNormalizedXPaddingBytes`), сервер
-/// проверяет его же.
+/// Длина отступа: умолчание Xray (`GetNormalizedXPaddingBytes`).
 const PADDING: std::ops::RangeInclusive<usize> = 100..=1000;
 
 /// Запрос `stream-one`: один `POST`, тело в обе стороны.
@@ -22,9 +16,9 @@ pub fn stream_one(authority: &str, path: &str) -> Request {
         "" => path.clone(),
         query => format!("{path}?{query}"),
     };
-    let padding = "X".repeat(rand::thread_rng().gen_range(PADDING));
-    // Отступ — в `Referer`, адрес запроса с подменённой строкой запроса
-    // (`ApplyXPaddingToHeader`, `PlacementQueryInHeader`).
+    let (min, max) = (*PADDING.start() as u64, *PADDING.end() as u64);
+    let padding = "X".repeat(random::range(min..max + 1) as usize);
+    // `ApplyXPaddingToHeader`, `PlacementQueryInHeader`
     let referer = format!("https://{authority}{path}?x_padding={padding}");
 
     let request = Request::new("POST", authority, target);
@@ -53,8 +47,7 @@ fn normalize(raw: &str) -> (String, &str) {
 
 /// Заголовки Chrome для `fetch` (`applyMasqueradedHeaders`).
 fn chrome_fetch_headers() -> [(&'static str, String); 12] {
-    // `getGreasedChUa(144, "chrome")`: неверный бренд по остаткам от 144,
-    // порядок — тождественная перестановка (144 % 6 = 0).
+    // `getGreasedChUa(144, "chrome")`
     let ch_ua = format!(
         "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"{CHROME_VERSION}\", \
          \"Google Chrome\";v=\"{CHROME_VERSION}\""

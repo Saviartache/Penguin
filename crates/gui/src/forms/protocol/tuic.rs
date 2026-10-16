@@ -7,21 +7,14 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
-/// Чем QUIC управляет перегрузкой.
-///
-/// Первое — умолчание нового профиля. `bbr` сверху потому, что он держится
-/// лучше остальных там, где потери не означают перегрузку, — а именно так
-/// ведёт себя мобильная сеть.
+/// Управление перегрузкой QUIC; `bbr` первым: держится лучше там, где потери не
+/// означают перегрузку (мобильная сеть).
 const CONGESTION: &[&str] = &["bbr", "cubic", "new_reno"];
 
-/// Чем едут датаграммы.
-///
-/// `native` — датаграммами QUIC: быстро и без порядка, то есть так, как UDP и
-/// устроен. `quic` — потоками: медленнее, зато проходит там, где датаграммы
-/// режут по дороге.
+/// Чем едут датаграммы: `native` — датаграммами QUIC, `quic` — потоками (проходит
+/// там, где датаграммы режут).
 const UDP_MODES: &[&str] = &["native", "quic"];
 
-/// Поля формы в том порядке, в каком они показываются.
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -48,32 +41,15 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     note: None,
 };
 
-/// Как ссылка ложится в поля.
-///
-/// ```text
-///  tuic://uuid:пароль@хост:порт?sni=…&congestion_control=bbr&udp_relay_mode=native#имя
-/// ```
-///
-/// Двоеточие в userinfo — **разделитель**: слева UUID, справа пароль. Этим
-/// ссылка похожа на `socks5://` и не похожа на `trojan://`, где двоеточие
-/// принадлежит паролю целиком.
+/// Как ссылка ложится в поля:
+/// `tuic://uuid:пароль@хост:порт?sni=…&congestion_control=bbr&udp_relay_mode=native#имя`.
 fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
-    let userinfo = link.userinfo();
-    let Some((uuid, password)) = userinfo.split_once(':') else {
-        // Без пароля профиль не соберётся: из него выводится отпечаток.
-        return Err(crate::i18n::s().link_no_password.to_owned());
-    };
-    if uuid.is_empty() {
-        return Err(crate::i18n::s().link_no_uuid.to_owned());
-    }
-    if password.is_empty() {
-        return Err(crate::i18n::s().link_no_password.to_owned());
-    }
+    let (uuid, password) = link.uuid_password()?;
 
     let mut values = vec![
         ("server", link.server(DEFAULT_PORT)),
-        ("uuid", uuid.to_owned()),
-        ("password", password.to_owned()),
+        ("uuid", uuid),
+        ("password", password),
     ];
 
     if let Some(sni) = link.query.get("sni") {
@@ -96,19 +72,12 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
 mod tests {
     use super::*;
     use crate::forms::link;
+    use crate::forms::protocol::testing::{self, Values, value};
 
     const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 
-    fn parse(raw: &str) -> Vec<(&'static str, String)> {
-        let link = link::split(raw).expect("ссылка разбирается");
-        from_link(&link).expect("поля заполняются")
-    }
-
-    fn value<'a>(values: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
-        values
-            .iter()
-            .find(|(name, _)| *name == key)
-            .map(|(_, value)| value.as_str())
+    fn parse(raw: &str) -> Values {
+        testing::parse(from_link, raw)
     }
 
     #[test]
@@ -121,8 +90,6 @@ mod tests {
 
     #[test]
     fn the_colon_splits_the_uuid_from_the_password() {
-        // Не как у Trojan: там двоеточие принадлежит паролю целиком, а здесь
-        // это разделитель — и первое двоеточие отделяет ровно UUID.
         let values = parse(&format!("tuic://{UUID}:раз:два@example.com:443"));
         assert_eq!(value(&values, "uuid"), Some(UUID));
         assert_eq!(value(&values, "password"), Some("раз:два"));

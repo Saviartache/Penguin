@@ -1,19 +1,10 @@
 //! Заголовок Host из обычного HTTP.
 //!
-//! Незашифрованного HTTP осталось немного, но он есть: обновления, проверки
-//! связи у операционной системы, страницы-заглушки публичных сетей. Имя из
-//! них достаётся заметно проще, чем из TLS, — оно лежит текстом.
 
 /// Наибольший объём, в котором ищется заголовок.
-///
-/// Заголовки HTTP укладываются в килобайты; читать больше — значит копить
-/// чужие данные в надежде на заголовок, которого нет.
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 
-/// Методы, с которых начинается запрос.
-///
-/// Проверка нужна, чтобы не принять за HTTP первые байты произвольного
-/// двоичного протокола, где случайно встретилось слово `Host:`.
+/// Методы, с которых начинается запрос (отсекают двоичные протоколы).
 const METHODS: [&[u8]; 9] = [
     b"GET ",
     b"POST ",
@@ -34,8 +25,7 @@ pub fn extract_host(data: &[u8]) -> Option<&str> {
         return None;
     }
 
-    // Заголовки кончаются пустой строкой. Пока её нет, запрос ещё не пришёл
-    // целиком, и `Host` мог не успеть появиться.
+    // Без пустой строки заголовки могли прийти не целиком.
     let head_end = find(data, b"\r\n\r\n").or_else(|| find(data, b"\n\n"))?;
     let head = &data[..head_end];
 
@@ -48,9 +38,7 @@ pub fn extract_host(data: &[u8]) -> Option<&str> {
         }
 
         let value = value.trim();
-        // В `Host` может стоять порт — он нам не нужен, имя есть имя.
-        // IPv6 в квадратных скобках здесь не встречается: правила по именам
-        // к числовому адресу всё равно не применяются.
+        // Порт отбрасывается; IPv6 в скобках не имя.
         let host = value.split(':').next()?.trim();
         return Some(host).filter(|host| is_plausible_host(host));
     }
@@ -112,18 +100,14 @@ mod tests {
 
     #[test]
     fn incomplete_request_yields_nothing() {
-        // Пока пустой строки нет, `Host` мог просто не успеть прийти.
         let partial = b"GET / HTTP/1.1\r\nHost: example.com\r\n";
         assert_eq!(extract_host(partial), None);
     }
 
     #[test]
     fn non_http_yields_nothing() {
-        // Первые байты TLS начинаются с 0x16 и на метод не похожи.
         assert_eq!(extract_host(&[0x16, 0x03, 0x01, 0x00, 0x50]), None);
         assert_eq!(extract_host(b""), None);
-        // Слово `Host:` внутри чужого двоичного протокола не должно сойти за
-        // HTTP.
         assert_eq!(extract_host(b"\x00\x01Host: example.com\r\n\r\n"), None);
     }
 
@@ -134,8 +118,6 @@ mod tests {
 
     #[test]
     fn oversized_input_is_bounded() {
-        // Поток без единого перевода строки не должен заставить нас
-        // просмотреть мегабайты.
         let mut flood = b"GET / HTTP/1.1\r\n".to_vec();
         flood.extend(std::iter::repeat_n(b'x', 1_000_000));
         assert_eq!(extract_host(&flood), None);
@@ -143,7 +125,6 @@ mod tests {
 
     #[test]
     fn accepts_lf_only_line_endings() {
-        // Так пишут самодельные клиенты, и формально это допустимо.
         assert_eq!(
             extract_host(b"GET / HTTP/1.0\nHost: example.com\n\n"),
             Some("example.com")

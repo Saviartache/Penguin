@@ -1,8 +1,4 @@
 //! Регистрация протокола: разбор конфигурации и сборка направления.
-//!
-//! Фабрик две, ради двух записей в реестре — `http2` и `http3`, — но крейт
-//! один: сам `CONNECT`, дополнение и разбор ответа у них общие, а разное
-//! уносится в [`crate::outbound`] и [`crate::transport`].
 
 use std::sync::Arc;
 
@@ -59,8 +55,6 @@ impl ProtocolFactory for NaiveFactory {
     }
 
     fn validate(&self, params: &serde_json::Value) -> Result<(), ProtocolError> {
-        // Проверка без сети: интерфейс должен показать ошибку в поле сразу,
-        // а не через минуту неудачного подключения.
         self.parse(params)?.validate().map_err(Into::into)
     }
 
@@ -71,9 +65,6 @@ impl ProtocolFactory for NaiveFactory {
     ) -> Result<Arc<dyn Outbound>, ProtocolError> {
         let config = self.parse(params)?;
 
-        // Соединение поднимается сразу и держится открытым на весь профиль: у HTTP/2 и HTTP/3 есть
-        // мультиплексирование, и повторное рукопожатие на каждый поток было
-        // бы платой за то, ради чего этот протокол выбирают.
         let outbound: Arc<dyn Outbound> = match self.variant {
             Variant::Http2 => {
                 Arc::new(NaiveHttp2Outbound::connect(ctx.id, config, ctx.dialer).await?)
@@ -118,7 +109,6 @@ mod tests {
 
     #[test]
     fn protocol_names_are_stable() {
-        // Имена стоят в конфигурациях пользователей — менять их нельзя.
         assert_eq!(NaiveFactory::http2().protocol(), "http2");
         assert_eq!(NaiveFactory::http3().protocol(), "http3");
     }

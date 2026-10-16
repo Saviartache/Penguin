@@ -1,25 +1,15 @@
 //! Пишущая сторона сессии: дополнение и буфер начала.
 //!
-//! # Почему запись отдельно
-//!
-//! Дополнение считается **по записям TLS**, а не по кадрам: схема говорит,
-//! сколько байт должна занимать запись номер `N`. Значит каждая запись должна
-//! уйти своим вызовом со сбросом — иначе куски сольются в одну запись, и вся
-//! схема перестанет значить то, что значит. Собрано это здесь, чтобы правило
-//! было в одном месте и проверялось без сети.
-//!
-//! # Буфер начала
-//!
-//! Первая запись сессии обязана нести настройки, открытие потока и адрес
-//! назначения разом: схема считает их одним пакетом, и по отдельности они
-//! выглядят иначе. Поэтому сессия начинается с [`Writer::hold`], а отпускает
-//! буфер тот, кто открыл первый поток.
+//! Дополнение считается по записям TLS: каждая уходит своим вызовом со
+//! сбросом. Первая запись несёт настройки, открытие и адрес разом, поэтому
+//! сессия начинается с [`Writer::hold`], а [`Writer::release`] зовёт открывший
+//! первый поток.
 
 use std::io;
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use crate::frame::{self, HEADER_LEN};
+use crate::frame::{self, HEADER_LEN, Header};
 use crate::padding::{Scheme, Step};
 
 /// Пишущая сторона сессии.
@@ -34,6 +24,8 @@ pub struct Writer<W> {
     padding: bool,
     /// Номер записи. Нулевая ушла с опознанием, до сессии.
     pkt: u32,
+    /// Буфер сборки кадра, переиспользуется.
+    scratch: Vec<u8>,
 }
 
 impl<W: AsyncWrite + Unpin> Writer<W> {
@@ -45,6 +37,7 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
             buffer: Vec::new(),
             padding: true,
             pkt: 0,
+            scratch: Vec::new(),
         }
     }
 
@@ -63,10 +56,7 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
         self.pkt
     }
 
-    /// Кладёт байты в буфер начала, минуя дополнение.
-    ///
-    /// Только для кадра настроек: он собирается до того, как о сессии узнал
-    /// кто-нибудь ещё, и уходит первой записью вместе с открытием потока.
+    /// Кладёт байты в буфер начала, минуя дополнение (кадр настроек).
     pub fn stash(&mut self, bytes: &[u8]) {
         self.buffer.extend_from_slice(bytes);
     }
@@ -76,15 +66,29 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
         &mut self.io
     }
 
-    /// Отправляет кадр, дополняя запись по схеме.
+    /// Собирает кадр во внутреннем буфере и отправляет его, дополняя запись по схеме.
+    pub async fn write_frame(
+        &mut self,
+        scheme: &Scheme,
+        header: Header,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let mut frame = std::mem::take(&mut self.scratch);
+        frame.clear();
+        frame.extend_from_slice(&header.encode());
+        frame.extend_from_slice(data);
+        let written = self.write(scheme, &frame).await;
+        self.scratch = frame;
+        written
+    }
+
+    /// Отправляет готовый кадр, дополняя запись по схеме.
     pub async fn write(&mut self, scheme: &Scheme, frame: &[u8]) -> io::Result<()> {
         if self.holding {
             self.buffer.extend_from_slice(frame);
             return Ok(());
         }
 
-        // Накопленное едет вместе со следующим кадром — одной записью, как и
-        // задумано схемой.
         let joined;
         let rest: &[u8] = if self.buffer.is_empty() {
             frame
@@ -100,9 +104,6 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
             if self.pkt < scheme.stop() {
                 return self.padded(scheme.steps(self.pkt), rest).await;
             }
-            // Схема кончилась. Дальше сессия выглядит собой — и это не
-            // упущение: дополнять весь разговор стоило бы вдвое дороже, а
-            // опознают его по началу.
             self.padding = false;
         }
 
@@ -114,18 +115,15 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
         for step in steps {
             let remain = rest.len();
             let size = match step {
-                // Данные кончились — дальше не дополнять.
                 Step::Check if remain == 0 => break,
                 Step::Check => continue,
                 Step::Size(size) => size,
             };
 
             if remain > size {
-                // Записи мало: уходит ровно столько, сколько назвали.
                 write_record(&mut self.io, &rest[..size]).await?;
                 rest = &rest[size..];
             } else if remain > 0 {
-                // Хвост данных и дополнение до нужного размера за ним.
                 let pad = size.saturating_sub(remain + HEADER_LEN);
                 if pad > 0 {
                     let mut record = Vec::with_capacity(size);
@@ -133,13 +131,10 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
                     record.extend_from_slice(&waste(pad));
                     write_record(&mut self.io, &record).await?;
                 } else {
-                    // Дополнению не хватило места даже на заголовок: запись
-                    // уходит как есть. Так же поступает эталон.
                     write_record(&mut self.io, rest).await?;
                 }
                 rest = &[];
             } else {
-                // Данных нет: запись целиком из дополнения.
                 write_record(&mut self.io, &waste(size)).await?;
             }
         }
@@ -151,10 +146,7 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
     }
 }
 
-/// Отправляет одну запись TLS.
-///
-/// Сброс здесь обязателен: без него куски склеятся в одну запись, и схема
-/// перестанет значить то, что значит.
+/// Отправляет одну запись TLS; сброс обязателен, иначе записи склеятся.
 async fn write_record<W: AsyncWrite + Unpin>(io: &mut W, bytes: &[u8]) -> io::Result<()> {
     io.write_all(bytes).await?;
     io.flush().await
@@ -216,8 +208,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_held_write_goes_out_with_the_next_one() {
-        // Настройки, открытие потока и адрес обязаны уехать одной записью:
-        // схема считает их одним пакетом.
         let scheme = scheme("stop=2\n1=100-100");
         let mut writer = Writer::new(Records::default());
 
@@ -239,7 +229,6 @@ mod tests {
         writer.write(&scheme, b"hello").await.expect("уходит");
         assert_eq!(sizes(&writer.io), vec![100]);
 
-        // За данными — кадр-дополнение ровно на остаток.
         let record = &writer.io.0[0];
         assert_eq!(&record[..5], b"hello");
         assert_eq!(record[5], frame::CMD_WASTE);
@@ -254,14 +243,11 @@ mod tests {
         writer.release();
 
         writer.write(&scheme, &[7_u8; 100]).await.expect("уходит");
-        // Десять, двадцать — и остаток одной записью следом.
         assert_eq!(sizes(&writer.io), vec![10, 20, 70]);
     }
 
     #[tokio::test]
     async fn a_check_mark_stops_the_padding_when_the_data_runs_out() {
-        // В этом и смысл проверки: не гнать пустые записи, когда посылать
-        // больше нечего.
         let scheme = scheme("stop=2\n1=50-50,c,500-500,c,500-500");
         let mut writer = Writer::new(Records::default());
         writer.release();
@@ -282,8 +268,6 @@ mod tests {
 
     #[tokio::test]
     async fn sizes_left_after_the_data_are_filled_with_padding() {
-        // Без проверки схема добивает записи дополнением — так у эталона, и
-        // размер такой записи на семь байт больше названного.
         let scheme = scheme("stop=2\n1=20-20,30-30");
         let mut writer = Writer::new(Records::default());
         writer.release();
@@ -295,8 +279,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_size_too_small_for_a_padding_frame_is_sent_as_is() {
-        // Разница между размером и данными меньше заголовка: дополнять нечем,
-        // запись уходит длиннее названного. Так же поступает эталон.
         let scheme = scheme("stop=2\n1=12-12");
         let mut writer = Writer::new(Records::default());
         writer.release();
@@ -325,7 +307,6 @@ mod tests {
         for _ in 0..4 {
             writer.write(&scheme, b"x").await.expect("уходит");
         }
-        // Пакеты 1 и 2 дополнены, 3 и 4 — уже нет.
         assert_eq!(sizes(&writer.io), vec![100, 100, 1, 1]);
         assert_eq!(writer.packets(), 3, "счётчик встал вместе с дополнением");
     }

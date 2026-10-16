@@ -1,38 +1,5 @@
-//! Ключевое расписание TLS 1.3, RFC 8446 §7.1 — ровно тот кусок, что нужен,
-//! чтобы дойти до ключа записи рукопожатия сервера: `Early Secret`, секрет
-//! `derived`, `Handshake Secret`, секрет `s hs traffic`, ключ и `IV`.
-//! Мастер-секрет и прикладные ключи сюда не входят — они не нужны для
-//! проверки сертификата (`certificate.rs`), а дальше рукопожатие не ведётся
-//! (см. `mod.rs`).
-//!
-//! ```text
-//! 0 ──HKDF-Extract──> Early Secret
-//!                          │
-//!               Derive-Secret(.., "derived", "")
-//!                          │
-//!                          ▼
-//! (EC)DHE ──HKDF-Extract──> Handshake Secret
-//!                          │
-//!         Derive-Secret(.., "s hs traffic", hash(CH..SH))
-//!                          │
-//!                          ▼
-//!              server_handshake_traffic_secret
-//!               │                        │
-//!    HKDF-Expand-Label            HKDF-Expand-Label
-//!      (.., "key", "", N)           (.., "iv", "", 12)
-//!               │                        │
-//!               ▼                        ▼
-//!              key                       iv
-//! ```
-//!
-//! Все три функции — `HKDF-Extract`, `HKDF-Expand-Label` и `Derive-Secret` —
-//! названы в RFC 8446 §7.1 буквально этими формулами; здесь только их прямой
-//! перевод на `ring::hkdf`, без ничего специфичного для Reality.
-//!
-//! Проверено на векторах RFC 8448 §3 ("Simple 1-RTT Handshake") — это не наш
-//! формат и не формат Reality, а официальная трасса TLS 1.3 с промежуточными
-//! значениями на каждом шаге, включая byte-in-byte `Handshake Secret` и ключ
-//! записи сервера. Независимая проверка, а не круговой тест.
+//! Ключевое расписание TLS 1.3 (RFC 8446 §7.1) на `ring::hkdf`: от `Early Secret` до
+//! прикладных ключей и `Finished`. Сверено с векторами RFC 8448 §3.
 
 use ring::hkdf::{KeyType, Prk, Salt};
 use ring::hmac;
@@ -40,8 +7,7 @@ use ring::hmac;
 use crate::reality::cipher_suite::CipherSuite;
 use crate::reality::error::RealityError;
 
-/// Обёртка над длиной вывода — `ring::hkdf` просит тип, реализующий
-/// [`KeyType`], а не голое число.
+/// Длина вывода для `ring::hkdf`.
 struct OutputLen(usize);
 
 impl KeyType for OutputLen {
@@ -50,12 +16,7 @@ impl KeyType for OutputLen {
     }
 }
 
-/// `HKDF-Expand-Label` — RFC 8446 §7.1.
-///
-/// `HkdfLabel` — это `uint16 length`, затем `label` длиной 7..255 байт с
-/// префиксом `"tls13 "`, затем `context` длиной 0..255 байт. Оба списка
-/// заведомо короче своих ограничений: `label` здесь всегда одна из строк
-/// ниже, `context` — не длиннее хеша транскрипта (32 или 48 байт).
+/// `HKDF-Expand-Label` (RFC 8446 §7.1); метки и контекст заведомо короче 255 байт.
 fn expand_label(
     prk: &Prk,
     label: &str,
@@ -70,8 +31,6 @@ fn expand_label(
     hkdf_label.push(context.len() as u8);
     hkdf_label.extend_from_slice(context);
 
-    // `Okm` заимствует у `info` — временный массив с одним элементом не
-    // пережил бы выражение, поэтому у него есть имя.
     let info: [&[u8]; 1] = [&hkdf_label];
     let okm = prk
         .expand(&info, OutputLen(length))
@@ -81,9 +40,7 @@ fn expand_label(
     Ok(out)
 }
 
-/// `Derive-Secret(Secret, Label, Messages) = HKDF-Expand-Label(Secret, Label,
-/// Transcript-Hash(Messages), Hash.length)` — RFC 8446 §7.1. `transcript` уже
-/// хеширован вызывающим ([`transcript_hash`]).
+/// `Derive-Secret` с уже хешированным транскриптом (RFC 8446 §7.1).
 fn derive_secret(
     cipher: CipherSuite,
     prk: &Prk,
@@ -93,9 +50,7 @@ fn derive_secret(
     expand_label(prk, label, transcript, cipher.hash_len())
 }
 
-/// Хеш транскрипта: конкатенация сообщений рукопожатия (без заголовков
-/// TLS-записи, только заголовок и тело самого сообщения), пропущенная через
-/// хеш этого шифра.
+/// Хеш транскрипта: сообщения рукопожатия без заголовков записей.
 pub fn transcript_hash(cipher: CipherSuite, messages: &[&[u8]]) -> Vec<u8> {
     let mut ctx = ring::digest::Context::new(cipher.digest_algorithm());
     for message in messages {
@@ -104,73 +59,27 @@ pub fn transcript_hash(cipher: CipherSuite, messages: &[&[u8]]) -> Vec<u8> {
     ctx.finish().as_ref().to_vec()
 }
 
-/// Ключ и `IV` записи рукопожатия — одного направления (см. `record.rs`, где
-/// эти же поля хранятся вместе с шифром и счётчиком записей).
-pub struct HandshakeKeys {
-    /// Ключ AEAD. Длина зависит от шифра — 16 байт для `AES-128-GCM`, 32 для
-    /// двух остальных (`CipherSuite::key_len`).
+/// Ключ AEAD и `IV` записи одного направления (RFC 8446 §7.3).
+pub struct TrafficKeys {
+    /// Ключ AEAD: 16 байт у `AES-128-GCM`, 32 у остальных.
     pub key: Vec<u8>,
-    /// `IV`, из которого строится нонс каждой записи (`record.rs`).
+    /// `IV`, из которого строится нонс записи.
     pub iv: [u8; 12],
 }
 
-/// Ключ и `IV`, которыми сервер шифрует `EncryptedExtensions`, `Certificate`,
-/// `CertificateVerify` и свой `Finished`.
-///
-/// `dhe_shared_secret` — общий секрет `(EC)DHE` настоящего TLS 1.3, а не
-/// `AuthKey` Reality (тот — с ключом Reality, этот — с ключом сервера из
-/// `ServerHello`, см. `auth.rs`). `transcript_ch_sh` — хеш `ClientHello` и
-/// `ServerHello`, посчитанный [`transcript_hash`] тем же шифром.
+/// Ключи, которыми сервер шифрует свой полёт: `dhe_shared_secret` — секрет `(EC)DHE` самого
+/// TLS (не `AuthKey`), `transcript_ch_sh` — хеш `ClientHello..ServerHello`.
 pub fn server_handshake_traffic_keys(
     cipher: CipherSuite,
     dhe_shared_secret: &[u8],
     transcript_ch_sh: &[u8],
-) -> Result<HandshakeKeys, RealityError> {
-    let alg = cipher.hkdf_algorithm();
-    let hash_len = cipher.hash_len();
-    let zeros = vec![0u8; hash_len];
-
-    // Early Secret = HKDF-Extract(salt=0, ikm=0). PSK не используется — эта
-    // реализация не ведёт возобновление сессии.
-    let early_secret = Salt::new(alg, &zeros).extract(&zeros);
-
-    // derived = Derive-Secret(EarlySecret, "derived", "") — "" транскрипта
-    // здесь означает хеш ПУСТОЙ строки, а не пустой контекст.
-    let empty_hash = transcript_hash(cipher, &[]);
-    let derived = derive_secret(cipher, &early_secret, "derived", &empty_hash)?;
-
-    // Handshake Secret = HKDF-Extract(salt=derived, ikm=(EC)DHE).
-    let handshake_secret = Salt::new(alg, &derived).extract(dhe_shared_secret);
-
-    let traffic_secret =
-        derive_secret(cipher, &handshake_secret, "s hs traffic", transcript_ch_sh)?;
-    let traffic_prk = Prk::new_less_safe(alg, &traffic_secret);
-
-    let key = expand_label(&traffic_prk, "key", &[], cipher.key_len())?;
-    let iv_bytes = expand_label(&traffic_prk, "iv", &[], 12)?;
-    let mut iv = [0u8; 12];
-    iv.copy_from_slice(&iv_bytes);
-
-    Ok(HandshakeKeys { key, iv })
+) -> Result<TrafficKeys, RealityError> {
+    let secret = handshake_secret(cipher, dhe_shared_secret)?
+        .traffic_secret("s hs traffic", transcript_ch_sh)?;
+    traffic_keys(cipher, &secret)
 }
 
-/// Ключ и `IV`, выведенные из произвольного секрета трафика —
-/// `HKDF-Expand-Label(secret, "key"|"iv", "", ..)`, RFC 8446 §7.3. Та же
-/// формула, что и в конце [`server_handshake_traffic_keys`], но не
-/// привязана к секрету сервера времён рукопожатия: годится и для
-/// клиентского секрета рукопожатия, и для прикладных секретов обеих сторон
-/// ([`MasterSecret::traffic_secret`]) — довести рукопожатие до конца
-/// (`handshake.rs`) без нужно во всех трёх случаях.
-pub struct TrafficKeys {
-    /// Ключ AEAD.
-    pub key: Vec<u8>,
-    /// `IV`, из которого строится нонс каждой записи (`record.rs`).
-    pub iv: [u8; 12],
-}
-
-/// Выводит [`TrafficKeys`] из готового секрета трафика (не из общего
-/// секрета `(EC)DHE`, как [`server_handshake_traffic_keys`], — секрет уже
-/// выведен раньше, этот шаг только превращает его в ключ и `IV`).
+/// Ключ и `IV` из готового секрета трафика (рукопожатия или прикладного).
 pub fn traffic_keys(cipher: CipherSuite, secret: &[u8]) -> Result<TrafficKeys, RealityError> {
     let prk = Prk::new_less_safe(cipher.hkdf_algorithm(), secret);
     let key = expand_label(&prk, "key", &[], cipher.key_len())?;
@@ -180,31 +89,19 @@ pub fn traffic_keys(cipher: CipherSuite, secret: &[u8]) -> Result<TrafficKeys, R
     Ok(TrafficKeys { key, iv })
 }
 
-/// `Handshake Secret` вместе с тем, что из него выводится дальше: секретами
-/// трафика обеих сторон рукопожатия ([`Self::traffic_secret`]) и, ещё одним
-/// `Derive-Secret(.., "derived", "")`, — `Master Secret`
-/// ([`Self::master_secret`]). RFC 8446 §7.1 передаёт этот секрет от шага к
-/// шагу как одно значение; [`server_handshake_traffic_keys`] использует его
-/// один раз и не отдаёт наружу — доводя рукопожатие до `Finished`, он нужен
-/// вызывающему ещё дважды (свой `Finished`, прикладные ключи), и держать
-/// его негде, кроме как в этом типе.
+/// `Handshake Secret`: источник секретов трафика рукопожатия и `Master Secret`.
 pub struct HandshakeSecret {
     cipher: CipherSuite,
     prk: Prk,
 }
 
-/// Выводит `Handshake Secret` — RFC 8446 §7.1: `Early Secret`, `derived`,
-/// затем `HKDF-Extract` с общим секретом `(EC)DHE` в качестве `IKM`. Те же
-/// три шага, что уже сверены байт в байт с RFC 8448 §3 внутри
-/// [`server_handshake_traffic_keys`] (см. его тест) — здесь та же формула
-/// ради секрета, который вызывающий может использовать больше одного раза.
+/// `Early Secret` -> `derived` -> `HKDF-Extract` с `(EC)DHE` (RFC 8446 §7.1); PSK нет.
 pub fn handshake_secret(
     cipher: CipherSuite,
     dhe_shared_secret: &[u8],
 ) -> Result<HandshakeSecret, RealityError> {
     let alg = cipher.hkdf_algorithm();
-    let hash_len = cipher.hash_len();
-    let zeros = vec![0u8; hash_len];
+    let zeros = vec![0u8; cipher.hash_len()];
 
     let early_secret = Salt::new(alg, &zeros).extract(&zeros);
     let empty_hash = transcript_hash(cipher, &[]);
@@ -215,9 +112,7 @@ pub fn handshake_secret(
 }
 
 impl HandshakeSecret {
-    /// Секрет трафика одного направления рукопожатия —
-    /// `Derive-Secret(HandshakeSecret, label, hash(ClientHello..ServerHello))`.
-    /// `label` — `"c hs traffic"` или `"s hs traffic"`.
+    /// Секрет трафика рукопожатия: `label` — `"c hs traffic"` или `"s hs traffic"`.
     pub fn traffic_secret(
         &self,
         label: &str,
@@ -226,8 +121,7 @@ impl HandshakeSecret {
         derive_secret(self.cipher, &self.prk, label, transcript_ch_sh)
     }
 
-    /// `Master Secret = HKDF-Extract(salt=Derive-Secret(HandshakeSecret,
-    /// "derived", ""), ikm=0)` — RFC 8446 §7.1.
+    /// `Master Secret` (RFC 8446 §7.1).
     pub fn master_secret(&self) -> Result<MasterSecret, RealityError> {
         let empty_hash = transcript_hash(self.cipher, &[]);
         let derived = derive_secret(self.cipher, &self.prk, "derived", &empty_hash)?;
@@ -240,24 +134,15 @@ impl HandshakeSecret {
     }
 }
 
-/// `Master Secret` — исток прикладных секретов трафика (RFC 8446 §7.1).
+/// `Master Secret`: исток прикладных секретов.
 pub struct MasterSecret {
     cipher: CipherSuite,
     prk: Prk,
 }
 
 impl MasterSecret {
-    /// Прикладной секрет трафика одного направления —
-    /// `Derive-Secret(MasterSecret, label, hash(ClientHello..server Finished))`.
-    /// `label` — `"c ap traffic"` или `"s ap traffic"`.
-    ///
-    /// **Ловушка (см. `mod.rs`):** транскрипт здесь берётся ДО `Finished`
-    /// клиента, но ПОСЛЕ `Finished` сервера — RFC 8446 §7.1 подписывает эту
-    /// ветку диаграммы как `ClientHello...server Finished`, а не «до обоих
-    /// `Finished`». Секрет, выведенный с транскриптом до серверного
-    /// `Finished` или после клиентского, не совпадёт с тем, что вывел
-    /// сервер, — и результат неотличим на этом шаге от битых ключей: канал
-    /// откроется, а расшифровать хотя бы один байт не удастся.
+    /// Прикладной секрет: `label` — `"c ap traffic"` или `"s ap traffic"`. Транскрипт —
+    /// `ClientHello..server Finished`: после `Finished` сервера, до `Finished` клиента.
     pub fn traffic_secret(
         &self,
         label: &str,
@@ -267,9 +152,7 @@ impl MasterSecret {
     }
 }
 
-/// Алгоритм `HMAC` ключевого расписания — тот же хеш, что и у `HKDF` этого
-/// шифра (RFC 8446 §7.1: `Finished` считается хеш-функцией рукопожатия, не
-/// отдельно назначенной).
+/// `HMAC` на хеше шифра (RFC 8446 §4.4.4).
 fn hmac_algorithm(cipher: CipherSuite) -> hmac::Algorithm {
     match cipher {
         CipherSuite::Aes128GcmSha256 | CipherSuite::Chacha20Poly1305Sha256 => hmac::HMAC_SHA256,
@@ -277,18 +160,13 @@ fn hmac_algorithm(cipher: CipherSuite) -> hmac::Algorithm {
     }
 }
 
-/// `finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)`
-/// — RFC 8446 §4.4.4. `base_secret` — секрет трафика рукопожатия той
-/// стороны, чей `Finished` считается ([`HandshakeSecret::traffic_secret`]).
+/// `finished_key` (RFC 8446 §4.4.4) из секрета трафика рукопожатия той стороны, чей `Finished`.
 pub fn finished_key(cipher: CipherSuite, base_secret: &[u8]) -> Result<Vec<u8>, RealityError> {
     let prk = Prk::new_less_safe(cipher.hkdf_algorithm(), base_secret);
     expand_label(&prk, "finished", &[], cipher.hash_len())
 }
 
-/// `verify_data = HMAC(finished_key, Transcript-Hash(...))` — RFC 8446
-/// §4.4.4, направление «посчитать свой `Finished`». Сравнение чужого
-/// значения — отдельно, [`verify_finished`]: оно должно быть постоянным по
-/// времени, а не через `==` на возвращённый отсюда вектор.
+/// `verify_data` своего `Finished`; чужой сверять через [`verify_finished`].
 pub fn finished_verify_data(
     cipher: CipherSuite,
     finished_key: &[u8],
@@ -298,9 +176,7 @@ pub fn finished_verify_data(
     hmac::sign(&key, transcript).as_ref().to_vec()
 }
 
-/// Проверяет чужой `Finished` — постоянное по времени сравнение
-/// ([`ring::hmac::verify`]), а не пересчёт через [`finished_verify_data`] и
-/// побайтовое `==`.
+/// Проверяет чужой `Finished` за постоянное время.
 pub fn verify_finished(
     cipher: CipherSuite,
     finished_key: &[u8],
@@ -319,11 +195,7 @@ mod tests {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// RFC 8448 §3, "Simple 1-RTT Handshake": общий секрет `(EC)DHE` (там
-    /// назван `IKM` шага "{server} extract secret \"handshake\"") и хеш
-    /// `ClientHello`+`ServerHello` из этой же трассы дают ключ и `IV`,
-    /// напечатанные на шаге "{server} derive write traffic keys for
-    /// handshake data". Независимый источник — RFC, а не эталон Reality.
+    /// RFC 8448 §3: ключ и `IV` шага "{server} derive write traffic keys for handshake data".
     #[test]
     fn server_handshake_keys_match_the_rfc_8448_test_vector() {
         let dhe_shared_secret = [
@@ -331,9 +203,6 @@ mod tests {
             0x9f, 0x0d, 0x35, 0xe6, 0xd6, 0x3f, 0x53, 0x75, 0x63, 0xef, 0xd4, 0x62, 0x72, 0x90,
             0x0f, 0x89, 0x49, 0x2d,
         ];
-        // Хеш ClientHello+ServerHello, напечатанный RFC на шаге "derive
-        // secret \"tls13 c hs traffic\"" — тот же хеш нужен и для "s hs
-        // traffic", RFC печатает его только один раз.
         let transcript = [
             0x86, 0x0c, 0x06, 0xed, 0xc0, 0x78, 0x58, 0xee, 0x8e, 0x78, 0xf0, 0xe7, 0x42, 0x8c,
             0x58, 0xed, 0xd6, 0xb4, 0x3f, 0x2c, 0xa3, 0xe6, 0xe9, 0x5f, 0x02, 0xed, 0x06, 0x3c,
@@ -377,8 +246,7 @@ mod tests {
             .collect()
     }
 
-    /// Общий секрет `(EC)DHE` из RFC 8448 §3 — тот же, что и в
-    /// [`server_handshake_keys_match_the_rfc_8448_test_vector`].
+    /// Общий секрет `(EC)DHE` из RFC 8448 §3.
     fn rfc_8448_dhe_shared_secret() -> Vec<u8> {
         from_hex(
             "8b d4 05 4f b5 5b 9d 63 fd fb ac f9 f0 4b 9f 0d 35 e6 d6 3f 53 75 63 ef d4 62 72 90
@@ -394,11 +262,7 @@ mod tests {
         )
     }
 
-    /// RFC 8448 §3, шаги "{server} derive secret \"tls13 c hs traffic\"" и
-    /// "tls13 s hs traffic": оба секрета трафика рукопожатия выводятся из
-    /// одного и того же `Handshake Secret` — независимая проверка того, что
-    /// [`HandshakeSecret`] действительно даёт использовать его дважды, а не
-    /// только для секрета сервера, как [`server_handshake_traffic_keys`].
+    /// RFC 8448 §3: секреты "tls13 c hs traffic" и "tls13 s hs traffic" из одного `Handshake Secret`.
     #[test]
     fn handshake_secret_yields_both_traffic_secrets_from_the_rfc_8448_vector() {
         let secret = handshake_secret(CipherSuite::Aes128GcmSha256, &rfc_8448_dhe_shared_secret())
@@ -428,12 +292,7 @@ mod tests {
         );
     }
 
-    /// RFC 8448 §3, "{server} derive secret \"tls13 c ap traffic\"" и
-    /// "tls13 s ap traffic": транскрипт здесь — это хеш `ClientHello`
-    /// вплоть до серверного `Finished` (см. `finished_verify_data`, тот же
-    /// хеш используется как сообщение HMAC для `Finished` клиента). Это и
-    /// есть ловушка из документа модуля — секреты выводятся ДО `Finished`
-    /// клиента, но ПОСЛЕ `Finished` сервера.
+    /// RFC 8448 §3: секреты "tls13 c ap traffic" и "tls13 s ap traffic" с транскриптом до серверного `Finished`.
     #[test]
     fn master_secret_yields_both_application_traffic_secrets_from_the_rfc_8448_vector() {
         let handshake =
@@ -468,10 +327,7 @@ mod tests {
         );
     }
 
-    /// RFC 8448 §3, "{server} derive write traffic keys for application
-    /// data": ключ и `IV`, выведенные тем же [`traffic_keys`], что и
-    /// клиентские ключи рукопожатия ниже, — общая формула для любого
-    /// секрета трафика, не только для секрета сервера времён рукопожатия.
+    /// RFC 8448 §3: "{server} derive write traffic keys for application data".
     #[test]
     fn traffic_keys_matches_the_rfc_8448_server_application_data_vector() {
         let server_ap_traffic_secret = from_hex(
@@ -490,11 +346,7 @@ mod tests {
         );
     }
 
-    /// RFC 8448 §3, "{server} derive read traffic keys for handshake
-    /// data": то, чем сервер читает `Finished` клиента, — то же самое, чем
-    /// клиент его пишет. Проверяет [`traffic_keys`] на клиентском секрете
-    /// рукопожатия (а не только на серверном, как
-    /// [`server_handshake_traffic_keys`]).
+    /// RFC 8448 §3: "{server} derive read traffic keys for handshake data" (клиентский секрет).
     #[test]
     fn traffic_keys_matches_the_rfc_8448_client_handshake_vector() {
         let client_hs_traffic_secret = from_hex(
@@ -513,9 +365,7 @@ mod tests {
         );
     }
 
-    /// RFC 8448 §3, "{server} calculate finished \"tls13 finished\"":
-    /// `finished_key` сервера — тот же секрет трафика, тот же пустой
-    /// контекст, что печатает RFC.
+    /// RFC 8448 §3: "{server} calculate finished".
     #[test]
     fn finished_key_matches_the_rfc_8448_server_vector() {
         let server_hs_traffic_secret = from_hex(
@@ -533,13 +383,7 @@ mod tests {
         );
     }
 
-    /// RFC 8448 §3, "{client} calculate finished \"tls13 finished\"": и
-    /// `finished_key`, и итоговый `verify_data` клиента — из транскрипта,
-    /// который [`master_secret_yields_both_application_traffic_secrets_from_the_rfc_8448_vector`]
-    /// уже использовал для прикладных секретов (RFC печатает его только
-    /// один раз, но использует дважды, — здесь то же самое). Сквозная
-    /// проверка [`finished_key`] и [`finished_verify_data`]/[`verify_finished`]
-    /// вместе, от секрета трафика до итоговых 32 байт `Finished`.
+    /// RFC 8448 §3: "{client} calculate finished", от секрета трафика до `verify_data`.
     #[test]
     fn finished_verify_data_matches_the_rfc_8448_client_vector() {
         let client_hs_traffic_secret = from_hex(

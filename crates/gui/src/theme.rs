@@ -1,14 +1,7 @@
-//! Выбор темы кита и её сохранение между запусками.
+//! Тема кита и её сохранение между запусками.
 //!
-//! Тема хранится в отдельном маленьком файле, а не в общих настройках, и
-//! читается **до** того, как окно свяжется с демоном. Причина простая: демон
-//! может быть не запущен, а окно всё равно должно открыться в той теме, в
-//! которой его закрыли, — иначе каждый запуск начинается со вспышки чужого
-//! цвета.
-//!
-//! В общих настройках тема тоже есть: тот же профиль на другой машине должен
-//! выглядеть так же. Расхождение разрешается в пользу локального файла — он
-//! отражает последний выбор именно на этой машине.
+//! Хранится в отдельном файле и читается до связи с демоном: окно открывается в
+//! последней теме на этой машине, даже если демона нет.
 
 use std::path::PathBuf;
 
@@ -17,10 +10,7 @@ use uikit::ThemeType;
 /// Имя файла с темой.
 const THEME_FILE: &str = "theme.json";
 
-/// Читает сохранённую тему.
-///
-/// Любая неудача — отсутствие файла, испорченное содержимое, нет прав —
-/// молча даёт умолчание: падать при запуске из-за темы недопустимо.
+/// Читает сохранённую тему; любая неудача даёт умолчание, падать из-за темы нельзя.
 pub fn load() -> ThemeType {
     let Some(path) = theme_path() else {
         return ThemeType::default();
@@ -43,11 +33,7 @@ pub fn save(theme: ThemeType) {
     let _ = std::fs::write(path, to_name(theme));
 }
 
-/// Имя темы в файле.
-///
-/// Своё, а не производное от `Debug`: производное менялось бы вместе с
-/// именами вариантов в ките, и файл, записанный старой версией, перестал бы
-/// читаться.
+/// Имя темы в файле: своё, не `Debug` — тот менялся бы вместе с вариантами кита.
 pub fn to_name(theme: ThemeType) -> &'static str {
     match theme {
         ThemeType::LightBlue => "light-blue",
@@ -58,7 +44,7 @@ pub fn to_name(theme: ThemeType) -> &'static str {
     }
 }
 
-/// Тема по имени.
+/// Тема по имени; незнакомое (файл новой версии) — умолчание.
 pub fn from_name(name: &str) -> ThemeType {
     match name {
         "light-blue" => ThemeType::LightBlue,
@@ -66,13 +52,10 @@ pub fn from_name(name: &str) -> ThemeType {
         "light-orange" => ThemeType::LightOrange,
         "light-purple" => ThemeType::LightPurple,
         "dark" => ThemeType::Dark,
-        // Незнакомое имя — файл от более новой версии. Умолчание лучше, чем
-        // отказ запускаться.
         _ => ThemeType::default(),
     }
 }
 
-/// Где лежит файл темы.
 fn theme_path() -> Option<PathBuf> {
     penguin_config::Paths::user()
         .ok()
@@ -85,7 +68,6 @@ mod tests {
 
     #[test]
     fn every_theme_round_trips() {
-        // Имя в файле — контракт с самим собой между запусками.
         for theme in ThemeType::all().iter().copied() {
             assert_eq!(
                 from_name(to_name(theme)),
@@ -97,22 +79,18 @@ mod tests {
 
     #[test]
     fn unknown_name_falls_back_to_default() {
-        // Файл от более новой версии не повод отказаться запускаться.
         assert_eq!(from_name("радужная"), ThemeType::default());
         assert_eq!(from_name(""), ThemeType::default());
     }
 
     #[test]
     fn names_are_stable_and_readable() {
-        // Производное от `Debug` менялось бы вместе с именами вариантов в
-        // ките, и старый файл перестал бы читаться.
         assert_eq!(to_name(ThemeType::Dark), "dark");
         assert_eq!(to_name(ThemeType::LightBlue), "light-blue");
     }
 
     #[test]
     fn loading_never_panics() {
-        // Читается при запуске, до всего остального.
         let _ = load();
     }
 }

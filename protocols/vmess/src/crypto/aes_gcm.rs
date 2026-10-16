@@ -1,53 +1,43 @@
-//! AES-128-GCM для заголовка — не для тела.
-//!
-//! Заголовок запроса и ответа шифруется этим шифром **всегда**, независимо
-//! от того, какой шифр выбран для тела: и в опознавателе, и здесь эталон
-//! (`proxy/vmess/aead/encrypt.go`, `proxy/vmess/encoding/client.go`) зовёт
-//! `aes.NewCipher` и `cipher.NewGCM` без ветвления по `SecurityType`. Шифр
-//! тела — это [`crate::crypto::security::Wire`], и с этим модулем он не
-//! пересекается.
+//! AES-128-GCM заголовков: всегда, независимо от шифра тела.
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey};
 
 use crate::error::{VmessError, VmessResult};
 
-/// Шифрует `plain` под `key`/`nonce`, заверяя вдобавок `aad`.
-///
-/// Возвращает шифротекст с дописанной шестнадцатибайтовой меткой.
+fn key_of(key: &[u8; 16]) -> VmessResult<LessSafeKey> {
+    UnboundKey::new(&ring::aead::AES_128_GCM, key)
+        .map(LessSafeKey::new)
+        .map_err(|_| VmessError::malformed("ключ заголовка не той длины"))
+}
+
+/// Шифрует `plain`, заверяя `aad`; метка дописана в конец.
 pub fn seal(key: &[u8; 16], nonce: &[u8; 12], aad: &[u8], plain: &[u8]) -> VmessResult<Vec<u8>> {
-    let unbound = UnboundKey::new(&ring::aead::AES_128_GCM, key)
-        .map_err(|_| VmessError::malformed("ключ заголовка не той длины"))?;
-    let key = LessSafeKey::new(unbound);
-    let mut buffer = plain.to_vec();
-    key.seal_in_place_append_tag(
-        Nonce::assume_unique_for_key(*nonce),
-        Aad::from(aad),
-        &mut buffer,
-    )
-    .map_err(|_| VmessError::malformed("заголовок не зашифровался"))?;
+    let mut buffer = Vec::with_capacity(plain.len() + 16);
+    buffer.extend_from_slice(plain);
+    key_of(key)?
+        .seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(*nonce),
+            Aad::from(aad),
+            &mut buffer,
+        )
+        .map_err(|_| VmessError::malformed("заголовок не зашифровался"))?;
     Ok(buffer)
 }
 
-/// Расшифровывает `ciphertext_and_tag` на месте, заверяя `aad`.
-///
-/// `Err` — метка не сошлась: ключи разошлись или данные испорчены по
-/// дороге. И то и другое — не "мусор", а прямой признак того, что сервер
-/// отвечает не тем, о чём договаривались.
+/// Расшифровывает на месте; `Err` — метка не сошлась.
 pub fn open<'a>(
     key: &[u8; 16],
     nonce: &[u8; 12],
     aad: &[u8],
     ciphertext_and_tag: &'a mut [u8],
 ) -> VmessResult<&'a mut [u8]> {
-    let unbound = UnboundKey::new(&ring::aead::AES_128_GCM, key)
-        .map_err(|_| VmessError::malformed("ключ заголовка не той длины"))?;
-    let key = LessSafeKey::new(unbound);
-    key.open_in_place(
-        Nonce::assume_unique_for_key(*nonce),
-        Aad::from(aad),
-        ciphertext_and_tag,
-    )
-    .map_err(|_| VmessError::malformed("заголовок не расшифровался: метка не сошлась"))
+    key_of(key)?
+        .open_in_place(
+            Nonce::assume_unique_for_key(*nonce),
+            Aad::from(aad),
+            ciphertext_and_tag,
+        )
+        .map_err(|_| VmessError::malformed("заголовок не расшифровался: метка не сошлась"))
 }
 
 #[cfg(test)]

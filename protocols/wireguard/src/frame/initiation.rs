@@ -1,24 +1,7 @@
-//! Сообщение рукопожатия «инициатор → ответчик» (тип 1).
-//!
-//! ```text
-//! ┌──────┬─────────┬───────────┬────────────┬──────────────┬──────┬──────┐
-//! │ тип  │ резерв  │ отправитель│ эфемерный  │ статический  │ метка│ метка│
-//! │ (1)  │ (3)     │ (4)        │ (32)       │ +метка (48)  │ врем.│ mac1 │
-//! │      │         │            │            │              │+тег  │ (16) │
-//! │      │         │            │            │              │(28)  │      │
-//! └──────┴─────────┴───────────┴────────────┴──────────────┴──────┴──────┘
-//!                                                                    + mac2 (16)
-//! ```
-//!
-//! Итого 148 байт ([`INITIATION_MESSAGE_LEN`]). Источник раскладки:
-//! `MessageInitiation` и его `marshal`/`unmarshal` в
-//! `device/noise-protocol.go` (`wireguard-go`) — поля идут именно в этом
-//! порядке и именно этой длины, включая то, что `Type` и `Sender` вместе
-//! образуют первые восемь байт, а не единое поле.
-//!
-//! `mac1` и `mac2` — не часть переговоров о ключе, а защита ответчика от
-//! перегрузки. Их считает и проверяет `crate::crypto::handshake`; этот файл
-//! только знает, где в байтах их место.
+//! Инициация (тип 1), 148 байт ([`INITIATION_MESSAGE_LEN`]): тип 1, резерв 3,
+//! отправитель 4, эфемерный 32, статический+метка 48, время+метка 28, mac1 16, mac2 16
+//! (`MessageInitiation` в `device/noise-protocol.go`). Только раскладка;
+//! MAC считает `crate::crypto::handshake`.
 
 use crate::crypto::constants::INITIATION_MESSAGE_LEN;
 use crate::crypto::constants::MESSAGE_INITIATION;
@@ -37,11 +20,9 @@ const STATIC_CIPHERTEXT_LEN: usize = 48;
 const TIMESTAMP_CIPHERTEXT_LEN: usize = 28;
 const MAC_LEN: usize = 16;
 
-/// Поля сообщения, уже готовые лечь на провод (шифрование и MAC посчитаны
-/// раньше, здесь только раскладка).
+/// Поля сообщения, готовые лечь на провод.
 pub struct InitiationFields {
-    /// Индекс, под которым отправитель будет узнавать себя как получателя
-    /// ответа. Случайный, лишь бы не совпал с уже занятым локально.
+    /// Случайный индекс отправителя.
     pub sender_index: u32,
     /// Открытый эфемерный ключ этого рукопожатия.
     pub ephemeral_public: [u8; EPHEMERAL_LEN],
@@ -51,13 +32,8 @@ pub struct InitiationFields {
     pub timestamp_ciphertext: [u8; TIMESTAMP_CIPHERTEXT_LEN],
 }
 
-/// Собирает сообщение целиком, кроме `mac1`/`mac2` — они считаются уже над
-/// готовыми байтами и дописываются вызывающей стороной ([`set_mac1`]).
-/// `mac2` остаётся нулём: crate cookie-ответы не запрашивает.
-///
-/// `reserved` — три байта после типа сообщения. У обычного клиента это
-/// нули; ненулевые нужны только там, где сервер сам их проверяет как способ
-/// отличить свой трафик (см. `crate::config::WireguardConfig::reserved`).
+/// Собирает сообщение без `mac1` ([`set_mac1`]); `mac2` остаётся нулём.
+/// `reserved` - три байта после типа (`crate::config::WireguardConfig::reserved`).
 pub fn encode(fields: &InitiationFields, reserved: [u8; 3]) -> [u8; INITIATION_MESSAGE_LEN] {
     let mut out = [0u8; INITIATION_MESSAGE_LEN];
     out[OFF_TYPE] = MESSAGE_INITIATION;
@@ -84,10 +60,7 @@ pub fn set_mac1(message: &mut [u8; INITIATION_MESSAGE_LEN], mac1: [u8; MAC_LEN])
     message[OFF_MAC1..OFF_MAC2].copy_from_slice(&mac1);
 }
 
-/// Разбирает сообщение с провода.
-///
-/// Не проверяет ни `mac1`, ни расшифровку — только форму. Остальное делает
-/// `crate::crypto::handshake`, у которого для этого есть ключи.
+/// Разбирает сообщение с провода, проверяя только форму.
 pub fn parse(bytes: &[u8]) -> WireguardResult<InitiationFields> {
     if bytes.len() != INITIATION_MESSAGE_LEN {
         return Err(WireguardError::malformed(format!(
@@ -176,7 +149,6 @@ mod tests {
         set_mac1(&mut encoded, [0xEE; MAC_LEN]);
         assert_eq!(mac1_covered(&encoded), before.as_slice());
         assert_eq!(&encoded[116..132], &[0xEE; MAC_LEN]);
-        // mac2 остаётся нулевым: crate cookie не запрашивает.
         assert_eq!(&encoded[132..148], &[0u8; MAC_LEN]);
     }
 

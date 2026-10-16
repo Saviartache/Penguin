@@ -1,15 +1,11 @@
-//! Задача-водитель: один сокет, один сеанс, три таймера.
-//!
-//! Всё, что меняет ключи или счётчики, происходит здесь и только здесь —
-//! `send`/`recv` лишь передают байты через каналы (`super`). Это не
-//! оптимизация, а способ не заводить `Mutex` вокруг сеанса: обновление
-//! рукопожатия само может прийти в любой момент, и делить состояние между
-//! задачей-водителем и вызывающими значило бы решать, кто кого ждёт.
+//! Задача-водитель: единственный владелец сокета и сеанса (без `Mutex`);
+//! `send`/`recv` передают байты через каналы.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use penguin_proto::random;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
@@ -20,19 +16,15 @@ use crate::crypto::constants::{
 use crate::crypto::handshake::{PendingHandshake, StaticKeys, consume_response, create_initiation};
 use crate::crypto::session::Session;
 use crate::error::WireguardResult;
-use crate::frame::{response, transport};
+use crate::frame::response;
 
-/// Самый крупный пакет, который стоит принимать одним чтением сокета.
-///
-/// С запасом больше любого MTU из настроек: датаграмма длиннее всё равно не
-/// от WireGuard, и её стоит прочитать целиком, чтобы не оставить хвост в
-/// сокете, а не отбросить середину пакета.
+/// Буфер одного чтения сокета: с запасом больше любого MTU.
 const RECV_BUFFER_LEN: usize = 2048;
 
-/// Всё, что нужно задаче-водителю, чтобы начать работу.
-///
-/// Отдельная структура вместо длинного списка аргументов `tokio::spawn` —
-/// тот и так превращает сигнатуру в одну строку без переносов.
+/// Не будить задачу чаще, чем раз в это время.
+const MIN_WAKE: Duration = Duration::from_secs(1);
+
+/// Всё, что нужно задаче-водителю.
 pub(super) struct Handles {
     pub socket: Arc<UdpSocket>,
     pub static_keys: Arc<StaticKeys>,
@@ -47,19 +39,20 @@ pub(super) struct Handles {
 /// Незавершённая попытка обновить рукопожатие.
 struct RekeyAttempt {
     pending: PendingHandshake,
-    /// Когда эта попытка (первая из серии повторов) была начата — предел
-    /// для всей серии — [`REKEY_ATTEMPT_TIME`].
+    /// Начало серии повторов; предел серии - [`REKEY_ATTEMPT_TIME`].
     first_sent_at: Instant,
-    /// Когда сообщение инициации отправлялось в последний раз.
     last_sent_at: Instant,
-    /// Через сколько после `last_sent_at` стоит повторить, если ответа нет.
+    /// Через сколько после `last_sent_at` повторить, если ответа нет.
     retry_after: Duration,
 }
 
-/// Проводит рукопожатие с нуля, повторяя инициацию, пока сервер не ответит.
-///
-/// Вызывается один раз при подключении — до того, как появится сеанс,
-/// который стоило бы делить с задачей-водителем.
+impl RekeyAttempt {
+    fn next_due(&self) -> Instant {
+        (self.last_sent_at + self.retry_after).min(self.first_sent_at + REKEY_ATTEMPT_TIME)
+    }
+}
+
+/// Рукопожатие с нуля: инициация повторяется, пока сервер не ответит.
 pub(super) async fn initial_handshake(
     socket: &UdpSocket,
     keys: &StaticKeys,
@@ -71,22 +64,19 @@ pub(super) async fn initial_handshake(
         socket.send(&message).await?;
 
         let timeout = REKEY_TIMEOUT + jitter();
-        let response = tokio::time::timeout(timeout, wait_for_response(socket, &mut buf)).await;
-        match response {
-            Ok(Ok(len)) => match consume_response(keys, pending, &buf[..len]) {
-                Ok(keys_out) => return Ok(Session::new(keys_out)),
-                // Не наш ответ или испорчен — начинаем инициацию заново,
-                // а не пытаемся угадать, что не так с этим одним пакетом.
-                Err(_) => continue,
-            },
+        match tokio::time::timeout(timeout, wait_for_response(socket, &mut buf)).await {
+            Ok(Ok(len)) => {
+                if let Ok(keys_out) = consume_response(keys, pending, &buf[..len]) {
+                    return Ok(Session::new(keys_out));
+                }
+            }
             Ok(Err(io_error)) => return Err(io_error.into()),
-            Err(_elapsed) => continue,
+            Err(_elapsed) => {}
         }
     }
 }
 
-/// Ждёт первый пакет с типом «ответ на рукопожатие», отбрасывая всё прочее
-/// (cookie-ответ, случайный мусор) молча.
+/// Ждёт пакет «ответ на рукопожатие», остальное отбрасывает.
 async fn wait_for_response(socket: &UdpSocket, buf: &mut [u8]) -> std::io::Result<usize> {
     loop {
         let len = socket.recv(buf).await?;
@@ -96,14 +86,12 @@ async fn wait_for_response(socket: &UdpSocket, buf: &mut [u8]) -> std::io::Resul
     }
 }
 
-/// Случайный сдвиг к сроку повтора, чтобы не долбить сервер ровно по
-/// расписанию (см. `REKEY_TIMEOUT_JITTER_MAX_MS`).
+/// Сдвиг срока повтора (`REKEY_TIMEOUT_JITTER_MAX_MS`).
 fn jitter() -> Duration {
-    Duration::from_millis(rand::random::<u64>() % REKEY_TIMEOUT_JITTER_MAX_MS)
+    Duration::from_millis(random::range(0..REKEY_TIMEOUT_JITTER_MAX_MS))
 }
 
-/// Основной цикл направления: живёт, пока не попросят закрыться или пока
-/// сокет не откажет фатально.
+/// Основной цикл: до команды закрытия или фатальной ошибки сокета.
 pub(super) async fn run(handles: Handles) {
     let Handles {
         socket,
@@ -117,9 +105,12 @@ pub(super) async fn run(handles: Handles) {
     } = handles;
 
     let mut recv_buf = vec![0u8; RECV_BUFFER_LEN];
+    let mut send_buf = Vec::with_capacity(RECV_BUFFER_LEN);
     let mut rekey: Option<RekeyAttempt> = None;
     let mut last_sent_data = Instant::now();
-    let mut ticker = tokio::time::interval(Duration::from_secs(1));
+    let timer =
+        tokio::time::sleep_until(wake_at(&session, &rekey, keepalive, last_sent_data).into());
+    tokio::pin!(timer);
 
     loop {
         tokio::select! {
@@ -131,30 +122,21 @@ pub(super) async fn run(handles: Handles) {
             }
 
             outgoing = outbound_rx.recv() => {
-                let Some(packet) = outgoing else {
-                    // `WireguardOutbound` вместе с отправителем канала ушёл —
-                    // держать сокет открытым больше не для кого.
+                let Some(packet) = outgoing else { break };
+                if let Err(error) = session.seal_packet(reserved, &packet, &mut send_buf) {
+                    tracing::warn!(%error, "сеанс WireGuard не может больше шифровать — направление закрывается");
                     break;
-                };
-                match session.encrypt(&packet) {
-                    Ok((counter, ciphertext)) => {
-                        let datagram = seal_transport(&session, reserved, counter, ciphertext);
-                        if socket.send(&datagram).await.is_err() {
-                            break;
-                        }
-                        last_sent_data = Instant::now();
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "сеанс WireGuard не может больше шифровать — направление закрывается");
-                        break;
-                    }
                 }
+                if socket.send(&send_buf).await.is_err() {
+                    break;
+                }
+                last_sent_data = Instant::now();
             }
 
             incoming = socket.recv(&mut recv_buf) => {
-                let Ok(len) = incoming else { break; };
+                let Ok(len) = incoming else { break };
                 if !handle_datagram(
-                    &recv_buf[..len],
+                    &mut recv_buf[..len],
                     &static_keys,
                     &mut session,
                     &mut rekey,
@@ -164,32 +146,46 @@ pub(super) async fn run(handles: Handles) {
                 }
             }
 
-            _ = ticker.tick() => {
+            () = &mut timer => {
                 if session.is_expired() {
                     tracing::warn!(age = ?session.age(), "сеанс WireGuard истёк без обновления рукопожатия");
                     break;
                 }
-
-                advance_rekey(&socket, &static_keys, reserved, &mut session, &mut rekey).await;
-
+                advance_rekey(&socket, &static_keys, reserved, &session, &mut rekey).await;
                 if let Some(interval) = keepalive
                     && last_sent_data.elapsed() >= interval
                 {
-                    send_keepalive(&socket, reserved, &mut session, &mut last_sent_data).await;
+                    send_keepalive(&socket, reserved, &mut session, &mut send_buf, &mut last_sent_data).await;
                 }
+                timer.as_mut().reset(wake_at(&session, &rekey, keepalive, last_sent_data).into());
             }
         }
     }
 }
 
-/// Разбирает один входящий датаграм и отвечает на него по типу сообщения.
-///
-/// Возвращает `false`, когда получатель канала к `recv()` ушёл — это
-/// единственная причина остановить всю задачу отсюда: любая другая
-/// неожиданность (испорченный пакет, чужой mac1, cookie-ответ) отбрасывается
-/// молча и не должна ронять уже работающий тоннель.
+/// Ближайший момент, когда таймеру есть что делать.
+fn wake_at(
+    session: &Session,
+    rekey: &Option<RekeyAttempt>,
+    keepalive: Option<Duration>,
+    last_sent_data: Instant,
+) -> Instant {
+    let mut due = session.expires_at();
+    due = due.min(
+        rekey
+            .as_ref()
+            .map_or_else(|| session.rekey_at(), RekeyAttempt::next_due),
+    );
+    if let Some(interval) = keepalive {
+        due = due.min(last_sent_data + interval);
+    }
+    due.max(Instant::now() + MIN_WAKE)
+}
+
+/// Разбирает входящую датаграмму; `false` - получатель `recv()` ушёл, задачу пора
+/// остановить. Остальное постороннее отбрасывается молча.
 async fn handle_datagram(
-    datagram: &[u8],
+    datagram: &mut [u8],
     static_keys: &StaticKeys,
     session: &mut Session,
     rekey: &mut Option<RekeyAttempt>,
@@ -197,21 +193,15 @@ async fn handle_datagram(
 ) -> bool {
     match datagram.first().copied() {
         Some(MESSAGE_TRANSPORT_DATA) => {
-            let Ok((header, ciphertext)) = transport::split(datagram) else {
+            let Ok(plaintext) = session.open_packet(datagram) else {
                 return true;
             };
-            if header.receiver_index != session.local_index {
-                return true;
-            }
-            let Ok(plaintext) = session.decrypt(header.counter, ciphertext) else {
-                return true;
-            };
-            if plaintext.is_empty() {
-                // Пустой открытый текст — подтверждение (keepalive) сервера,
-                // а не данные приложения.
-                return true;
-            }
-            inbound_tx.send(Bytes::from(plaintext)).await.is_ok()
+            // Пустой пакет - keepalive сервера.
+            plaintext.is_empty()
+                || inbound_tx
+                    .send(Bytes::copy_from_slice(plaintext))
+                    .await
+                    .is_ok()
         }
         Some(MESSAGE_RESPONSE) => {
             if let Some(attempt) = rekey.take() {
@@ -224,64 +214,41 @@ async fn handle_datagram(
                             }
                         }
                     }
-                    // Не наш ответ (индекс не совпал) или не разобрался —
-                    // возвращаем попытку на место и ждём настоящий ответ.
                     _ => *rekey = Some(attempt),
                 }
             }
             true
         }
         Some(MESSAGE_COOKIE_REPLY) => {
-            tracing::debug!(
-                "сервер прислал cookie-ответ: он под нагрузкой, а cookie-протокол не реализован"
-            );
+            tracing::debug!("сервер прислал cookie-ответ: cookie-протокол не реализован");
             true
         }
         _ => true,
     }
 }
 
-/// Продвигает состояние обновления рукопожатия на один тик таймера: либо
-/// начинает новую попытку, либо повторяет незавершённую, либо сдаётся на
-/// этот раз, оставляя старый сеанс работать до истечения его собственного
-/// срока.
+/// Отправляет инициацию; `Some` - она ушла.
+async fn initiate(
+    socket: &UdpSocket,
+    static_keys: &StaticKeys,
+    reserved: [u8; 3],
+) -> Option<PendingHandshake> {
+    let (message, pending) = create_initiation(static_keys, reserved);
+    socket.send(&message).await.ok().map(|_| pending)
+}
+
+/// Шаг обновления рукопожатия: начать, повторить или сдаться до следующего круга.
 async fn advance_rekey(
     socket: &UdpSocket,
     static_keys: &StaticKeys,
     reserved: [u8; 3],
-    session: &mut Session,
+    session: &Session,
     rekey: &mut Option<RekeyAttempt>,
 ) {
-    if let Some(attempt) = rekey.take() {
-        let now = Instant::now();
-        if now.duration_since(attempt.first_sent_at) > REKEY_ATTEMPT_TIME {
-            tracing::warn!(
-                "не удалось обновить рукопожатие WireGuard за {REKEY_ATTEMPT_TIME:?} — \
-                 сеанс продолжает работать на старых ключах до собственного срока"
-            );
-            // Оставляем `*rekey = None`: следующая проверка `needs_rekey`
-            // (сеанс всё ещё не обновлён) запустит новую серию попыток сама.
-        } else if now.duration_since(attempt.last_sent_at) >= attempt.retry_after {
-            let (message, pending) = create_initiation(static_keys, reserved);
-            if socket.send(&message).await.is_ok() {
-                *rekey = Some(RekeyAttempt {
-                    pending,
-                    first_sent_at: attempt.first_sent_at,
-                    last_sent_at: now,
-                    retry_after: REKEY_TIMEOUT + jitter(),
-                });
-            } else {
-                *rekey = Some(attempt);
-            }
-        } else {
-            *rekey = Some(attempt);
-        }
-        return;
-    }
-
-    if session.needs_rekey() {
-        let (message, pending) = create_initiation(static_keys, reserved);
-        if socket.send(&message).await.is_ok() {
+    let Some(attempt) = rekey.take() else {
+        if session.needs_rekey()
+            && let Some(pending) = initiate(socket, static_keys, reserved).await
+        {
             let now = Instant::now();
             *rekey = Some(RekeyAttempt {
                 pending,
@@ -290,36 +257,40 @@ async fn advance_rekey(
                 retry_after: REKEY_TIMEOUT + jitter(),
             });
         }
+        return;
+    };
+
+    let now = Instant::now();
+    if now.duration_since(attempt.first_sent_at) > REKEY_ATTEMPT_TIME {
+        tracing::warn!(
+            "не удалось обновить рукопожатие WireGuard за {REKEY_ATTEMPT_TIME:?}, сеанс работает на старых ключах"
+        );
+        return;
     }
+    if now.duration_since(attempt.last_sent_at) < attempt.retry_after {
+        *rekey = Some(attempt);
+        return;
+    }
+    *rekey = Some(match initiate(socket, static_keys, reserved).await {
+        Some(pending) => RekeyAttempt {
+            pending,
+            first_sent_at: attempt.first_sent_at,
+            last_sent_at: now,
+            retry_after: REKEY_TIMEOUT + jitter(),
+        },
+        None => attempt,
+    });
 }
 
-/// Шлёт пустой пакет-подтверждение — единственный способ напомнить о себе
-/// шлюзу NAT, когда приложения давно молчат.
+/// Пустой пакет: напоминает NAT о себе, когда приложения молчат.
 async fn send_keepalive(
     socket: &UdpSocket,
     reserved: [u8; 3],
     session: &mut Session,
+    buf: &mut Vec<u8>,
     last_sent_data: &mut Instant,
 ) {
-    let Ok((counter, ciphertext)) = session.encrypt(&[]) else {
-        return;
-    };
-    let datagram = seal_transport(session, reserved, counter, ciphertext);
-    if socket.send(&datagram).await.is_ok() {
+    if session.seal_packet(reserved, &[], buf).is_ok() && socket.send(buf).await.is_ok() {
         *last_sent_data = Instant::now();
     }
-}
-
-/// Собирает готовый датаграм пакета данных: заголовок плюс шифротекст.
-fn seal_transport(
-    session: &Session,
-    reserved: [u8; 3],
-    counter: u64,
-    ciphertext: Vec<u8>,
-) -> Vec<u8> {
-    let header = transport::TransportHeader {
-        receiver_index: session.remote_index,
-        counter,
-    };
-    transport::build(&header, reserved, &ciphertext)
 }

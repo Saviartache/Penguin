@@ -9,10 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::constants::{DEFAULT_KEEPALIVE_SECS, DEFAULT_MTU, KEY_LEN, MAX_KEEPALIVE_SECS};
 use crate::error::{WireguardError, WireguardResult};
 
-/// Настройки подключения к серверу WireGuard.
-///
-/// В отличие от потоковых протоколов этого плана, здесь нет ни TLS, ни
-/// пароля: подлинность и секретность даёт сама пара ключей X25519.
+/// Настройки подключения к серверу WireGuard (подлинность даёт пара ключей X25519).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireguardConfig {
@@ -20,21 +17,12 @@ pub struct WireguardConfig {
     pub server: SocketAddress,
 
     /// Собственный приватный ключ, base64, 32 байта.
-    ///
-    /// В `Debug` не попадает — за этим следит вывод ниже (`AGENTS.md` §5.2).
     pub private_key: String,
 
     /// Открытый ключ сервера, base64, 32 байта.
-    ///
-    /// Не секрет сам по себе, но в `Debug` тоже скрыт — рядом с приватным его
-    /// проще не печатать вовсе, чем гадать на ревью, какое поле безопасно.
     pub server_public_key: String,
 
-    /// Предварительный ключ (`PresharedKey`), base64, 32 байта.
-    ///
-    /// Необязателен: спецификация всё равно смешивает его в рукопожатие
-    /// (модификатор `psk2`), а незаданный ключ — это все нули, обычное
-    /// поведение `wg(8)`, а не заглушка этого крейта.
+    /// Предварительный ключ, base64, 32 байта; незаданный - нули (как в `wg(8)`).
     #[serde(default)]
     pub preshared_key: Option<String>,
 
@@ -45,41 +33,22 @@ pub struct WireguardConfig {
     #[serde(default)]
     pub address_ipv6: Option<String>,
 
-    /// Наибольший пакет, который направление берёт целиком.
-    ///
-    /// По умолчанию 1420 — 1500 внешних минус заголовки IP/UDP/WireGuard
-    /// (см. `crate::crypto::constants::DEFAULT_MTU`).
+    /// Наибольший пакет (по умолчанию 1420, `crate::crypto::constants::DEFAULT_MTU`).
     #[serde(default = "default_mtu")]
     pub mtu: u16,
 
-    /// Серверы имён внутри тоннеля — строка `DNS` из файла `wg-quick`.
-    ///
-    /// Задаётся в настройках, а не приходит от сервера: у WireGuard нет
-    /// разговора, в котором сервер что-то рассказывает о себе. Пустой список
-    /// означает, что доменные имена через это направление не разрешить —
-    /// см. [`penguin_proto::packet::PacketInterface::dns`].
-    ///
-    /// Принимается и списком, и строкой через запятую — так эту же настройку
-    /// пишет сам `wg-quick` (`DNS = 1.1.1.1, 8.8.8.8`), и так её набирает
-    /// человек в окне.
+    /// Серверы имён в тоннеле (`DNS` из `wg-quick`): списком или строкой через запятую.
+    /// Пусто - имена через направление не разрешить
+    /// ([`penguin_proto::packet::PacketInterface::dns`]).
     #[serde(default, deserialize_with = "deserialize_dns")]
     pub dns: Vec<std::net::IpAddr>,
 
-    /// Интервал `PersistentKeepalive` в секундах. Ноль — выключен.
-    ///
-    /// За NAT без него шлюз забывает отображение адреса через минуту-другую,
-    /// и путь назад пропадает молча — соединение выглядит оборванным без
-    /// единой ошибки. По умолчанию 25 — то же значение, что `wg(8)` называет
-    /// разумным для интерфейса за NAT.
+    /// `PersistentKeepalive` в секундах (по умолчанию 25), ноль - выключен.
     #[serde(default = "default_keepalive_secs")]
     pub keepalive_secs: u32,
 
-    /// Три зарезервированных байта заголовка (после байта типа сообщения).
-    ///
-    /// У обычного WireGuard они всегда нулевые. Ненулевые нужны только там,
-    /// где сервер сам их проверяет как метку своего трафика поверх обычного
-    /// протокола, — настройка существует ради совместимости с такими
-    /// серверами, а не ради самого клиента.
+    /// Три зарезервированных байта заголовка после типа; ненулевые - для серверов,
+    /// которые метят ими свой трафик.
     #[serde(default)]
     pub reserved: [u8; 3],
 }
@@ -94,16 +63,7 @@ const fn default_keepalive_secs() -> u32 {
     DEFAULT_KEEPALIVE_SECS
 }
 
-/// Читает [`WireguardConfig::dns`] и списком, и строкой через запятую.
-///
-/// Строка — потому что так эту настройку пишет `wg-quick` и так её набирает
-/// человек в окне; список — потому что так её удобно писать в TOML и JSON.
-/// Разбирать одно, а принимать другое значило бы заставить человека узнать,
-/// какой из двух видов «правильный».
-///
-/// Неразборчивый адрес — ошибка, а не пропуск: молча выброшенный сервер имён
-/// означает тоннель, в котором имена перестали разрешаться, и искать причину
-/// человек будет где угодно, только не в запятой.
+/// Читает [`WireguardConfig::dns`] списком или строкой; неверный адрес - ошибка, не пропуск.
 fn deserialize_dns<'de, D>(deserializer: D) -> Result<Vec<std::net::IpAddr>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -132,9 +92,7 @@ where
     }
 }
 
-// Написано руками, а не выведено: производный `Default` дал бы `mtu: 0` и
-// `keepalive_secs: 0`, то есть настройки, собранные в коде, вели бы себя не
-// так, как ровно те же настройки, прочитанные из файла.
+// Вручную: производный `Default` дал бы `mtu: 0` и `keepalive_secs: 0`.
 impl Default for WireguardConfig {
     fn default() -> Self {
         Self {
@@ -246,7 +204,7 @@ fn split_prefix<'a>(raw: &'a str, what: &'static str) -> WireguardResult<(&'a st
     Ok((addr, prefix))
 }
 
-// Ключи не должны попасть в журнал ни целиком, ни частями (`AGENTS.md` §5.2).
+// Ключи скрыты (`AGENTS.md` §5.2).
 impl std::fmt::Debug for WireguardConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WireguardConfig")
@@ -272,8 +230,7 @@ mod tests {
 
     use super::*;
 
-    /// 32 нулевых байта в base64 — сгодится для полей, где важна только
-    /// длина, не значение.
+    /// 32 нулевых байта в base64.
     const ZERO_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
     fn config() -> WireguardConfig {
@@ -299,9 +256,6 @@ mod tests {
 
     #[test]
     fn the_name_servers_are_read_both_as_a_list_and_as_a_line() {
-        // Списком их удобно писать в файле, строкой через запятую — их пишет
-        // `wg-quick` и набирает человек в окне. Принимать надо оба вида:
-        // иначе человеку придётся узнать, какой из них «правильный».
         let expected: Vec<std::net::IpAddr> = vec![
             "1.1.1.1".parse().expect("адрес"),
             "8.8.8.8".parse().expect("адрес"),
@@ -322,17 +276,12 @@ mod tests {
 
     #[test]
     fn a_misspelled_name_server_is_refused_instead_of_dropped() {
-        // Молча выброшенный сервер имён означает тоннель, в котором имена
-        // перестали разрешаться, и причину человек будет искать где угодно,
-        // только не в запятой.
         let error = with_dns(json!("1.1.1.1, 8.8.8")).expect_err("адрес неверен");
         assert!(error.to_string().contains("8.8.8"), "{error}");
     }
 
     #[test]
     fn without_name_servers_the_list_is_empty_not_absent() {
-        // Поле необязательное: тоннель без сервера имён работает, просто
-        // доменные имена через него не разрешить.
         assert!(config().dns.is_empty());
     }
 
@@ -427,7 +376,6 @@ mod tests {
 
     #[test]
     fn a_missing_preshared_key_decodes_to_all_zeros() {
-        // Обычное поведение `wg(8)`, а не заглушка этого крейта.
         assert_eq!(
             config().preshared_key_bytes().expect("разбирается"),
             [0u8; KEY_LEN]

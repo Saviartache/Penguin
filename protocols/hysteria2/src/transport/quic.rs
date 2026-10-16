@@ -48,8 +48,6 @@ pub async fn connect(
     let obfs = build_obfuscator(config);
     let hop = PortHopper::new(config.endpoint()?.ports, config.hop_interval());
 
-    // Локальный адрес того же семейства, что и удалённый: сокет IPv4 до
-    // сервера IPv6 не достучится.
     let local = match server.ip() {
         IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
         IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
@@ -77,7 +75,6 @@ pub async fn connect(
             Arc::new(quinn::TokioRuntime),
         )
     } else {
-        // Быстрый путь: обычный сокет quinn со всей аппаратной поддержкой.
         let std_socket = udp
             .into_std()
             .map_err(|e| Hysteria2Error::Quic(e.to_string()))?;
@@ -117,10 +114,6 @@ fn endpoint_config(obfs_overhead: usize) -> Hysteria2Result<EndpointConfig> {
     let mut endpoint_config = EndpointConfig::default();
 
     if obfs_overhead > 0 {
-        // Обфускация удлиняет пакет, а путевой MTU от этого не растёт. Если
-        // не уменьшить объявленный размер, пакет на выходе окажется больше
-        // MTU и начнёт дробиться маршрутизаторами — что для QUIC равносильно
-        // потере.
         let default = endpoint_config.get_max_udp_payload_size() as usize;
         let reduced = default.saturating_sub(obfs_overhead).max(1200) as u16;
         endpoint_config
@@ -133,9 +126,6 @@ fn endpoint_config(obfs_overhead: usize) -> Hysteria2Result<EndpointConfig> {
 
 /// Настройки клиента: TLS плюс параметры транспорта.
 fn client_config(config: &Hysteria2Config) -> Hysteria2Result<(ClientConfig, Option<BrutalRate>)> {
-    // ALPN — `h3` и только он: сервер Hysteria 2 обязан выглядеть обычным
-    // сервером HTTP/3, и любое другое значение выдало бы его первым же
-    // пакетом рукопожатия.
     let crypto = tls_client_config(&config.tls, &[ALPN_H3])?;
     let crypto = QuicClientConfig::try_from(crypto)
         .map_err(|e| Hysteria2Error::config(format!("TLS не годится для QUIC: {e}")))?;
@@ -160,9 +150,6 @@ fn transport_config(
             .map_err(|_| Hysteria2Error::config("слишком большой max_idle_timeout"))?,
     ));
 
-    // Проба живости нужна не только против разрыва по тишине: трансляция
-    // адресов у провайдера забывает соединение за десятки секунд, и после
-    // этого ответы сервера просто некуда доставить.
     transport.keep_alive_interval(Some(Duration::from_secs(quic.keep_alive_secs.max(1))));
 
     transport
@@ -170,14 +157,9 @@ fn transport_config(
     transport.receive_window(VarInt::from_u64(quic.conn_receive_window).unwrap_or(VarInt::MAX));
     transport.send_window(quic.conn_receive_window);
 
-    // UDP приложения едет датаграммами QUIC. Без буфера приёма quinn
-    // отказывается их принимать вовсе.
     transport.datagram_receive_buffer_size(Some(4 * 1024 * 1024));
     transport.datagram_send_buffer_size(4 * 1024 * 1024);
 
-    // Управление перегрузкой. Brutal работает, только когда скорость канала
-    // названа: держать заданную скорость, не зная её, невозможно. Без неё
-    // остаётся BBR — он хотя бы не рушится от потерь так, как Cubic.
     let brutal_rate = match config.bandwidth.up_bps()? {
         Some(bits) if bits > 0 => {
             let brutal = BrutalConfig::from_bits_per_second(bits);
@@ -239,7 +221,6 @@ mod tests {
 
     #[test]
     fn no_bandwidth_falls_back_to_bbr() {
-        // Держать заданную скорость, не зная её, невозможно.
         let (_, rate) = transport_config(&config()).expect("собирается");
         assert!(rate.is_none());
     }
@@ -252,7 +233,6 @@ mod tests {
         let obfuscated = endpoint_config(8)
             .expect("собирается")
             .get_max_udp_payload_size();
-        // Иначе обфусцированный пакет перестанет помещаться в путевой MTU.
         assert!(obfuscated < plain);
         assert!(obfuscated >= 1200, "нельзя опускаться ниже минимума QUIC");
     }

@@ -1,14 +1,5 @@
-//! Windows: таблицы соединений и путь по pid.
-//!
-//! Таблица соединений читается целиком — дешёвых способов спросить про один
-//! порт система не даёт. Поэтому она не читается на каждое соединение: снимок
-//! живёт короткое время, и все обращения за этот срок отвечаются из него.
-//!
-//! Срок жизни снимка — компромисс. Слишком долгий врёт: порт освободился и
-//! достался другому процессу. Слишком короткий возвращает нас к чтению всей
-//! таблицы на каждое соединение. Полсекунды — заметно меньше времени, за
-//! которое система переиспользует порт, и заметно больше пачки соединений,
-//! которую браузер открывает при загрузке страницы.
+//! Windows: таблицы соединений IP Helper и путь по pid. Снимок таблицы живёт
+//! 500 мс: дольше врёт, короче дорого.
 
 pub mod icon;
 pub mod path;
@@ -56,6 +47,14 @@ impl Snapshot {
         self.taken
             .is_some_and(|taken| now.duration_since(taken) < SNAPSHOT_TTL)
     }
+
+    fn refresh(&mut self, network: Network) {
+        self.entries = match network {
+            Network::Tcp => tcp_table::snapshot(),
+            Network::Udp => udp_table::snapshot(),
+        };
+        self.taken = Some(Instant::now());
+    }
 }
 
 impl WindowsResolver {
@@ -68,7 +67,7 @@ impl WindowsResolver {
         }
     }
 
-    /// Номер процесса, которому принадлежит локальный адрес.
+    /// Номер процесса-владельца; при промахе по несвежему снимку таблица перечитывается один раз.
     fn pid_of(&self, network: Network, local: SocketAddr) -> Option<u32> {
         let slot = match network {
             Network::Tcp => &self.tcp,
@@ -76,43 +75,24 @@ impl WindowsResolver {
         };
 
         let mut snapshot = slot.lock();
-        let now = Instant::now();
-        if !snapshot.is_fresh(now) {
-            snapshot.entries = match network {
-                Network::Tcp => tcp_table::snapshot(),
-                Network::Udp => udp_table::snapshot(),
-            };
-            snapshot.taken = Some(now);
+        let was_stale = !snapshot.is_fresh(Instant::now());
+        if was_stale {
+            snapshot.refresh(network);
         }
 
         if let Some(pid) = find(&snapshot.entries, local) {
             return Some(pid);
         }
-
-        // Соединение могло появиться уже после снимка. Один повторный заход
-        // со свежей таблицей — этого хватает: соединение, которого нет и в
-        // ней, скорее всего уже закрылось.
-        if snapshot
-            .taken
-            .is_some_and(|taken| now.duration_since(taken) > Duration::ZERO)
-        {
-            snapshot.entries = match network {
-                Network::Tcp => tcp_table::snapshot(),
-                Network::Udp => udp_table::snapshot(),
-            };
-            snapshot.taken = Some(Instant::now());
-            return find(&snapshot.entries, local);
+        if was_stale {
+            return None;
         }
 
-        None
+        snapshot.refresh(network);
+        find(&snapshot.entries, local)
     }
 }
 
-/// Ищет запись по локальному адресу.
-///
-/// Сначала точное совпадение адреса и порта, потом — только по порту.
-/// Второй заход нужен для сокетов, привязанных к `0.0.0.0` или `[::]`: система
-/// показывает их именно так, а соединение приходит с конкретного адреса.
+/// Ищет запись: точный адрес, затем порт сокета на `0.0.0.0`/`[::]` того же семейства.
 fn find(entries: &[Entry], local: SocketAddr) -> Option<u32> {
     if let Some(entry) = entries.iter().find(|entry| entry.local == local) {
         return Some(entry.pid);
@@ -154,7 +134,6 @@ mod tests {
 
     #[test]
     fn finds_the_owner_of_our_own_socket() {
-        // Сквозная проверка всей цепочки: сокет -> таблица -> pid -> путь.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("сокет");
         let local = listener.local_addr().expect("адрес");
 
@@ -174,18 +153,12 @@ mod tests {
     #[test]
     fn unknown_socket_has_no_owner() {
         let resolver = WindowsResolver::new();
-        // Порт, которого почти наверняка нет ни у кого.
         let local: SocketAddr = "127.0.0.1:1".parse().expect("адрес");
-        // Ответ может быть и `Some`, если кто-то и правда слушает первый порт;
-        // важно, что вызов не паникует и не виснет.
         let _ = resolver.owner_of(Network::Tcp, local);
     }
 
     #[test]
     fn wildcard_socket_is_matched_by_port() {
-        // Сокет на `0.0.0.0` система показывает именно так, а соединение
-        // приходит с конкретного адреса — без второго захода владелец
-        // не нашёлся бы.
         let entries = vec![Entry {
             local: "0.0.0.0:8080".parse().expect("адрес"),
             pid: 4242,

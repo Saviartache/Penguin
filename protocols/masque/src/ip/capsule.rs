@@ -1,7 +1,6 @@
 //! Капсулы согласования адреса и маршрута `CONNECT-IP` (RFC 9484, §4.7).
 //!
-//! Три капсулы, общий скелет `Type`/`Length`/`Value` из [`crate::capsule`],
-//! своё содержимое:
+//! Скелет `Type`/`Length`/`Value` — [`crate::capsule`]:
 //!
 //! ```text
 //!  Assigned Address / Requested Address {
@@ -19,16 +18,8 @@
 //!  }
 //! ```
 //!
-//! Отдельных тестовых векторов для этих капсул RFC не даёт (в отличие от
-//! варинта, RFC 9000 §16) — сверка ниже по формату из текста RFC и обратным
-//! проходом кодирование-разбор, так же, как у капсулы `DATAGRAM` в
-//! [`crate::capsule`].
-//!
-//! `ADDRESS_ASSIGN` и `ROUTE_ADVERTISEMENT` этот клиент только читает: он не
-//! ассоциирует адреса и не объявляет маршруты собеседнику (сетевое-к-сетевому
-//! пиринг, RFC 9484 §1, здесь не поддержан — клиент только удалённого
-//! доступа). Поэтому сборщики для них — `#[cfg(test)]`: у настоящего кода
-//! нет причины их звать, а тестам нужны байты для проверки разбора.
+//! Векторов в RFC нет: сверка по тексту и круговым проходом. Клиент только
+//! читает `ADDRESS_ASSIGN` и `ROUTE_ADVERTISEMENT`, их сборщики — `#[cfg(test)]`.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -45,9 +36,7 @@ pub(super) const CAPSULE_TYPE_ADDRESS_REQUEST: u64 = 0x02;
 /// Тип капсулы `ROUTE_ADVERTISEMENT` (RFC 9484, §4.7.3).
 pub(super) const CAPSULE_TYPE_ROUTE_ADVERTISEMENT: u64 = 0x03;
 
-/// Context ID полезной нагрузки IP-пакета (RFC 9484, §5) — то же
-/// зарезервированное значение `0`, что и у CONNECT-UDP ([`crate::capsule::CONTEXT_ID_UDP`]),
-/// но в пространстве имён потока `CONNECT-IP`, своём для каждого запроса.
+/// Context ID нагрузки IP-пакета (RFC 9484, §5).
 pub(super) const CONTEXT_ID_IP: u64 = 0;
 
 const IP_VERSION_4: u8 = 4;
@@ -56,12 +45,11 @@ const IP_VERSION_6: u8 = 6;
 /// Один назначенный сервером адрес (RFC 9484, Figure 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct AssignedAddress {
-    /// Идентификатор запроса, которому соответствует назначение; `0` — адрес
-    /// выдан без запроса.
+    /// Идентификатор запроса; `0` — выдан без запроса.
     pub request_id: u64,
     /// Назначенный адрес.
     pub address: IpAddr,
-    /// Длина префикса, в пределах которого можно указывать адрес источника.
+    /// Длина префикса.
     pub prefix_len: u8,
 }
 
@@ -140,9 +128,7 @@ fn take_request_id(buf: &mut Bytes) -> Result<u64, MasqueError> {
     varint::decode_prefix(buf).ok_or_else(truncated)
 }
 
-/// Собирает `ADDRESS_REQUEST`: клиент шлёт её, чтобы узнать свой адрес
-/// (RFC 9484, §4.7.2) — единственная из трёх капсул этого модуля, которую
-/// клиент отправляет по-настоящему (см. [`crate::ip::negotiate`]).
+/// Собирает `ADDRESS_REQUEST` (RFC 9484, §4.7.2) — единственную отправляемую капсулу.
 pub(super) fn encode_address_request(addresses: &[RequestedAddress]) -> Bytes {
     let mut value = BytesMut::new();
     for a in addresses {
@@ -171,13 +157,7 @@ pub(super) fn decode_address_assign(mut value: Bytes) -> Result<Vec<AssignedAddr
     Ok(out)
 }
 
-/// Разбирает значение капсулы `ADDRESS_REQUEST`.
-///
-/// Клиент этот разбор зовёт не на своём запросе, а на чужом: сервер вправе
-/// сам прислать `ADDRESS_REQUEST`, ожидая, что клиент назначит адрес ему
-/// (сетевое-к-сетевому пиринг, RFC 9484 §1) — здесь это не поддержано, и
-/// разбор нужен только затем, чтобы назвать в журнале, сколько адресов
-/// попросили, а не молчать (см. [`crate::ip::outbound`]).
+/// Разбирает чужой `ADDRESS_REQUEST` (поддержки нет, только запись в журнал).
 pub(super) fn decode_address_request(
     mut value: Bytes,
 ) -> Result<Vec<RequestedAddress>, MasqueError> {
@@ -219,10 +199,7 @@ pub(super) fn decode_route_advertisement(
 mod tests {
     use super::*;
 
-    /// Собирает `ADDRESS_ASSIGN` — тестовый двойник, симметричный
-    /// [`decode_address_assign`]. У настоящего кода нет причины назначать
-    /// адреса серверу (см. документ модуля), но круговой проход по-прежнему
-    /// проверяет, что разбор понимает именно тот формат, что описан в RFC.
+    /// Тестовый двойник [`decode_address_assign`].
     fn encode_address_assign_for_test(addresses: &[AssignedAddress]) -> Bytes {
         let mut value = BytesMut::new();
         for a in addresses {
@@ -234,8 +211,7 @@ mod tests {
         encode_capsule(CAPSULE_TYPE_ADDRESS_ASSIGN, &value)
     }
 
-    /// Собирает `ROUTE_ADVERTISEMENT` — тестовый двойник, симметричный
-    /// [`decode_route_advertisement`]; см. `encode_address_assign_for_test`.
+    /// Тестовый двойник [`decode_route_advertisement`].
     fn encode_route_advertisement_for_test(ranges: &[AddressRange]) -> Bytes {
         let mut value = BytesMut::new();
         for r in ranges {
@@ -247,8 +223,7 @@ mod tests {
         encode_capsule(CAPSULE_TYPE_ROUTE_ADVERTISEMENT, &value)
     }
 
-    /// Отделяет `Value` от заголовка `Type`/`Length` для тестов разбора:
-    /// сами `decode_*` работают уже над значением, без заголовка капсулы.
+    /// `Value` капсулы без заголовка.
     fn value_of(capsule: Bytes) -> Bytes {
         let mut reader = crate::capsule::CapsuleReader::new();
         reader.push(capsule);
@@ -285,7 +260,6 @@ mod tests {
 
     #[test]
     fn a_rejected_request_is_the_all_zero_max_prefix_pattern() {
-        // RFC 9484 §4.7.2: отказ — это 0.0.0.0/32 (или ::/128), а не ошибка.
         let rejected = AssignedAddress {
             request_id: 7,
             address: "0.0.0.0".parse().expect("адрес"),
@@ -322,10 +296,9 @@ mod tests {
 
     #[test]
     fn an_unknown_ip_version_is_reported_not_guessed() {
-        // Version = 5: RFC требует ровно 4 или 6, третьего не дано.
         let mut value = BytesMut::new();
-        varint::encode(1, &mut value); // request id
-        value.put_u8(5); // версия
+        varint::encode(1, &mut value);
+        value.put_u8(5);
         let err = decode_address_assign(value.freeze()).expect_err("версия неизвестна");
         assert!(err.to_string().contains("5"), "{err}");
     }
@@ -335,7 +308,7 @@ mod tests {
         let mut value = BytesMut::new();
         varint::encode(1, &mut value);
         value.put_u8(IP_VERSION_4);
-        value.put_slice(&[1, 2]); // адрес оборван на середине
+        value.put_slice(&[1, 2]);
         assert!(decode_address_assign(value.freeze()).is_err());
     }
 }

@@ -1,13 +1,7 @@
 //! Ошибки протокола.
 //!
-//! Различие между вариантами не косметическое: по нему `supervisor` решает,
-//! повторять ли попытку (`AGENTS.md` §4.2).
-//!
-//! Одного варианта здесь нет и быть не может — `AuthRejected`. Сервер AnyTLS
-//! на опознание не отвечает ничем: узнал отпечаток — открывает сессию, не
-//! узнал — закрывает соединение или отдаёт наши байты сайту, за который себя
-//! выдаёт. Со стороны клиента это выглядит оборванным соединением, и отличить
-//! его от оборванного соединения нельзя (см. документ крейта).
+//! По варианту `supervisor` решает, повторять ли (`AGENTS.md` §4.2).
+//! `AuthRejected` здесь нет: сервер на опознание не отвечает, отказ выглядит обрывом.
 
 use penguin_proto::error::ProtocolError;
 use thiserror::Error;
@@ -73,11 +67,7 @@ impl From<AnyTlsError> for ProtocolError {
         match err {
             AnyTlsError::Config(message) => Self::InvalidConfig(message),
             err @ AnyTlsError::Oversized(_) => Self::InvalidConfig(err.to_string()),
-            // Разъехавшаяся сессия — это не сеть: пока на том конце не тот
-            // сервер, повторять нечего.
             err @ AnyTlsError::Malformed(_) => Self::InvalidConfig(err.to_string()),
-            // А это как раз повторять стоит: сервер мог отказать на время —
-            // например, исчерпан предел соединений.
             err @ AnyTlsError::Alert(_) => Self::Disconnected(err.to_string()),
             AnyTlsError::UdpDisabled => Self::Unsupported("UDP"),
             AnyTlsError::Disconnected(message) => Self::Disconnected(message),
@@ -109,14 +99,12 @@ mod tests {
 
     #[test]
     fn the_wrong_kind_of_server_is_not_retried() {
-        // Пока в поле стоит адрес не того сервера, ответ будет тем же.
         let err: ProtocolError = AnyTlsError::malformed("неизвестная команда").into();
         assert!(!err.is_retryable());
     }
 
     #[test]
     fn a_silent_server_is_retried() {
-        // Срок приходит из общего транспорта и обязан сохранить смысл.
         let err: ProtocolError = AnyTlsError::from(penguin_transport::TransportError::Timeout(
             "рукопожатие TLS",
         ))
@@ -126,8 +114,6 @@ mod tests {
 
     #[test]
     fn a_refusal_from_the_server_is_retried() {
-        // `cmdAlert` — это «сейчас нельзя», а не «настройки неверны»: сервер
-        // шлёт его и когда кончились места, и когда клиент устарел.
         let err: ProtocolError = AnyTlsError::Alert("too many sessions".into()).into();
         assert!(err.is_retryable());
     }
@@ -140,8 +126,6 @@ mod tests {
 
     #[test]
     fn an_io_error_stays_itself_on_the_way_out() {
-        // Поток отдаёт наружу `io::Error`, и `WouldBlock` не должен по дороге
-        // превратиться в `Other`: на него смотрят те, кто копирует байты.
         let err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "занято");
         let back: std::io::Error = AnyTlsError::Io(err).into();
         assert_eq!(back.kind(), std::io::ErrorKind::WouldBlock);

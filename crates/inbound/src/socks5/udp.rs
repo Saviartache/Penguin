@@ -1,4 +1,4 @@
-//! UDP ASSOCIATE и инкапсуляция датаграмм.
+//! Инкапсуляция датаграмм UDP ASSOCIATE.
 //!
 //! ```text
 //! ┌────────┬──────┬──────┬────────┬────────┐
@@ -6,13 +6,7 @@
 //! └────────┴──────┴──────┴────────┴────────┘
 //! ```
 //!
-//! Управляющее соединение TCP при этом остаётся открытым, и его закрытие
-//! означает конец сессии. Это единственный способ понять, что клиент ушёл: у
-//! UDP закрытия нет, и без такой привязки сокет висел бы вечно.
-//!
-//! `FRAG` — фрагментация на уровне SOCKS5. Её не реализует почти никто, и
-//! отправлять фрагменты клиенты не пробуют; принимать их мы не беремся и
-//! отбрасываем явно, а не делаем вид, что заголовок кончился.
+//! Фрагментированные датаграммы (`FRAG` != 0) отбрасываются.
 
 use bytes::{BufMut, BytesMut};
 use penguin_core::address::SocketAddress;
@@ -28,18 +22,10 @@ pub struct Packet<'a> {
     pub payload: &'a [u8],
 }
 
-/// Разбирает датаграмму от клиента.
-///
-/// `None` — датаграмма повреждена или фрагментирована. Ответить об этом
-/// некому: обратной связи у UDP нет.
+/// Разбирает датаграмму; `None` — повреждена или фрагментирована.
 pub fn decode(datagram: &[u8]) -> Option<Packet<'_>> {
-    // RSV(2) + FRAG(1) — минимум перед адресом.
-    if datagram.len() < 3 {
-        return None;
-    }
-    if datagram[2] != 0 {
-        // Фрагмент. Собирать его мы не умеем, и молча отдать кусок наверх
-        // хуже, чем выбросить: приложение получило бы обрезанные данные.
+    // RSV(2) + FRAG(1)
+    if datagram.len() < 3 || datagram[2] != 0 {
         return None;
     }
 
@@ -50,12 +36,19 @@ pub fn decode(datagram: &[u8]) -> Option<Packet<'_>> {
 
 /// Собирает датаграмму для клиента.
 pub fn encode(source: &SocketAddress, payload: &[u8]) -> BytesMut {
-    let mut buf = BytesMut::with_capacity(3 + 262 + payload.len());
-    buf.put_u16(0); // RSV
-    buf.put_u8(0); // FRAG: не фрагментировано
-    address::encode(source, &mut buf);
-    buf.put_slice(payload);
+    let mut buf = BytesMut::new();
+    encode_into(&mut buf, source, payload);
     buf
+}
+
+/// Собирает датаграмму в `buf`, затирая его содержимое; буфер можно переиспользовать.
+pub fn encode_into(buf: &mut BytesMut, source: &SocketAddress, payload: &[u8]) {
+    buf.clear();
+    buf.reserve(3 + 262 + payload.len());
+    buf.put_u16(0);
+    buf.put_u8(0);
+    address::encode(source, buf);
+    buf.put_slice(payload);
 }
 
 #[cfg(test)]
@@ -79,10 +72,17 @@ mod tests {
     }
 
     #[test]
+    fn reused_buffer_is_overwritten() {
+        let source: SocketAddress = "1.2.3.4:53".parse().expect("адрес");
+        let mut buf = encode(&source, b"first message");
+        encode_into(&mut buf, &source, b"x");
+        assert_eq!(decode(&buf).expect("разбирается").payload, b"x");
+    }
+
+    #[test]
     fn rejects_fragments() {
         let mut encoded = encode(&"1.2.3.4:53".parse().expect("адрес"), b"x");
         encoded[2] = 1;
-        // Отдать кусок наверх значило бы подсунуть приложению обрезанные данные.
         assert!(decode(&encoded).is_none());
     }
 
@@ -99,7 +99,6 @@ mod tests {
 
     #[test]
     fn empty_payload_is_valid() {
-        // Датаграмма нулевой длины — законная вещь, и её надо доставить.
         let encoded = encode(&"1.2.3.4:53".parse().expect("адрес"), b"");
         let decoded = decode(&encoded).expect("разбирается");
         assert!(decoded.payload.is_empty());

@@ -1,19 +1,9 @@
-//! Общая часть адаптеров Linux и macOS.
-//!
-//! Открывают адаптер обе системы по-своему (`platform::linux`,
-//! `platform::macos`), а вот дальше он у обеих — обычный дескриптор: читается,
-//! пишется и ждёт готовности тем же реактором, что и сокеты. Эта половина
-//! общая и живёт здесь.
-//!
-//! Ссылками соседи не оформлены намеренно: каждого из них видно только в
-//! сборке под свою систему, и ссылка сломала бы документацию другой.
-//!
-//! Отдельного потока чтения, в отличие от Wintun, не нужно: у дескриптора
-//! есть неблокирующий режим, и ожидание достаётся `tokio` даром.
+//! Общая часть адаптеров Linux и macOS: после открытия это неблокирующий дескриптор под реактором `tokio`.
 
 mod frame;
 
 use std::os::fd::{AsFd, OwnedFd};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
@@ -34,13 +24,11 @@ pub struct UnixTun {
     mtu: u16,
     index: Option<u32>,
     header: Header,
-    /// Адаптер закрыт [`TunDevice::close`].
-    ///
-    /// Дескриптор при этом остаётся открытым до [`Drop`]: закрыть его из-под
-    /// ожидающей задачи значит отдать номер дескриптора системе, пока на него
-    /// кто-то ещё ссылается.
+    /// Буфер чтения, общий для пакетов пачки; держится только на время `read`.
+    buffer: Mutex<BytesMut>,
+    /// Дескриптор остаётся открытым до `Drop`: закрытие из-под ожидающей задачи отдало бы его номер системе.
     closed: AtomicBool,
-    /// Будит того, кто ждёт пакет, когда адаптер закрывают.
+    /// Будит ожидающего пакет при закрытии.
     shutdown: Notify,
 }
 
@@ -55,10 +43,7 @@ impl std::fmt::Debug for UnixTun {
 }
 
 impl UnixTun {
-    /// Заворачивает готовый дескриптор.
-    ///
-    /// Адрес, MTU и поднятие интерфейса к этому моменту уже сделаны: они у
-    /// каждой системы свои, а дескриптор — общий.
+    /// Заворачивает готовый дескриптор; адрес, MTU и подъём интерфейса уже сделаны.
     pub(super) fn new(
         fd: OwnedFd,
         name: String,
@@ -74,16 +59,24 @@ impl UnixTun {
             mtu,
             index,
             header,
+            buffer: Mutex::new(BytesMut::new()),
             closed: AtomicBool::new(false),
             shutdown: Notify::new(),
         })
     }
+
+    fn read(&self) -> std::io::Result<BytesMut> {
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        frame::read(
+            self.fd.get_ref().as_fd(),
+            &mut buffer,
+            self.mtu,
+            self.header,
+        )
+    }
 }
 
-/// Переводит дескриптор в неблокирующий режим.
-///
-/// Без этого чтение остановило бы весь исполнитель: адаптер молчит ровно
-/// столько, сколько молчит сеть.
+/// Без неблокирующего режима чтение остановило бы исполнитель.
 fn set_nonblocking(fd: &OwnedFd) -> std::io::Result<()> {
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
@@ -115,15 +108,26 @@ impl TunDevice for UnixTun {
 
             let mut ready = tokio::select! {
                 ready = self.fd.readable() => ready?,
-                // Закрытие обязано разбудить ожидающего: иначе задача чтения
-                // остаётся висеть до первого пакета, которого уже не будет.
                 () = self.shutdown.notified() => return Err(TunError::Closed),
             };
 
-            match ready.try_io(|fd| frame::read(fd.get_ref().as_fd(), self.mtu, self.header)) {
-                Ok(result) => return Ok(result?),
-                // Готовность оказалась ложной — ждём заново.
-                Err(_would_block) => continue,
+            if let Ok(result) = ready.try_io(|_| self.read()) {
+                return Ok(result?);
+            }
+        }
+    }
+
+    // Чтение мимо реактора безопасно: ложная готовность гасится в `recv` через WouldBlock.
+    fn try_recv(&self) -> Option<BytesMut> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        match self.read() {
+            Ok(packet) => Some(packet).filter(|packet| !packet.is_empty()),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => None,
+            Err(err) => {
+                tracing::warn!(%err, "чтение из TUN не удалось");
+                None
             }
         }
     }
@@ -142,9 +146,10 @@ impl TunDevice for UnixTun {
             }
 
             let mut ready = self.fd.writable().await?;
-            match ready.try_io(|fd| frame::write(fd.get_ref().as_fd(), packet, self.header)) {
-                Ok(result) => return Ok(result?),
-                Err(_would_block) => continue,
+            if let Ok(result) =
+                ready.try_io(|fd| frame::write(fd.get_ref().as_fd(), packet, self.header))
+            {
+                return Ok(result?);
             }
         }
     }

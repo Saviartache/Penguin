@@ -14,8 +14,7 @@ pub struct AppConfig {
     pub minimize_to_tray: bool,
     /// Язык интерфейса.
     pub language: Language,
-    /// Тема оформления. Значение из кита (`uikit::ThemeType`) хранится
-    /// строкой: конфигурация не должна зависеть от версии кита.
+    /// Тема оформления (`uikit::ThemeType` строкой).
     pub theme: String,
     /// Подробность журнала.
     pub log_level: LogLevel,

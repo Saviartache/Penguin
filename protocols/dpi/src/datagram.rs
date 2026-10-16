@@ -1,20 +1,17 @@
-//! UDP в режиме DPI: датаграммы уходят как есть.
-//!
-//! Обход сюда не переносится и не будет: он режет **поток**, а в UDP потока
-//! нет — каждая датаграмма едет сама по себе, и резать её значит потерять
-//! половину. Приёмы `zapret2` для UDP требуют своего заголовка, то есть сырого
-//! сокета, которого у нас нет (документ [`penguin_transport::desync`]).
+//! UDP в режиме DPI: датаграммы уходят как есть. Обход режет поток, в UDP потока нет.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use penguin_core::address::{Address, SocketAddress};
+use penguin_core::address::SocketAddress;
 use penguin_proto::datagram::ProxyDatagram;
 use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use tokio::net::UdpSocket;
+
+use crate::outbound::resolve;
 
 /// Датаграммный канал прямо наружу.
 pub struct DirectDatagram {
@@ -27,37 +24,23 @@ impl DirectDatagram {
     pub fn new(socket: UdpSocket, dialer: Arc<dyn Dialer>) -> Self {
         Self { socket, dialer }
     }
-
-    /// Превращает адрес назначения в числовой.
-    async fn resolve(&self, target: &SocketAddress) -> Result<SocketAddr, ProtocolError> {
-        match &target.host {
-            Address::Ip(ip) => Ok(SocketAddr::new(*ip, target.port)),
-            Address::Domain(domain) => self
-                .dialer
-                .resolve(domain)
-                .await?
-                .into_iter()
-                .next()
-                .map(|ip| SocketAddr::new(ip, target.port))
-                .ok_or_else(|| ProtocolError::Unreachable(domain.clone())),
-        }
-    }
 }
 
 #[async_trait]
 impl ProxyDatagram for DirectDatagram {
     async fn send_to(&self, payload: Bytes, target: &SocketAddress) -> Result<(), ProtocolError> {
-        let addr = self.resolve(target).await?;
+        let addr: SocketAddr = resolve(&*self.dialer, target).await?;
         self.socket.send_to(&payload, addr).await?;
         Ok(())
     }
 
     async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
-        // 65 535 — наибольшая датаграмма, которую вообще можно получить.
-        // Обрезать её было бы порчей данных: приложение не узнает о потере.
+        // 65 535 — наибольшая датаграмма; обрезка испортила бы данные
         let mut buf = vec![0u8; 65_535];
         let (len, from) = self.socket.recv_from(&mut buf).await?;
-        buf.truncate(len);
-        Ok((Bytes::from(buf), SocketAddress::from(from)))
+        Ok((
+            Bytes::copy_from_slice(&buf[..len]),
+            SocketAddress::from(from),
+        ))
     }
 }

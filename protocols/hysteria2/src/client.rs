@@ -69,8 +69,6 @@ impl Hysteria2Client {
 
         let transport = quic::connect(config, dialer.as_ref(), server, &server_name).await?;
 
-        // Датаграммы HTTP/3 не включаются: датаграммы этого соединения —
-        // UDP Hysteria, и читает их `UdpManager`.
         let h3 = h3::Connection::new(transport.connection.clone(), h3::Options::default())
             .await
             .map_err(|e| Hysteria2Error::Auth(format!("HTTP/3 не поднялся: {e}")))?;
@@ -109,7 +107,6 @@ impl Hysteria2Client {
 /// чем он готов принимать, значит терять разницу на его входе.
 fn apply_server_rate(response: &AuthResponse, rate: Option<&BrutalRate>) {
     let Some(rate) = rate else {
-        // Пользователь скорость не задал, работает BBR — ограничивать нечего.
         return;
     };
 
@@ -126,10 +123,6 @@ fn apply_server_rate(response: &AuthResponse, rate: Option<&BrutalRate>) {
             }
         }
         ServerRate::Auto => {
-            // Сервер просит клиента работать обычным управлением перегрузкой.
-            // Мы уже подключились с Brutal, а поменять управление у живого
-            // соединения quinn не даёт — оставляем заданное пользователем и
-            // говорим об этом вслух.
             tracing::warn!(
                 "сервер просит автоматическое управление перегрузкой, но скорость задана \
                  в настройках — Brutal остаётся; уберите bandwidth.up, чтобы использовать BBR"
@@ -173,8 +166,6 @@ impl Outbound for Hysteria2Client {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // Ровно то, что ответил сервер: соврать здесь означает, что
-            // DNS-запросы уйдут в направление, которое их молча потеряет.
             udp: self.udp_enabled,
             multiplex: true,
             port_hopping: self.port_hopping,
@@ -199,7 +190,6 @@ impl Outbound for Hysteria2Client {
             .map_err(|e| Hysteria2Error::Disconnected(e.to_string()))?;
 
         if self.fast_open {
-            // Ответ прочитается сам при первом чтении из потока.
             return Ok(Box::new(TcpStream::fast_open(send, recv)));
         }
 
@@ -230,9 +220,6 @@ impl Outbound for Hysteria2Client {
         self.transport
             .connection
             .close(0u32.into(), b"closed by client");
-        // Ждать завершения ввода-вывода эндпойнта обязательно: без этого
-        // прощальный пакет может не успеть уйти, и сервер продержит сессию
-        // до истечения тайм-аута.
         self.transport.endpoint.wait_idle().await;
         Ok(())
     }
@@ -259,8 +246,6 @@ mod tests {
 
     #[test]
     fn server_limit_never_raises_the_rate() {
-        // Сервер ограничивает сверху, а не назначает: щедрый ответ не повод
-        // слать быстрее, чем позволяет канал пользователя.
         let rate = BrutalRate::new(1_250_000);
         apply_server_rate(&response(ServerRate::Limited(125_000_000)), Some(&rate));
         assert_eq!(rate.get(), 1_250_000);
@@ -281,7 +266,6 @@ mod tests {
 
     #[test]
     fn zero_limit_is_ignored() {
-        // Ноль означает «без ограничений», а не «стоять».
         let rate = BrutalRate::new(12_500_000);
         apply_server_rate(&response(ServerRate::Limited(0)), Some(&rate));
         assert_eq!(rate.get(), 12_500_000);

@@ -1,67 +1,48 @@
-//! Разовые шифры одной датаграммы UDP 2022 — без сети, без счётчика.
+//! Разовые шифры одной датаграммы UDP 2022: нонс приходит из пакета, счётчика нет.
 //!
-//! У UDP 2022 нет растущего нонса: каждая датаграмма сама по себе, и нонс
-//! либо считается из самого пакета (AES-GCM), либо бросается случайно и
-//! едет на проводе целиком (ChaCha). Поэтому здесь не тот `Cipher`, что у
-//! TCP ([`penguin_transport::aead::Cipher`], растущий счётчик), а разовые
-//! операции с явным нонсом на каждый вызов.
+//! AES-GCM: нонс (12 байт) — байты 4..16 заголовка пакета, ключ — подключ BLAKE3
+//! из PSK и идентификатора сессии, сам заголовок шифруется отдельно одним блоком
+//! AES на PSK уже после взятия нонса. Сверено с `shadowsocks-rust`
+//! (`relay/udprelay/aead_2022.rs`) и `sing-shadowsocks2` (`shadowaead_2022/method.go`).
 //!
-//! # AES-128/256-GCM
-//!
-//! Нонс (12 байт) — это байты 4..16 заголовка пакета (последние четыре байта
-//! идентификатора сессии и весь счётчик пакета), а ключ AEAD — подключ,
-//! выведенный BLAKE3 из PSK и идентификатора сессии ([`crate::kdf2022`]).
-//! Сам заголовок (идентификатор сессии и счётчик, 16 байт) шифруется
-//! отдельно — голым блоком AES прямо на PSK, без вывода: 16 байт — это
-//! ровно один блок AES, дополнять нечем. Сверено построчно с
-//! `shadowsocks-rust` (`relay/udprelay/aead_2022.rs::encrypt_message`,
-//! `decrypt_message`) и `sing-shadowsocks2`
-//! (`shadowaead_2022/method.go::WritePacket`, `readPacket`): оба шифруют
-//! заголовок **после** того, как уже взяли из него (ещё открытого) нонс для
-//! тела.
-//!
-//! # ChaCha20-Poly1305
-//!
-//! Здесь это не тело 2022, а `XChaCha20-Poly1305`: нонс 24 байта, случайный,
-//! едет перед пакетом целиком, а PSK идёт в шифр как есть — сеансового
-//! подключа нет вовсе. И это тоже проверено по обоим источникам:
-//! `v2/udp/chacha20_poly1305.rs` берёт ключ параметром без вывода;
-//! `method.go` строит `udpCipher` из `pskList[0]` один раз при создании
-//! метода, до всякой сессии.
+//! ChaCha: `XChaCha20-Poly1305`, нонс 24 случайных байта едет перед пакетом,
+//! PSK идёт в шифр как есть (`v2/udp/chacha20_poly1305.rs`).
 
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit as AesKeyInit};
 use aes::{Aes128, Aes256, Block};
-use chacha20poly1305::aead::Aead;
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use chacha20poly1305::aead::AeadInOut;
+use chacha20poly1305::{Tag, XChaCha20Poly1305};
 use ring::aead::{AES_128_GCM, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
 use crate::error::{ShadowsocksError, ShadowsocksResult};
 use crate::method::Method2022;
 
-/// Длина заголовка (идентификатор сессии + счётчик пакета) — ровно один
-/// блок AES, отсюда и раздельное шифрование.
+/// Длина заголовка (идентификатор сессии + счётчик пакета): один блок AES.
 pub const HEADER_LEN: usize = 16;
 
-/// Длина явного нонса ChaCha20-Poly1305 (2022, UDP): `XChaCha20`, не обычный.
+/// Длина нонса `XChaCha20`.
 pub const CHACHA_NONCE_LEN: usize = 24;
 
-/// Шифрует тело пакета (после 16-байтового заголовка) под явным 12-байтовым
-/// нонсом и дописывает метку подлинности. Только для AES-128/256-GCM.
+/// Длина метки подлинности обоих шифров.
+pub const TAG_LEN: usize = 16;
+
+/// Шифрует тело на месте под явным нонсом, возвращает метку. Только AES-GCM.
 pub fn aesgcm_seal(
     method: Method2022,
     key: &[u8],
     nonce12: &[u8],
-    body: &mut Vec<u8>,
-) -> ShadowsocksResult<()> {
+    body: &mut [u8],
+) -> ShadowsocksResult<[u8; TAG_LEN]> {
     let key = aesgcm_key(method, key)?;
-    let nonce = Nonce::try_assume_unique_for_key(nonce12)
-        .map_err(|_| ShadowsocksError::crypto("нонс AES-GCM не той длины"))?;
-    key.seal_in_place_append_tag(nonce, Aad::empty(), body)
+    let tag = key
+        .seal_in_place_separate_tag(aesgcm_nonce(nonce12)?, Aad::empty(), body)
         .map_err(|_| ShadowsocksError::crypto("датаграмма 2022 не шифруется"))?;
-    Ok(())
+    tag.as_ref()
+        .try_into()
+        .map_err(|_| ShadowsocksError::crypto("метка AES-GCM не той длины"))
 }
 
-/// Расшифровывает тело на месте, возвращает длину открытого текста.
+/// Расшифровывает тело (с меткой в конце) на месте, возвращает длину открытого текста.
 pub fn aesgcm_open(
     method: Method2022,
     key: &[u8],
@@ -69,12 +50,14 @@ pub fn aesgcm_open(
     body: &mut [u8],
 ) -> ShadowsocksResult<usize> {
     let key = aesgcm_key(method, key)?;
-    let nonce = Nonce::try_assume_unique_for_key(nonce12)
-        .map_err(|_| ShadowsocksError::crypto("нонс AES-GCM не той длины"))?;
-    let plain = key
-        .open_in_place(nonce, Aad::empty(), body)
-        .map_err(|_| ShadowsocksError::Rejected)?;
-    Ok(plain.len())
+    key.open_in_place(aesgcm_nonce(nonce12)?, Aad::empty(), body)
+        .map(|plain| plain.len())
+        .map_err(|_| ShadowsocksError::Rejected)
+}
+
+fn aesgcm_nonce(nonce12: &[u8]) -> ShadowsocksResult<Nonce> {
+    Nonce::try_assume_unique_for_key(nonce12)
+        .map_err(|_| ShadowsocksError::crypto("нонс AES-GCM не той длины"))
 }
 
 fn aesgcm_key(method: Method2022, key: &[u8]) -> ShadowsocksResult<LessSafeKey> {
@@ -90,31 +73,13 @@ fn aesgcm_key(method: Method2022, key: &[u8]) -> ShadowsocksResult<LessSafeKey> 
     Ok(LessSafeKey::new(unbound))
 }
 
-/// Шифрует 16-байтовый заголовок пакета (идентификатор сессии + счётчик)
-/// одним блоком AES прямо на PSK — без вывода подключа, без дополнения.
+/// Шифрует заголовок пакета одним блоком AES прямо на PSK.
 pub fn ecb_encrypt_header(
     method: Method2022,
     psk: &[u8],
     header: &mut [u8; HEADER_LEN],
 ) -> ShadowsocksResult<()> {
-    let mut block: Block = (*header).into();
-    match method {
-        Method2022::Blake3Aes128Gcm => {
-            let cipher = Aes128::new_from_slice(psk)
-                .map_err(|_| ShadowsocksError::crypto("ключ AES-128 не той длины"))?;
-            cipher.encrypt_block(&mut block);
-        }
-        Method2022::Blake3Aes256Gcm => {
-            let cipher = Aes256::new_from_slice(psk)
-                .map_err(|_| ShadowsocksError::crypto("ключ AES-256 не той длины"))?;
-            cipher.encrypt_block(&mut block);
-        }
-        Method2022::Blake3Chacha20Poly1305 => {
-            return Err(ShadowsocksError::crypto("метод не AES-GCM"));
-        }
-    }
-    header.copy_from_slice(&block);
-    Ok(())
+    aes_block(method, psk, header, true)
 }
 
 /// Расшифровывает заголовок, зашифрованный [`ecb_encrypt_header`].
@@ -123,17 +88,34 @@ pub fn ecb_decrypt_header(
     psk: &[u8],
     header: &mut [u8; HEADER_LEN],
 ) -> ShadowsocksResult<()> {
+    aes_block(method, psk, header, false)
+}
+
+fn aes_block(
+    method: Method2022,
+    psk: &[u8],
+    header: &mut [u8; HEADER_LEN],
+    encrypt: bool,
+) -> ShadowsocksResult<()> {
     let mut block: Block = (*header).into();
     match method {
         Method2022::Blake3Aes128Gcm => {
             let cipher = Aes128::new_from_slice(psk)
                 .map_err(|_| ShadowsocksError::crypto("ключ AES-128 не той длины"))?;
-            cipher.decrypt_block(&mut block);
+            if encrypt {
+                cipher.encrypt_block(&mut block);
+            } else {
+                cipher.decrypt_block(&mut block);
+            }
         }
         Method2022::Blake3Aes256Gcm => {
             let cipher = Aes256::new_from_slice(psk)
                 .map_err(|_| ShadowsocksError::crypto("ключ AES-256 не той длины"))?;
-            cipher.decrypt_block(&mut block);
+            if encrypt {
+                cipher.encrypt_block(&mut block);
+            } else {
+                cipher.decrypt_block(&mut block);
+            }
         }
         Method2022::Blake3Chacha20Poly1305 => {
             return Err(ShadowsocksError::crypto("метод не AES-GCM"));
@@ -143,42 +125,49 @@ pub fn ecb_decrypt_header(
     Ok(())
 }
 
-/// Шифрует пакет целиком под PSK как есть и явным 24-байтовым нонсом.
+/// Шифрует пакет на месте под PSK как есть и нонсом, возвращает метку.
 pub fn xchacha_seal(
     psk: &[u8],
     nonce24: &[u8; CHACHA_NONCE_LEN],
-    plaintext: &[u8],
-) -> ShadowsocksResult<Vec<u8>> {
-    let aead = XChaCha20Poly1305::new(&chacha_key(psk)?);
-    let nonce: XNonce = (*nonce24).into();
-    aead.encrypt(&nonce, plaintext)
-        .map_err(|_| ShadowsocksError::crypto("датаграмма 2022 не шифруется"))
+    plain: &mut [u8],
+) -> ShadowsocksResult<[u8; TAG_LEN]> {
+    let tag = xchacha(psk)?
+        .encrypt_inout_detached(&(*nonce24).into(), b"", plain.into())
+        .map_err(|_| ShadowsocksError::crypto("датаграмма 2022 не шифруется"))?;
+    Ok(tag.into())
 }
 
-/// Расшифровывает то, что собрал [`xchacha_seal`].
+/// Расшифровывает пакет (с меткой в конце) на месте, возвращает длину открытого текста.
 pub fn xchacha_open(
     psk: &[u8],
     nonce24: &[u8; CHACHA_NONCE_LEN],
-    ciphertext: &[u8],
-) -> ShadowsocksResult<Vec<u8>> {
-    let aead = XChaCha20Poly1305::new(&chacha_key(psk)?);
-    let nonce: XNonce = (*nonce24).into();
-    aead.decrypt(&nonce, ciphertext)
-        .map_err(|_| ShadowsocksError::Rejected)
+    sealed: &mut [u8],
+) -> ShadowsocksResult<usize> {
+    let plain_len = sealed
+        .len()
+        .checked_sub(TAG_LEN)
+        .ok_or(ShadowsocksError::Rejected)?;
+    let (body, tag) = sealed.split_at_mut(plain_len);
+    let tag = Tag::try_from(&*tag).map_err(|_| ShadowsocksError::Rejected)?;
+    xchacha(psk)?
+        .decrypt_inout_detached(&(*nonce24).into(), b"", body.into(), &tag)
+        .map_err(|_| ShadowsocksError::Rejected)?;
+    Ok(plain_len)
 }
 
-/// Ключ ChaCha20-Poly1305 из PSK — без вывода, но с проверкой длины: сама
-/// `GenericArray` при неверной длине паникует, а на пути соединения нельзя
-/// (`AGENTS.md` §4.3).
-fn chacha_key(psk: &[u8]) -> ShadowsocksResult<chacha20poly1305::Key> {
-    let bytes: [u8; 32] = psk
+/// Длина ключа проверяется сама: `GenericArray` на неверной длине паникует (AGENTS §4.3).
+fn xchacha(psk: &[u8]) -> ShadowsocksResult<XChaCha20Poly1305> {
+    let key: [u8; 32] = psk
         .try_into()
         .map_err(|_| ShadowsocksError::crypto("ключ ChaCha не той длины"))?;
-    Ok(bytes.into())
+    Ok(XChaCha20Poly1305::new(&key.into()))
 }
 
 #[cfg(test)]
 mod tests {
+    use chacha20poly1305::XNonce;
+    use chacha20poly1305::aead::{Aead as _, Payload};
+
     use super::*;
 
     fn hex_to_bytes(text: &str) -> Vec<u8> {
@@ -188,16 +177,13 @@ mod tests {
             .collect()
     }
 
-    /// Шестнадцатеричная запись — только для сверки с чужими значениями.
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]
     fn aes_128_ecb_matches_fips_197_appendix_c1() {
-        // FIPS-197, приложение C.1 — вектор про блочный AES-128 сам по
-        // себе, не про Shadowsocks: проверяет, что `aes` подключён верно
-        // (раскладка блока, порядок байт), а не наш собственный вывод.
+        // FIPS-197, C.1: проверяет подключение `aes`, а не наш вывод
         let key = hex_to_bytes("000102030405060708090a0b0c0d0e0f");
         let mut block: [u8; 16] = hex_to_bytes("00112233445566778899aabbccddeeff")
             .try_into()
@@ -213,7 +199,6 @@ mod tests {
 
     #[test]
     fn aes_256_ecb_matches_fips_197_appendix_c3() {
-        // Тот же источник, приложение C.3, ключ на 256 бит.
         let key = hex_to_bytes("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
         let mut block: [u8; 16] = hex_to_bytes("00112233445566778899aabbccddeeff")
             .try_into()
@@ -225,13 +210,7 @@ mod tests {
 
     #[test]
     fn xchacha20poly1305_matches_the_draft_test_vector() {
-        // draft-irtf-cfrg-xchacha, приложение A.1, через сам крейт
-        // `chacha20poly1305` — с непустым AAD, которого наша обёртка
-        // (`xchacha_seal`/`xchacha_open`) не использует вовсе. Подтверждает
-        // крейт и раскладку ключа/нонса, а не саму обёртку — у неё ниже
-        // отдельный круговой прогон.
-        use chacha20poly1305::aead::{Aead as _, KeyInit as _, Payload};
-
+        // draft-irtf-cfrg-xchacha, A.1, с непустым AAD: проверяет крейт, не нашу обёртку
         let key: [u8; 32] =
             hex_to_bytes("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
                 .try_into()
@@ -265,7 +244,8 @@ mod tests {
             let nonce = [1u8; 12];
             let mut body = b"payload".to_vec();
 
-            aesgcm_seal(method, &key, &nonce, &mut body).expect("шифруется");
+            let tag = aesgcm_seal(method, &key, &nonce, &mut body).expect("шифруется");
+            body.extend_from_slice(&tag);
             let len = aesgcm_open(method, &key, &nonce, &mut body).expect("расшифровывается");
             assert_eq!(&body[..len], b"payload");
         }
@@ -286,22 +266,29 @@ mod tests {
         }
     }
 
+    fn xchacha_sealed(psk: &[u8; 32], nonce: &[u8; CHACHA_NONCE_LEN], plain: &[u8]) -> Vec<u8> {
+        let mut out = plain.to_vec();
+        let tag = xchacha_seal(psk, nonce, &mut out).expect("шифруется");
+        out.extend_from_slice(&tag);
+        out
+    }
+
     #[test]
     fn xchacha_round_trips_with_our_empty_aad() {
         let psk = [5u8; 32];
         let nonce = [2u8; CHACHA_NONCE_LEN];
-        let sealed = xchacha_seal(&psk, &nonce, b"query").expect("шифруется");
-        let opened = xchacha_open(&psk, &nonce, &sealed).expect("расшифровывается");
-        assert_eq!(opened, b"query");
+        let mut sealed = xchacha_sealed(&psk, &nonce, b"query");
+        let len = xchacha_open(&psk, &nonce, &mut sealed).expect("расшифровывается");
+        assert_eq!(&sealed[..len], b"query");
     }
 
     #[test]
     fn a_changed_byte_is_rejected() {
         let psk = [5u8; 32];
         let nonce = [2u8; CHACHA_NONCE_LEN];
-        let mut sealed = xchacha_seal(&psk, &nonce, b"query").expect("шифруется");
+        let mut sealed = xchacha_sealed(&psk, &nonce, b"query");
         let last = sealed.len() - 1;
         sealed[last] ^= 1;
-        assert!(xchacha_open(&psk, &nonce, &sealed).is_err());
+        assert!(xchacha_open(&psk, &nonce, &mut sealed).is_err());
     }
 }

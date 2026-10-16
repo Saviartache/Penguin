@@ -31,10 +31,7 @@ impl RuleSet {
         Self::default()
     }
 
-    /// Собирает набор из конфигурации.
-    ///
-    /// Выключенные правила отбрасываются здесь, а не проверяются на каждом
-    /// соединении: выключенное правило не должно стоить ничего.
+    /// Собирает набор из конфигурации; выключенные правила отбрасываются.
     pub fn compile(config: &RoutingConfig, ctx: &CompileContext) -> RouterResult<Self> {
         let mut rules = config
             .rules
@@ -53,9 +50,6 @@ impl RuleSet {
     }
 
     /// Все подходящие правила по порядку.
-    ///
-    /// Нужно экрану проверки: пользователю важно видеть не только сработавшее
-    /// правило, но и те, что сработали бы, не будь его.
     pub fn all_matches(&self, target: &MatchTarget<'_>) -> Vec<&Rule> {
         self.rules
             .iter()
@@ -131,8 +125,6 @@ mod tests {
 
     #[test]
     fn all_matches_lists_the_alternatives() {
-        // Экран проверки показывает не только сработавшее правило, но и те,
-        // что сработали бы без него.
         let config = routing(json!([
             { "id": "по-порту", "when": { "dest_port": [443] }, "action": "direct" },
             { "id": "по-домену", "when": { "domain_suffix": ["example.com"] }, "action": "block" },
@@ -149,8 +141,6 @@ mod tests {
 
     #[test]
     fn broken_rule_fails_the_whole_set() {
-        // Собрать половину правил и молча выбросить остальные — худший исход:
-        // трафик пойдёт не туда, а пользователь об этом не узнает.
         let config = routing(json!([
             { "id": "хорошее", "when": { "dest_port": [443] }, "action": "direct" },
             { "id": "плохое", "when": { "dest_ip": ["не адрес"] }, "action": "block" }

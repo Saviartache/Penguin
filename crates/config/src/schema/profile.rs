@@ -13,16 +13,12 @@ pub struct Profile {
     pub id: ProfileId,
     /// Имя для интерфейса.
     pub name: String,
-    /// Метки: страна, назначение, что угодно. Нужны для группировки и
-    /// правил вида «любой сервер с меткой `streaming`».
+    /// Метки для группировки и правил.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     /// Как подключаться.
     pub outbound: RawOutbound,
-    /// Откуда профиль приехал, если из подписки.
-    ///
-    /// Профиль из подписки перезаписывается при обновлении списка, и правки
-    /// в нём пропадут — интерфейс обязан об этом предупреждать.
+    /// Подписка-источник; профиль из неё перезаписывается при обновлении.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription: Option<String>,
 }

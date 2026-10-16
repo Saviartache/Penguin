@@ -16,14 +16,9 @@
 //!  }
 //! ```
 //!
-//! Капсула типа `DATAGRAM` переносит по потоку то же самое, что кадр
-//! `HTTP/3 DATAGRAM` переносит поверх QUIC напрямую (RFC 9297, §3.5:
-//! «семантика одинакова»), только надёжно и по порядку, а не best-effort.
-//! Когда какой путь выбирается, написано в [`crate::flow`].
-//!
-//! Приёмник обязан молча пропускать капсулы незнакомого типа и переходить к
-//! следующей (RFC 9297, §3.2) — здесь это [`CapsuleReader::next_datagram`]:
-//! он этим и занимается, а не сообщает об ошибке.
+//! Капсула `DATAGRAM` несёт то же, что кадр `HTTP/3 DATAGRAM` (RFC 9297, §3.5),
+//! но надёжно (выбор пути — в [`crate::flow`]). Капсулы незнакомого типа
+//! пропускаются молча (RFC 9297, §3.2).
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use penguin_transport::varint;
@@ -33,57 +28,54 @@ use crate::error::MasqueError;
 /// Тип капсулы `DATAGRAM` (RFC 9297, §3.5): несёт HTTP-датаграмму по потоку.
 pub const CAPSULE_TYPE_DATAGRAM: u64 = 0x00;
 
-/// Context ID для необработанной полезной нагрузки UDP (RFC 9298, §5).
-///
-/// Ненулевые ID зарезервированы под сжатие заголовков, которое этот документ
-/// не определяет вовсе — здесь и в [`CapsuleReader`] такие просто пропускаются.
+/// Context ID нагрузки UDP (RFC 9298, §5); ненулевые пропускаются.
 pub const CONTEXT_ID_UDP: u64 = 0;
 
 /// Наибольшая полезная нагрузка при `Context ID = 0` (RFC 9298, §5).
 pub const MAX_UDP_PAYLOAD: usize = 65527;
 
-/// Собирает капсулу `DATAGRAM` с полезной нагрузкой UDP при `Context ID = 0`.
-///
-/// Возвращает ошибку конфигурации, а не обрезает нагрузку молча: пакет
-/// длиннее предела — это то, что должен был поймать вызывающий раньше.
+/// Капсула `DATAGRAM` с нагрузкой UDP при `Context ID = 0`; слишком длинный пакет — ошибка.
 pub fn encode_udp_datagram(payload: &[u8]) -> Result<Bytes, MasqueError> {
-    Ok(encode_capsule(
-        CAPSULE_TYPE_DATAGRAM,
-        &encode_udp_payload(payload)?,
-    ))
+    check_udp_len(payload)?;
+    Ok(encode_datagram_capsule(CONTEXT_ID_UDP, payload))
 }
 
-/// Содержимое датаграммы HTTP с нагрузкой UDP: `Context ID = 0` и пакет
-/// (RFC 9298, §5). Одно и то же — в капсуле и в кадре датаграммы HTTP/3.
+/// Содержимое датаграммы HTTP с нагрузкой UDP: `Context ID = 0` и пакет (RFC 9298, §5).
 pub fn encode_udp_payload(payload: &[u8]) -> Result<Bytes, MasqueError> {
+    check_udp_len(payload)?;
+    Ok(encode_datagram_payload(CONTEXT_ID_UDP, payload))
+}
+
+fn check_udp_len(payload: &[u8]) -> Result<(), MasqueError> {
     if payload.len() > MAX_UDP_PAYLOAD {
         return Err(MasqueError::malformed(format!(
             "датаграмма UDP длиннее {MAX_UDP_PAYLOAD} байт: {}",
             payload.len()
         )));
     }
-    Ok(encode_datagram_payload(CONTEXT_ID_UDP, payload))
+    Ok(())
 }
 
-/// Нагрузка UDP из содержимого датаграммы HTTP. `None` — чужой контекст:
-/// его этот клиент не регистрировал, и RFC 9298 не даёт ему формата.
+/// Нагрузка UDP из датаграммы HTTP; `None` — чужой контекст.
 pub fn decode_udp_payload(mut value: Bytes) -> Result<Option<Bytes>, MasqueError> {
     let context_id = varint::decode_prefix(&mut value)
         .ok_or_else(|| MasqueError::malformed("датаграмма HTTP без context ID"))?;
     Ok((context_id == CONTEXT_ID_UDP).then_some(value))
 }
 
-/// Собирает капсулу `DATAGRAM` с произвольным Context ID.
-///
-/// Общий строитель для [`encode_udp_datagram`] (CONNECT-UDP, RFC 9298 §5) и
-/// капсулы данных CONNECT-IP (RFC 9484 §6, [`crate::ip`]): формат `Context ID
-/// + Payload` один и тот же в обоих документах, разница только в том, что
-/// лежит в `Payload` — UDP-датаграмма там и целый IP-пакет здесь.
+/// Капсула `DATAGRAM` с произвольным Context ID (CONNECT-UDP и CONNECT-IP, RFC 9484 §6).
 pub(crate) fn encode_datagram_capsule(context_id: u64, payload: &[u8]) -> Bytes {
-    encode_capsule(
-        CAPSULE_TYPE_DATAGRAM,
-        &encode_datagram_payload(context_id, payload),
-    )
+    let value_len = varint::encoded_len(context_id) + payload.len();
+    let mut buf = BytesMut::with_capacity(
+        varint::encoded_len(CAPSULE_TYPE_DATAGRAM)
+            + varint::encoded_len(value_len as u64)
+            + value_len,
+    );
+    varint::encode(CAPSULE_TYPE_DATAGRAM, &mut buf);
+    varint::encode(value_len as u64, &mut buf);
+    varint::encode(context_id, &mut buf);
+    buf.put_slice(payload);
+    buf.freeze()
 }
 
 fn encode_datagram_payload(context_id: u64, payload: &[u8]) -> Bytes {
@@ -104,11 +96,7 @@ pub(crate) fn encode_capsule(capsule_type: u64, value: &[u8]) -> Bytes {
     buf.freeze()
 }
 
-/// Собирает капсулы из последовательных кусков потока HTTP/3.
-///
-/// Кадр `DATA` не обязан совпадать по границам с капсулой: сервер вправе
-/// прислать половину заголовка капсулы в одном кадре и остаток в следующем.
-/// Поэтому байты копятся здесь, а не разбираются по мере поступления кадров.
+/// Собирает капсулы из кусков потока HTTP/3 (границы `DATA` и капсул не совпадают).
 #[derive(Default)]
 pub struct CapsuleReader {
     buf: BytesMut,
@@ -125,19 +113,13 @@ impl CapsuleReader {
         self.buf.put(chunk);
     }
 
-    /// Возвращает полезную нагрузку следующей капсулы `DATAGRAM` при
-    /// `Context ID = 0`, если она уже целиком собрана.
-    ///
-    /// Капсулы других типов и другие context ID пропускаются молча (RFC 9297,
-    /// §3.2; RFC 9298, §5) — этот метод зовут в цикле, и он либо отдаёт
-    /// нагрузку, либо говорит `Ok(None)`, когда данных, накопленных на
-    /// сегодня, для целой капсулы не хватает.
+    /// Нагрузка следующей целой капсулы `DATAGRAM` с `Context ID = 0`;
+    /// прочие пропускаются, `Ok(None)` — данных не хватает.
     pub fn next_datagram(&mut self) -> Result<Option<Bytes>, MasqueError> {
         loop {
             let Some((capsule_type, value)) = self.next_capsule()? else {
                 return Ok(None);
             };
-            // Неизвестный тип и чужой контекст пропускаются.
             if capsule_type != CAPSULE_TYPE_DATAGRAM {
                 continue;
             }
@@ -147,13 +129,7 @@ impl CapsuleReader {
         }
     }
 
-    /// Возвращает следующую капсулу целиком — тип и значение как есть, без
-    /// разбора того, что внутри, — если она уже целиком собрана.
-    ///
-    /// Общий уровень под [`Self::next_datagram`] (CONNECT-UDP) и капсулами
-    /// согласования адреса CONNECT-IP ([`crate::ip`]), которым нужны типы,
-    /// каких `next_datagram` вообще не знает (`ADDRESS_ASSIGN` и родня).
-    /// `Ok(None)` — то же самое «подождать ещё», что и у `next_datagram`.
+    /// Следующая целая капсула как есть (тип, значение); `Ok(None)` — данных не хватает.
     pub fn next_capsule(&mut self) -> Result<Option<(u64, Bytes)>, MasqueError> {
         let Some((capsule_type, type_len)) = varint::try_decode(&self.buf) else {
             return Ok(None);
@@ -196,7 +172,6 @@ mod tests {
 
     #[test]
     fn a_datagram_payload_names_its_context() {
-        // RFC 9298, §5: `Context ID = 0` — пакет UDP, остальные — не наши.
         let payload = encode_udp_payload(b"dns").expect("в пределах");
         assert_eq!(&payload[..], b"\x00dns");
         assert_eq!(
@@ -235,7 +210,6 @@ mod tests {
 
     #[test]
     fn an_unknown_capsule_type_is_skipped_not_reported() {
-        // Капсула типа 0x2a (не DATAGRAM), за ней — настоящая датаграмма.
         let mut buf = BytesMut::new();
         varint::encode(0x2a, &mut buf);
         varint::encode(3, &mut buf);
@@ -272,8 +246,6 @@ mod tests {
 
     #[test]
     fn next_capsule_returns_a_type_next_datagram_does_not_know() {
-        // `next_datagram` пропускает всё, что не DATAGRAM; `next_capsule`
-        // отдаёт его как есть — этим и пользуются капсулы CONNECT-IP.
         let mut buf = BytesMut::new();
         varint::encode(0x2a, &mut buf);
         varint::encode(3, &mut buf);

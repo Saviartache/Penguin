@@ -16,27 +16,9 @@
 //! | `Dissociate` | `0x03` | односторонний поток | конец UDP-сессии |
 //! | `Heartbeat` | `0x04` | датаграмма | ничего |
 //!
-//! # Отпечаток проверки подлинности
-//!
-//! Он не выводится из пароля напрямую. Тридцать два байта берутся **экспортом
-//! ключевого материала того самого соединения TLS**, где меткой служит UUID, а
-//! исходными данными — пароль.
-//!
-//! Смысл в том, что отпечаток привязан к конкретному рукопожатию: подслушанный
-//! в одном соединении, в другом он не подойдёт. Отсюда же и то, что посчитать
-//! его заранее нельзя — только после того, как QUIC установлен.
-//!
-//! **Метка — шестнадцать сырых байт UUID, а не его запись с дефисами.** В
-//! эталоне это `string(uuid[:])`, то есть побайтовое преобразование, а не
-//! `uuid.String()`. Ошибиться здесь легко, а выглядит ошибка как молчащий
-//! сервер: отпечаток не сойдётся, и сервер закроет соединение без объяснений.
-//!
-//! # Ответа нет ни на что
-//!
-//! Ни `Authenticate`, ни `Connect` сервер не подтверждает: после `Connect`
-//! данные идут сразу, не дожидаясь ответа. Значит, неверный пароль виден
-//! только тем, что соединение закрылось, — и различить его можно лишь по коду
-//! закрытия QUIC.
+//! Отпечаток проверки подлинности: 32 байта экспорта ключевого материала TLS,
+//! метка — 16 сырых байт UUID (`string(uuid[:])` в эталоне, не запись с дефисами),
+//! контекст — пароль. Ни `Authenticate`, ни `Connect` сервер не подтверждает.
 
 use penguin_core::address::SocketAddress;
 use penguin_core::uuid::Uuid;
@@ -87,10 +69,7 @@ pub fn connect(target: &SocketAddress) -> TuicResult<Vec<u8>> {
     Ok(out)
 }
 
-/// Заголовок куска датаграммы.
-///
-/// Поля идут ровно в этом порядке: номер сессии, номер датаграммы, сколько
-/// всего кусков, какой это кусок, длина куска, адрес.
+/// Заголовок куска датаграммы; поля идут в порядке объявления.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Packet {
     /// Номер UDP-сессии. Свой на каждый канал датаграмм.
@@ -108,30 +87,35 @@ pub struct Packet {
 }
 
 impl Packet {
-    /// Собирает заголовок куска.
-    ///
-    /// `Err` — номер куска не помещается в байт: кусков у датаграммы не
-    /// бывает больше 255, и молча обрезать номер значит собрать её неверно.
-    pub fn encode(&self) -> TuicResult<Vec<u8>> {
+    /// Длина заголовка вместе с заголовком команды.
+    pub fn encoded_len(&self) -> usize {
+        2 + 8 + address::encoded_len(self.address.as_ref())
+    }
+
+    /// Дописывает заголовок куска в `out`; `Err`, если номер куска не влезает в байт.
+    pub fn encode_into(&self, out: &mut Vec<u8>) -> TuicResult<()> {
         let fragment = u8::try_from(self.fragment).map_err(|_| {
             crate::error::TuicError::malformed(format!("кусок номер {}", self.fragment))
         })?;
 
-        let mut out = Vec::with_capacity(2 + 8 + address::encoded_len(self.address.as_ref()));
-        head(CMD_PACKET, &mut out);
+        head(CMD_PACKET, out);
         out.extend_from_slice(&self.association.to_be_bytes());
         out.extend_from_slice(&self.packet.to_be_bytes());
         out.push(self.fragments);
         out.push(fragment);
         out.extend_from_slice(&self.size.to_be_bytes());
-        address::encode(self.address.as_ref(), &mut out)?;
+        address::encode(self.address.as_ref(), out)
+    }
+
+    /// Собирает заголовок куска.
+    pub fn encode(&self) -> TuicResult<Vec<u8>> {
+        let mut out = Vec::with_capacity(self.encoded_len());
+        self.encode_into(&mut out)?;
         Ok(out)
     }
 
-    /// Читает заголовок куска с начала среза, **без** заголовка команды.
-    ///
-    /// Возвращает заголовок и число съеденных байт. `Ok(None)` — байт пока не
-    /// хватает.
+    /// Читает заголовок куска без заголовка команды: сам заголовок и число
+    /// съеденных байт; `Ok(None)` — байт не хватает.
     pub fn decode(bytes: &[u8]) -> TuicResult<Option<(Self, usize)>> {
         let Some(fixed) = bytes.first_chunk::<8>() else {
             return Ok(None);
@@ -219,8 +203,6 @@ mod tests {
 
     #[test]
     fn the_authenticate_command_is_the_length_the_spec_names() {
-        // 2 + 16 + 32: заголовок, UUID, отпечаток. Иначе сервер прочитает
-        // отпечаток не оттуда.
         let command = authenticate(&uuid(), &[0xAB; TOKEN_LEN]);
         assert_eq!(command.len(), AUTHENTICATE_LEN);
         assert_eq!(command[1], CMD_AUTHENTICATE);

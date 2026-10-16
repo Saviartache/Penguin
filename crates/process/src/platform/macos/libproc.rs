@@ -1,17 +1,5 @@
-//! `proc_pidfdinfo` — владелец сокета.
-//!
-//! Ответ на вопрос «чей это порт» macOS даёт только перебором: список
-//! процессов, у каждого список дескрипторов, у каждого сокета — его локальный
-//! адрес. Дешевле не даёт никто: интерфейса «кому принадлежит порт» в системе
-//! нет.
-//!
-//! # Про раскладку
-//!
-//! `struct socket_fdinfo` из `<sys/proc_info.h>` — часть открытого интерфейса
-//! системы, и поля в нём не двигаются. Повторять его в Rust целиком значило бы
-//! объявить пять вложенных структур ради четырёх чисел, поэтому ответ читается
-//! по смещениям. Проверка при этом остаётся: система сообщает, сколько байт
-//! записала, и ответ другого размера мы не разбираем вовсе.
+//! `proc_pidfdinfo`: локальные адреса сокетов процесса. `struct socket_fdinfo`
+//! из `<sys/proc_info.h>` читается по смещениям; ответ другого размера отбрасывается.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -29,18 +17,12 @@ const SOI_KIND: usize = 256;
 const INSI_LPORT: usize = 268;
 /// Смещение `psi.soi_proto.pri_in.insi_vflag`.
 const INSI_VFLAG: usize = 288;
-/// Смещение `psi.soi_proto.pri_in.insi_laddr`.
-///
-/// Внутри — объединение: IPv6-адрес занимает все шестнадцать байт, а
-/// IPv4-адрес лежит в последних четырёх.
+/// Смещение `psi.soi_proto.pri_in.insi_laddr` (IPv6 — 16 байт, IPv4 — последние 4).
 const INSI_LADDR: usize = 312;
 
-/// Сокет из семейства интернета. `SOCKINFO_IN`.
+/// `SOCKINFO_IN`.
 const SOCKINFO_IN: i32 = 1;
-/// Сокет TCP. `SOCKINFO_TCP`.
-///
-/// Поля `in_sockinfo` у него лежат там же: в объединении оба варианта
-/// начинаются с одного и того же.
+/// `SOCKINFO_TCP`; поля `in_sockinfo` у него там же.
 const SOCKINFO_TCP: i32 = 2;
 
 /// Адрес IPv4. `INI_IPV4`.
@@ -56,8 +38,6 @@ pub(super) fn all_pids() -> Vec<u32> {
         return Vec::new();
     }
 
-    // С запасом: процессы появляются между двумя вызовами, и точный размер из
-    // первого оказывается мал уже во втором.
     let capacity = usize::try_from(needed).unwrap_or(0) + 64;
     let mut pids = vec![0i32; capacity];
 
@@ -98,8 +78,6 @@ pub(super) fn path_of(pid: u32) -> Option<String> {
         )
     };
     if written <= 0 {
-        // Процесс закрылся или он чужой и читать его нам не дали. И то и
-        // другое — обычное дело.
         return None;
     }
 
@@ -199,8 +177,6 @@ fn local_address(pid: u32, descriptor: i32) -> Option<SocketAddr> {
         )
     };
 
-    // Ответ другого размера означает, что раскладка разошлась с нашей, и
-    // читать его по смещениям нельзя.
     if usize::try_from(written).ok()? != SOCKET_FDINFO_SIZE {
         return None;
     }
@@ -208,11 +184,7 @@ fn local_address(pid: u32, descriptor: i32) -> Option<SocketAddr> {
     parse(&buffer)
 }
 
-/// Разбирает ответ системы о сокете.
-///
-/// Свободная функция с тестом: смещение, съехавшее на четыре байта, даёт
-/// правдоподобный, но чужой адрес — и правило применяется не к тому
-/// приложению.
+/// Разбирает ответ системы о сокете (отдельно, ради теста смещений).
 fn parse(info: &[u8; SOCKET_FDINFO_SIZE]) -> Option<SocketAddr> {
     let family = number(info, SOI_FAMILY);
     let kind = number(info, SOI_KIND);
@@ -224,15 +196,12 @@ fn parse(info: &[u8; SOCKET_FDINFO_SIZE]) -> Option<SocketAddr> {
     )]
     let (inet, inet6) = (libc::AF_INET, libc::AF_INET6);
     if family != inet && family != inet6 {
-        // Локальные сокеты, каналы и всё прочее адреса не имеют.
         return None;
     }
     if kind != SOCKINFO_IN && kind != SOCKINFO_TCP {
         return None;
     }
 
-    // Порт лежит в порядке байт сети внутри числа: разбирать его надо по
-    // байтам, а не по значению.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -242,7 +211,6 @@ fn parse(info: &[u8; SOCKET_FDINFO_SIZE]) -> Option<SocketAddr> {
 
     let address = match info[INSI_VFLAG] {
         INI_IPV4 => {
-            // В объединении IPv4-адрес лежит в последних четырёх байтах.
             let octets: [u8; 4] = info
                 .get(INSI_LADDR + 12..INSI_LADDR + 16)?
                 .try_into()
@@ -253,7 +221,6 @@ fn parse(info: &[u8; SOCKET_FDINFO_SIZE]) -> Option<SocketAddr> {
             let octets: [u8; 16] = info.get(INSI_LADDR..INSI_LADDR + 16)?.try_into().ok()?;
             IpAddr::V6(Ipv6Addr::from(octets))
         }
-        // Сокет ещё не привязан ни к какому адресу.
         _ => return None,
     };
 
@@ -281,7 +248,6 @@ mod tests {
         buffer[SOI_FAMILY..SOI_FAMILY + 4].copy_from_slice(&libc::AF_INET.to_ne_bytes());
         buffer[SOI_KIND..SOI_KIND + 4].copy_from_slice(&kind.to_ne_bytes());
         buffer[INSI_VFLAG] = vflag;
-        // Порт лежит в порядке байт сети.
         buffer[INSI_LPORT..INSI_LPORT + 2].copy_from_slice(&port.to_be_bytes());
         buffer[INSI_LADDR + 12..INSI_LADDR + 12 + address.len().min(4)]
             .copy_from_slice(&address[..address.len().min(4)]);
@@ -299,29 +265,22 @@ mod tests {
 
     #[test]
     fn a_port_keeps_the_network_byte_order() {
-        // Порт лежит в числе в порядке байт сети; разбор по значению дал бы
-        // 36895 вместе 8080 — правдоподобное, но чужое соединение.
         let parsed = parse(&info(SOCKINFO_IN, INI_IPV4, 443, &[0, 0, 0, 0])).expect("адрес");
         assert_eq!(parsed.port(), 443);
     }
 
     #[test]
     fn a_socket_without_an_address_is_skipped() {
-        // Сокет, ещё не привязанный ни к чему, владельцем порта не является.
         assert!(parse(&info(SOCKINFO_TCP, 0, 8080, &[0, 0, 0, 0])).is_none());
     }
 
     #[test]
     fn a_socket_of_another_kind_is_skipped() {
-        // Локальные сокеты и каналы адреса не имеют, и разбирать их поля
-        // значит читать чужую половину объединения.
         assert!(parse(&info(7, INI_IPV4, 8080, &[127, 0, 0, 1])).is_none());
     }
 
     #[test]
     fn we_can_see_our_own_socket() {
-        // Сквозная проверка: сокет открыт этим самым процессом, и найтись
-        // должен именно его адрес.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("сокет");
         let local = listener.local_addr().expect("адрес");
 

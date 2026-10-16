@@ -1,11 +1,4 @@
-//! Что сервер делает с опознанным `CONNECT` и каналом датаграмм.
-//!
-//! ```text
-//!  поток:      клиент ─► CONNECT host:port ─► сюда ─► TcpStream ─► цель
-//!  датаграммы: клиент ─► датаграмма(адрес)  ─► сюда ─► UdpSocket ─► цель
-//! ```
-//!
-//! Имя цели разрешается **здесь**: ради этого прокси и существует.
+//! Опознанный `CONNECT` и канал датаграмм: TCP и UDP к цели. Имя цели разрешается здесь.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -20,10 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::cover::Stream;
 
-/// Сколько ждать соединения с целью.
-///
-/// Клиент ответа не ждёт и, скорее всего, уже прислал данные; срок нужен,
-/// чтобы висящая цель не держала поток бесконечно.
+/// Срок соединения с целью.
 const DIAL_LIMIT: Duration = Duration::from_secs(8);
 
 /// Через сколько тишины закрывать датаграммный канал: у UDP нет закрытия.
@@ -77,12 +67,13 @@ async fn pump(stream: Stream, upstream: TcpStream) -> anyhow::Result<()> {
         anyhow::Ok(())
     };
     let down = async {
+        let mut buffer = BytesMut::new();
         loop {
-            let mut buffer = BytesMut::with_capacity(COPY_BUFFER);
+            buffer.reserve(COPY_BUFFER);
             if from_target.read_buf(&mut buffer).await? == 0 {
                 break;
             }
-            send.send_data(buffer.freeze()).await?;
+            send.send_data(buffer.split().freeze()).await?;
         }
         send.finish().await?;
         anyhow::Ok(())
@@ -101,7 +92,6 @@ async fn dial(target: &SocketAddress) -> std::io::Result<TcpStream> {
         Address::Ip(ip) => TcpStream::connect(SocketAddr::new(*ip, target.port)).await?,
         Address::Domain(domain) => TcpStream::connect((domain.as_str(), target.port)).await?,
     };
-    // Запрос — ответ мелкими посылками: склейка дала бы задержку на каждом.
     stream.set_nodelay(true)?;
     Ok(stream)
 }
@@ -133,10 +123,7 @@ fn ok() -> Response<()> {
     response
 }
 
-/// Обслуживает датаграммный канал: один сокет на канал, адрес на посылке.
-///
-/// Один сокет, а не по одному на собеседника: так же ведёт себя обычный NAT.
-/// `incoming` — датаграммы этого запроса, уже без номера потока.
+/// Датаграммный канал: один сокет на канал, адрес на посылке (как у NAT).
 pub async fn datagram(
     mut stream: Stream,
     quic: quinn::Connection,
@@ -172,20 +159,19 @@ pub async fn datagram(
     };
     let returning = async {
         let mut buffer = vec![0u8; UDP_BUFFER];
+        let mut payload = Vec::new();
         while let Ok(Ok((len, from))) =
             tokio::time::timeout(UDP_IDLE, socket.recv_from(&mut buffer)).await
         {
-            let Ok(payload) = udp::encode(&SocketAddress::from(from), &buffer[..len]) else {
+            if udp::encode_into(&SocketAddress::from(from), &buffer[..len], &mut payload).is_err() {
                 continue;
-            };
+            }
             match quic.send_datagram(udp::datagram::encode(stream_id, &payload)) {
-                // Не влезла — теряется, как потерялась бы в сети.
                 Ok(()) | Err(quinn::SendDatagramError::TooLarge) => {}
                 Err(_) => return,
             }
         }
     };
-    // Конец или сброс потока запроса — канал закрыт.
     let closed = async { while let Ok(Some(_)) = stream.recv_data().await {} };
 
     tokio::select! {

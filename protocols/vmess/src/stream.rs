@@ -1,26 +1,8 @@
-//! Поток VMess: снять заголовок ответа, дальше — кадр тела в обе стороны.
+//! Поток VMess после заголовка запроса ([`crate::connector`]): снять заголовок ответа, кадровать тело.
 //!
-//! Заголовок запроса отправляет [`crate::connector`] до того, как поток
-//! появляется здесь; этот тип берёт на себя ровно то, что происходит после
-//! него.
-//!
-//! # Заголовок ответа — лениво, как у VLESS
-//!
-//! Сервер шлёт свой заголовок не в ответ на наш, а вместе с первыми данными
-//! (`buf.Copy(bodyReader, output, ...)` идёт параллельно с чтением заголовка
-//! в одном соединении, эталон `v2fly/v2ray-core`). Прочитать его сразу после
-//! отправки запроса нельзя — соединение зависло бы. Снимается он в первом же
-//! [`AsyncRead::poll_read`], в две стадии: сначала блок длины (18 байт,
-//! AEAD), потом сам заголовок (`длина + 16`, AEAD), и лишь потом байты
-//! приложения.
-//!
-//! # Кадр тела — не у `zero`
-//!
-//! У `security = "zero"` кадра нет вовсе: после заголовка ответа это ровно
-//! те байты, что отдало приложение на другом конце. У всех остальных шифров
-//! (включая `none`) кадр есть — длина, кусок, может быть метка, может быть
-//! дополнение ([`crate::frame::body`]) — и снимается или добавляется на
-//! каждом чтении и записи.
+//! Заголовок ответа сервер шлёт вместе с первыми данными, поэтому он снимается лениво в
+//! первом `poll_read`: блок длины (18 байт), затем заголовок (`длина + 16`).
+//! У `zero` кадра нет; у остальных шифров ([`crate::frame::body`]) он есть.
 
 use std::collections::VecDeque;
 use std::io;
@@ -64,10 +46,6 @@ pub struct VmessStream<S> {
     io: S,
     recv: Option<BodyCipher>,
     send: Option<BodyCipher>,
-    /// Ключи заголовка ответа — нужны только один раз, до [`ReadState::Raw`]
-    /// или [`ReadState::ChunkLength`], но живут своими полями, а не внутри
-    /// [`crate::crypto::session::Session`]: она уже потрачена на сборку
-    /// `recv`/`send` к моменту, когда поток появляется.
     response_body_key: [u8; 16],
     response_body_iv: [u8; 16],
     response_header: u8,
@@ -75,8 +53,7 @@ pub struct VmessStream<S> {
     incoming: BytesMut,
     ready: VecDeque<Bytes>,
     out: BytesMut,
-    /// Терминатор тела уже поставлен в очередь на запись — `poll_shutdown`
-    /// не должен добавлять его дважды.
+    /// Терминатор уже в очереди.
     closing: bool,
 }
 
@@ -119,8 +96,7 @@ impl<S> VmessStream<S> {
 }
 
 impl<S: AsyncRead + Unpin> VmessStream<S> {
-    /// Продвигает разбор на один шаг. `Ok(true)` — что-то разобралось,
-    /// стоит попробовать ещё раз; `Ok(false)` — байт пока не хватает.
+    /// Шаг разбора: `Ok(true)` — продвинулись, `Ok(false)` — не хватает байт.
     fn take_step(&mut self) -> Result<bool, VmessError> {
         match self.state {
             ReadState::LengthBlock => {
@@ -133,9 +109,6 @@ impl<S: AsyncRead + Unpin> VmessStream<S> {
                     .as_ref()
                     .try_into()
                     .unwrap_or_else(|_| unreachable!("длина блока проверена выше"));
-                // Ключи ответа не зависят от кадра тела и есть всегда — даже
-                // у `zero`: заголовок ответа шифруется одинаково при любом
-                // шифре тела (см. документ модуля).
                 let len = response::open_length(
                     &self.response_body_key,
                     &self.response_body_iv,
@@ -232,10 +205,6 @@ impl<S: AsyncRead + Unpin> AsyncRead for VmessStream<S> {
                 return Poll::Ready(Ok(()));
             }
             if matches!(this.state, ReadState::Raw) {
-                // То, что уже накоплено при разборе заголовка (данные почти
-                // всегда приходят с ним одним пакетом), обязано уйти первым
-                // — иначе оно осталось бы лежать в `incoming` навсегда: без
-                // кадра у `zero` эти байты никто больше не заберёт.
                 if !this.incoming.is_empty() {
                     let take = this.incoming.len().min(buf.remaining());
                     buf.put_slice(&this.incoming[..take]);
@@ -319,13 +288,11 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VmessStream<S> {
         }
 
         let take = buf.len().min(MAX_PLAINTEXT);
-        let sealed = {
-            let Some(send) = this.send.as_mut() else {
-                unreachable!("проверено выше: `send` собран для этого шифра")
-            };
-            send.seal_chunk(&buf[..take]).map_err(as_io)?
+        let Some(send) = this.send.as_mut() else {
+            unreachable!("проверено выше: `send` собран для этого шифра")
         };
-        this.out.extend_from_slice(&sealed);
+        send.seal_chunk(&buf[..take], &mut this.out)
+            .map_err(as_io)?;
 
         let _ = this.poll_drain(cx);
         Poll::Ready(Ok(take))
@@ -346,14 +313,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for VmessStream<S> {
             && let Some(send) = this.send.as_mut()
         {
             this.closing = true;
-            match send.seal_chunk(&[]) {
-                Ok(terminator) => this.out.extend_from_slice(&terminator),
-                Err(_) => {
-                    // Не удалось собрать терминатор — закрываем как есть:
-                    // сервер увидит обрыв TCP вместо явного сигнала, но
-                    // соединение всё равно закроется.
-                }
-            }
+            // Без терминатора сервер увидит обрыв TCP, но поток всё равно закроется.
+            let _ = send.seal_chunk(&[], &mut this.out);
         }
 
         match this.poll_drain(cx) {
@@ -376,8 +337,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     use super::*;
+    use crate::frame::body::seal_to_vec;
 
-    /// То, что сервер отправил бы первым: заголовок ответа, потом кусок тела.
+    /// Первое, что шлёт сервер: заголовок ответа и кусок тела.
     fn server_wire(session: &Session, payload: &[u8]) -> Vec<u8> {
         let plain_header = [session.response_header, 0, 0, 0];
         let mut wire = seal_header(session, &plain_header);
@@ -388,14 +350,14 @@ mod tests {
                 &session.response_body_key,
                 &session.response_body_iv,
             );
-            wire.extend_from_slice(&body.seal_chunk(payload).expect("шифруется"));
+            wire.extend_from_slice(&seal_to_vec(&mut body, payload));
         } else {
             wire.extend_from_slice(payload);
         }
         wire
     }
 
-    /// Заголовок ответа, зашифрованный ровно так, как это делает сервер.
+    /// Заголовок ответа, как его шифрует сервер.
     fn seal_header(session: &Session, plain: &[u8]) -> Vec<u8> {
         use crate::crypto::aes_gcm;
         use crate::crypto::kdf::{kdf, kdf16};
@@ -445,8 +407,6 @@ mod tests {
     #[tokio::test]
     async fn a_mismatched_response_header_byte_is_reported() {
         let session = Session::new(Wire::Aes128Gcm);
-        // Заголовок расшифровался (ключи верны), но первый байт — не тот,
-        // что отправил клиент: сервер отвечает не тому, кто спрашивал.
         let wrong_header = session.response_header.wrapping_add(1);
         let plain_header = [wrong_header, 0, 0, 0];
         let wire = seal_header(&session, &plain_header);

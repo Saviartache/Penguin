@@ -1,21 +1,12 @@
-//! Байтовая раскладка тела датаграммы UDP 2022 — без шифрования, без сети.
+//! Раскладка тела датаграммы UDP 2022 (без 16-байтового заголовка сессии, без шифрования).
 //!
 //! ```text
-//! Клиент -> сервер (до шифрования, без 16-байтового заголовка сессии):
-//!  TYPE(1) TIMESTAMP(8, BE) PADDING_LEN(2, BE) PADDING(...) ADDR(...) PAYLOAD(...)
-//!
-//! Сервер -> клиент:
-//!  TYPE(1) TIMESTAMP(8, BE) CLIENT_SESSION_ID(8, BE) PADDING_LEN(2, BE) PADDING(...) ADDR(...) PAYLOAD(...)
+//! клиент -> сервер: TYPE(1) TIMESTAMP(8) PADDING_LEN(2) PADDING ADDR PAYLOAD
+//! сервер -> клиент: TYPE(1) TIMESTAMP(8) CLIENT_SESSION_ID(8) PADDING_LEN(2) PADDING ADDR PAYLOAD
 //! ```
 //!
-//! Раскладка сверена построчно с `shadowsocks-rust`
-//! (`relay/udprelay/aead_2022.rs`, ASCII-схема в начале файла,
-//! `encrypt_client_payload_aead_2022`, `decrypt_server_payload_aead_2022`) и
-//! независимо с `sing-shadowsocks2`
-//! (`shadowaead_2022/method.go::WritePacket`, `readPacket`). Сам 16-байтовый
-//! заголовок (идентификатор сессии, счётчик пакета) сюда не входит — им
-//! занимается [`crate::udp2022::datagram`], потому что у AES-GCM и ChaCha он
-//! устроен по-разному (см. документ [`crate::udp2022::cipher`]).
+//! Эталон: `shadowsocks-rust` (`relay/udprelay/aead_2022.rs`), `sing-shadowsocks2`
+//! (`shadowaead_2022/method.go`).
 
 use penguin_core::address::SocketAddress;
 use penguin_transport::addr::socks;
@@ -43,13 +34,8 @@ pub fn build_client_body(
     Ok(out)
 }
 
-/// Разбирает тело серверной датаграммы: проверяет тип и метку времени,
-/// возвращает идентификатор сессии клиента (сервер обязан вернуть наш же),
-/// адрес источника и полезную нагрузку.
-pub fn parse_server_body(
-    plain: &[u8],
-    now: u64,
-) -> ShadowsocksResult<(u64, SocketAddress, Vec<u8>)> {
+/// Разбирает тело серверной датаграммы: идентификатор сессии клиента, адрес источника, нагрузка.
+pub fn parse_server_body(plain: &[u8], now: u64) -> ShadowsocksResult<(u64, SocketAddress, &[u8])> {
     let Some((&kind, rest)) = plain.split_first() else {
         return Err(ShadowsocksError::malformed("датаграмма 2022 пуста"));
     };
@@ -94,7 +80,7 @@ pub fn parse_server_body(
         ));
     };
 
-    Ok((client_session_id, source, rest[used..].to_vec()))
+    Ok((client_session_id, source, &rest[used..]))
 }
 
 #[cfg(test)]
@@ -164,11 +150,7 @@ mod tests {
 
     #[test]
     fn a_truncated_header_or_address_is_rejected_not_panicked_on() {
-        // У полезной нагрузки нет своей длины — это весь остаток буфера, и
-        // обрезанный ровно на границе перед ней пакет неотличим от пакета
-        // без данных (см. `an_empty_payload_is_still_a_datagram` у AEAD).
-        // Обрезан здесь должен быть заголовок или адрес — то, что и правда
-        // разъезжается с форматом.
+        // Нагрузка без длины: обрезка на её границе неотличима от пустой
         let plain = server_plain(1, 1_000, &target(), b"payload");
         let header_and_address_len = plain.len() - b"payload".len();
         for cut in 0..header_and_address_len {
@@ -190,8 +172,7 @@ mod tests {
 
     #[test]
     fn padding_is_skipped_without_being_returned() {
-        // Дополнение реальное только тогда, когда `payload` пуст — здесь оно
-        // подставлено руками, чтобы проверить именно пропуск, а не генератор.
+        // Дополнение подставлено руками: проверяется пропуск, не генератор
         let mut plain = vec![TYPE_SERVER];
         plain.extend_from_slice(&1_000u64.to_be_bytes());
         plain.extend_from_slice(&7u64.to_be_bytes());

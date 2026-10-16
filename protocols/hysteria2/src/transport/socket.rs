@@ -1,20 +1,7 @@
-//! UDP-сокет, через который QUIC говорит с сервером.
+//! UDP-сокет QUIC с обфускацией и сменой порта (иначе берётся сокет quinn с GSO/GRO).
 //!
-//! Обычно quinn работает со своим сокетом и пользуется всем, что даёт ядро:
-//! отправкой нескольких датаграмм одним вызовом (GSO) и их приёмом пачкой
-//! (GRO). Пока обфускации и смены порта нет, так и надо — этот модуль в игру
-//! не вступает.
-//!
-//! Он нужен, когда каждый пакет надо потрогать по одному:
-//!
-//! - **обфускация** меняет содержимое пакета целиком, включая заголовок QUIC;
-//! - **смена порта** меняет адрес назначения, о чём quinn знать не должен.
-//!
-//! Второе стоит пояснить. quinn считает, что у соединения один адрес
-//! собеседника; пакет с другого порта он посчитал бы попыткой смены пути и
-//! отбросил. Поэтому подмена делается ровно здесь и симметрично: на отправке
-//! порт заменяется на текущий, на приёме — обратно на тот, который quinn
-//! считает адресом сервера. Выше по стеку смены порта не видно вовсе.
+//! Смена порта подменяется здесь симметрично: на отправке порт текущий, на
+//! приёме обратно адрес сервера, иначе quinn сочтёт пакет сменой пути.
 
 use std::io;
 use std::net::SocketAddr;
@@ -32,10 +19,7 @@ use super::obfs::Obfuscator;
 #[cfg(feature = "obfs-gecko")]
 use super::obfs::gecko::{Gecko, Incoming};
 
-/// Размер буфера, на котором собирается исходящий пакет.
-///
-/// Больше любого разумного путевого MTU. Пакет крупнее уложится в выделенный
-/// буфер — это редкий путь, и платить за него аллокацией не жалко.
+/// Стековый буфер исходящего пакета; крупнее — редкий путь с аллокацией.
 const SCRATCH: usize = 2048;
 
 /// Сокет с обфускацией и сменой порта.
@@ -84,10 +68,7 @@ impl HysteriaSocket {
         self
     }
 
-    /// Насколько обфускация удлиняет пакет.
-    ///
-    /// На эту величину `quic.rs` уменьшает объявленный QUIC размер датаграммы:
-    /// иначе обфусцированный пакет перестанет помещаться в путевой MTU.
+    /// Удлинение пакета обфускацией; на него уменьшается размер датаграммы QUIC.
     pub fn overhead(&self) -> usize {
         self.obfs.as_ref().map_or(0, |o| o.overhead())
     }
@@ -95,8 +76,6 @@ impl HysteriaSocket {
     /// Куда отправлять с учётом смены порта.
     fn destination(&self, requested: SocketAddr) -> SocketAddr {
         match &self.hop {
-            // Порт подменяется только у самого сервера: чужой адрес трогать
-            // нельзя, даже если он сюда как-то попал.
             Some(hop) if requested.ip() == self.server.ip() => {
                 SocketAddr::new(requested.ip(), hop.current())
             }
@@ -120,19 +99,18 @@ impl HysteriaSocket {
         };
 
         let needed = packet.len() + obfs.overhead();
-        if needed <= SCRATCH {
-            let mut scratch = [0u8; SCRATCH];
-            let len = obfs
-                .obfuscate(packet, &mut scratch)
-                .ok_or_else(|| io::Error::other("обфускация не уместилась в буфер"))?;
-            self.inner.try_send_to(&scratch[..len], destination)?;
+        let mut stack = [0u8; SCRATCH];
+        let mut heap;
+        let scratch = if needed <= SCRATCH {
+            &mut stack[..]
         } else {
-            let mut scratch = vec![0u8; needed];
-            let len = obfs
-                .obfuscate(packet, &mut scratch)
-                .ok_or_else(|| io::Error::other("обфускация не уместилась в буфер"))?;
-            self.inner.try_send_to(&scratch[..len], destination)?;
-        }
+            heap = vec![0u8; needed];
+            &mut heap[..]
+        };
+        let len = obfs
+            .obfuscate(packet, scratch)
+            .ok_or_else(|| io::Error::other("обфускация не уместилась в буфер"))?;
+        self.inner.try_send_to(&scratch[..len], destination)?;
         Ok(())
     }
 }
@@ -147,27 +125,19 @@ impl AsyncUdpSocket for HysteriaSocket {
     fn try_send(&self, transmit: &Transmit) -> io::Result<()> {
         let destination = self.destination(transmit.destination);
 
-        // `max_transmit_segments` объявлен единицей, поэтому quinn сюда пачек
-        // не кладёт. Разбор всё равно есть: молча слепить несколько датаграмм
-        // в одну — это порча трафика, которую потом не найти.
-        let segments: Box<dyn Iterator<Item = &[u8]>> = match transmit.segment_size {
-            Some(size) if size > 0 && size < transmit.contents.len() => {
-                Box::new(transmit.contents.chunks(size))
-            }
-            _ => Box::new(std::iter::once(transmit.contents)),
-        };
-
-        for segment in segments {
+        // Пачек нет (`max_transmit_segments` = 1), но склейку не допускаем.
+        let size = transmit
+            .segment_size
+            .unwrap_or(transmit.contents.len())
+            .max(1);
+        for segment in transmit.contents.chunks(size) {
             #[cfg(feature = "obfs-gecko")]
             if let Some(gecko) = &self.gecko
                 && Gecko::applies_to(segment)
                 && let Some(frames) = gecko.fragment(segment)
             {
                 for frame in frames {
-                    // Часть не ушла — остальные тоже не отправляем. Для QUIC
-                    // это выглядит потерей пакета, а он к потерям готов;
-                    // досылать половину бессмысленно, целого пакета всё равно
-                    // не получится.
+                    // Часть не ушла — остальные не шлём: для QUIC это потеря пакета.
                     self.send_one(&frame, destination)?;
                 }
                 continue;
@@ -188,9 +158,7 @@ impl AsyncUdpSocket for HysteriaSocket {
             return Poll::Ready(Ok(0));
         };
 
-        // Цикл, а не один заход: пакет может оказаться мусором с открытого
-        // порта или частью ещё не собранного целого. В обоих случаях отдавать
-        // наверх нечего, и надо ждать следующего.
+        // Мусор и недособранные части наверх не отдаём — ждём следующий пакет.
         loop {
             let mut read = ReadBuf::new(buf);
             let actual = ready!(self.inner.poll_recv_from(cx, &mut read))?;
@@ -199,8 +167,6 @@ impl AsyncUdpSocket for HysteriaSocket {
             if let Some(obfs) = &self.obfs {
                 match obfs.deobfuscate(&mut buf[..len]) {
                     Some(shorter) => len = shorter,
-                    // На открытый UDP-порт стучится кто угодно; это фон, а не
-                    // ошибка соединения.
                     None => continue,
                 }
             }
@@ -236,9 +202,7 @@ impl AsyncUdpSocket for HysteriaSocket {
     }
 
     fn max_transmit_segments(&self) -> usize {
-        // Аппаратная сегментация несовместима с обфускацией: она склеивает
-        // датаграммы в одну отправку, а обфускатор обязан видеть каждую
-        // отдельно.
+        // GSO несовместима с обфускацией: нужна каждая датаграмма отдельно.
         1
     }
 
@@ -300,8 +264,6 @@ mod tests {
         assert_eq!(sent_to.ip(), requested.ip());
         assert!((20000..=30000).contains(&sent_to.port()));
 
-        // Обратно quinn обязан увидеть тот адрес, к которому подключался, —
-        // иначе он посчитает ответ попыткой смены пути и отбросит его.
         assert_eq!(socket.source(sent_to), requested);
     }
 

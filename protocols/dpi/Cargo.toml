@@ -14,14 +14,12 @@ workspace = true
 [dependencies]
 penguin-core.workspace = true
 penguin-proto.workspace = true
-# Ради `desync`: сам обход целиком лежит там.
+# `desync`: обход целиком лежит там
 penguin-transport.workspace = true
 
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time"] }
 async-trait.workspace = true
 bytes.workspace = true
 serde.workspace = true
-# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
-# разбирает их только этот крейт.
 serde_json.workspace = true
 tracing.workspace = true

@@ -1,8 +1,4 @@
-//! Чтение кадров HTTP/3 из потока QUIC.
-//!
-//! Один разборщик на все потоки — и на поток управления, и на потоки
-//! запросов. Он поллинговый: из него собран `AsyncRead` над телом ответа,
-//! а асинхронные обёртки ниже нужны тем, кто читает кадр целиком.
+//! Чтение кадров HTTP/3 из потока QUIC (поллинговое: на нём `AsyncRead` тела).
 
 use std::future::poll_fn;
 use std::task::{Context, Poll, ready};
@@ -28,7 +24,6 @@ pub(super) struct FrameReader {
 }
 
 impl FrameReader {
-    /// Разборщик над потоком, с которого уже снят тип, если он был.
     pub(super) fn new(recv: quinn::RecvStream) -> Self {
         Self {
             recv,
@@ -48,8 +43,7 @@ impl FrameReader {
         self.remaining
     }
 
-    /// Заголовок следующего кадра. `None` — поток кончился ровно на
-    /// границе кадров. Содержимое прошлого кадра должно быть дочитано.
+    /// Заголовок следующего кадра; `None` — конец потока на границе кадров.
     pub(super) fn poll_header(
         &mut self,
         cx: &mut Context<'_>,
@@ -61,8 +55,7 @@ impl FrameReader {
                 self.remaining = header.len;
                 return Poll::Ready(Ok(Some(header)));
             }
-            // По байту: заголовок короткий, а лишнее прочитанное некуда
-            // было бы деть.
+            // По байту: прочитанное сверх заголовка некуда деть
             let mut byte = [0u8; 1];
             if ready!(self.recv.poll_read(cx, &mut byte)).map_err(read_error)? == 0 {
                 return Poll::Ready(if self.header_len == 0 {

@@ -13,18 +13,14 @@ workspace = true
 
 [dependencies]
 penguin-core.workspace = true
-# Только ради нормализации пути (`identity::normalize_path`): запись правила и
-# путь, выданный системой, обязаны приводиться к одному виду одним и тем же
-# кодом, иначе они не совпадут.
+# Ради `identity::normalize_path`: правило и путь из системы нормализуются одним кодом
 penguin-process.workspace = true
 ipnet.workspace = true
 aho-corasick.workspace = true
 regex.workspace = true
-globset.workspace = true
 maxminddb = { workspace = true, optional = true }
 
 [features]
 default = []
-# База GeoIP весит десятки мегабайт и не нужна тем, кто правил по странам
-# не заводит.
+# База GeoIP тяжёлая, нужна не всем
 geo = ["dep:maxminddb"]

@@ -100,8 +100,6 @@ mod tests {
 
     #[test]
     fn a_wrong_password_is_not_retried() {
-        // Ради этого варианта и стоило читать код сервера: он закрывает
-        // соединение с отдельным кодом, а не молчит, как Trojan.
         let err: ProtocolError = JuicityError::AuthRejected.into();
         assert!(!err.is_retryable());
     }

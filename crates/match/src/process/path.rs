@@ -1,23 +1,11 @@
-//! Путь к исполняемому файлу: точный, префикс, glob. С нормализацией регистра
-//! и разделителей.
-//!
-//! Три способа задать приложение, от точного к общему:
-//!
-//! | Способ | Запись | Что ловит |
-//! |---|---|---|
-//! | точный путь | `c:/program files/app/app.exe` | ровно этот файл |
-//! | префикс | `c:/games/` | всё внутри каталога |
-//! | шаблон | `c:/games/**/*.exe` | по маске |
-//!
-//! Пути приходят уже нормализованными (`penguin_process::identity`), и
-//! записи пользователя нормализуются здесь тем же способом — иначе
-//! `C:\Games\` из настроек не совпало бы с `c:/games/` из системы.
+//! Путь к исполняемому файлу: точный, префикс каталога, glob.
+//! Записи нормализуются тем же `normalize_path`, что и пути из системы.
 
 use std::collections::HashSet;
 
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use penguin_process::identity::normalize_path;
 
+use super::glob::Glob;
 use crate::matcher::Matcher;
 use crate::target::MatchTarget;
 
@@ -36,7 +24,7 @@ pub struct PrefixSet {
 /// Шаблоны путей.
 #[derive(Debug)]
 pub struct GlobPathSet {
-    globs: GlobSet,
+    globs: Vec<Glob>,
     labels: Vec<String>,
 }
 
@@ -62,7 +50,7 @@ impl PathSet {
 }
 
 impl PrefixSet {
-    /// Собирает набор префиксов.
+    /// Собирает набор префиксов; завершающий `/` добавляется, чтобы `c:/game` не ловил `c:/gamedev/`.
     pub fn new<I, S>(entries: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -73,9 +61,6 @@ impl PrefixSet {
                 .into_iter()
                 .map(|e| {
                     let prefix = normalize_path(e.as_ref());
-                    // Разделитель в конце обязателен: без него `c:/game`
-                    // поймало бы и `c:/gamedev/`, чего пользователь не имел
-                    // в виду.
                     if prefix.ends_with('/') {
                         prefix
                     } else {
@@ -101,34 +86,28 @@ impl GlobPathSet {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let mut builder = GlobSetBuilder::new();
+        let mut globs = Vec::new();
         let mut labels = Vec::new();
 
         for entry in entries {
             let pattern = normalize_path(entry.as_ref());
-            let glob = Glob::new(&pattern)
-                .map_err(|e| format!("не разбирается шаблон `{pattern}`: {e}"))?;
-            builder.add(glob);
+            globs.push(
+                Glob::new(&pattern)
+                    .map_err(|e| format!("не разбирается шаблон `{pattern}`: {e}"))?,
+            );
             labels.push(pattern);
         }
-
-        let globs = builder
-            .build()
-            .map_err(|e| format!("не удалось собрать шаблоны: {e}"))?;
         Ok(Self { globs, labels })
     }
 
     /// Подходит ли путь под шаблон.
     pub fn matches_path(&self, path: &str) -> bool {
-        self.globs.is_match(path)
+        self.globs.iter().any(|g| g.is_match(path))
     }
 }
 
 impl Matcher for PathSet {
     fn matches(&self, target: &MatchTarget<'_>) -> bool {
-        // Владелец неизвестен — правило по приложению не применяется.
-        // «Не знаю чьё» и «ничьё» — разные вещи, и молча блокировать первое
-        // нельзя.
         target.process_path.is_some_and(|path| self.contains(path))
     }
 
@@ -180,15 +159,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_notation_is_normalized_on_both_sides() {
-        // Пользователь копирует путь из проводника — с обратными слэшами и
-        // заглавными буквами. Система выдаёт его иначе. Совпасть обязаны.
         let set = PathSet::new([r"C:\Program Files\App\App.exe"]);
         assert!(set.contains("c:/program files/app/app.exe"));
     }
 
     #[test]
     fn prefix_requires_a_separator() {
-        // Без завершающего разделителя `c:/game` поймало бы `c:/gamedev/`.
         let set = PrefixSet::new(["c:/games"]);
         assert!(set.contains("c:/games/steam/steam.exe"));
         assert!(!set.contains("c:/gamedev/tool.exe"));
@@ -223,8 +199,6 @@ mod tests {
 
         let destination: SocketAddr = "1.2.3.4:443".parse().expect("адрес");
         let target = MatchTarget::to_address(Network::Tcp, destination);
-        // Короткое соединение могло закрыться раньше, чем мы успели заглянуть
-        // в таблицу. Такое уходит по умолчанию режима, а не блокируется.
         assert!(!PathSet::new([APP]).matches(&target));
         assert!(!PrefixSet::new(["c:/"]).matches(&target));
     }

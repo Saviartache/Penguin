@@ -12,30 +12,21 @@ description = "Протокол Hysteria 2 поверх QUIC"
 workspace = true
 
 [dependencies]
-# Протокол зависит только от контракта и общих типов. Ни TUN, ни правил,
-# ни GUI он не видит — это и делает его заменяемым.
 penguin-core.workspace = true
 penguin-proto.workspace = true
 
 quinn = { workspace = true, features = ["rustls", "runtime-tokio"] }
 quinn-proto.workspace = true
 rustls = { workspace = true, features = ["ring", "std"] }
-# TLS, срок на рукопожатие и прочее общее для протоколов. Таблица доверия
-# (система, свой корень, отпечаток, никак) была здесь и уехала туда целиком:
-# трём копиям одного `insecure` незачем расходиться (AGENTS.md, правило 1.1.1).
-# Аутентификация — запрос HTTP/3 (`quic` даёт `h3::Connection`).
+# TLS и срок рукопожатия; аутентификация — HTTP/3 (`quic`)
 penguin-transport = { workspace = true, features = ["quic"] }
 
 tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 async-trait.workspace = true
 bytes.workspace = true
 blake2.workspace = true
-rand.workspace = true
 parking_lot.workspace = true
-dashmap.workspace = true
 serde.workspace = true
-# Параметры протокола приходят от `penguin-config` непрозрачным JSON —
-# разбирает их только этот крейт.
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -43,5 +34,5 @@ tracing.workspace = true
 [features]
 default = ["obfs-salamander"]
 obfs-salamander = []
-# Gecko поверх Salamander: дробление длинных пакетов рукопожатия.
+# Дробление пакетов рукопожатия поверх Salamander
 obfs-gecko = ["obfs-salamander"]

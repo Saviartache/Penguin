@@ -1,22 +1,19 @@
-//! Устройство smoltcp поверх очередей.
-//!
-//! Своё, а не готовое: пакеты приходят из асинхронного источника, а `Device`
-//! синхронен. Очереди и есть тот шов, где одно превращается в другое.
-//!
-//! Одно на два стека. Со стороны TUN в `rx` кладут пакеты от системы, а из
-//! `tx` забирают ответы приложению; со стороны тоннеля — наоборот, в `rx`
-//! ложатся пакеты, пришедшие от сервера, а из `tx` уходят наши. Устройству
-//! всё равно: у него нет стороны, есть две очереди.
+//! Устройство smoltcp поверх двух очередей: `rx` — пакеты снаружи, `tx` — собранные стеком.
 
 use std::collections::VecDeque;
 
 use bytes::BytesMut;
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 
+/// Пакетов на одну аллокацию буфера передачи.
+const TX_BATCH: usize = 16;
+
 /// Очереди пакетов между источником и smoltcp.
 pub struct VirtualDevice {
     rx: VecDeque<BytesMut>,
     tx: VecDeque<BytesMut>,
+    /// Общий буфер под собираемые пакеты: аллокация раз в [`TX_BATCH`] пакетов.
+    scratch: BytesMut,
     mtu: usize,
 }
 
@@ -26,7 +23,8 @@ impl VirtualDevice {
         Self {
             rx: VecDeque::new(),
             tx: VecDeque::new(),
-            mtu: mtu as usize,
+            scratch: BytesMut::new(),
+            mtu: usize::from(mtu),
         }
     }
 
@@ -44,6 +42,14 @@ impl VirtualDevice {
     pub fn take_tx(&mut self) -> Option<BytesMut> {
         self.tx.pop_front()
     }
+
+    fn tx_token(&mut self) -> TxTokenImpl<'_> {
+        TxTokenImpl {
+            tx: &mut self.tx,
+            scratch: &mut self.scratch,
+            mtu: self.mtu,
+        }
+    }
 }
 
 impl Device for VirtualDevice {
@@ -55,19 +61,15 @@ impl Device for VirtualDevice {
         _timestamp: smoltcp::time::Instant,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let packet = self.rx.pop_front()?;
-        // Пара токенов: стеку может понадобиться ответить на тот же пакет, и
-        // передатчик выдаётся вместе с приёмником.
-        Some((RxTokenImpl { packet }, TxTokenImpl { tx: &mut self.tx }))
+        Some((RxTokenImpl { packet }, self.tx_token()))
     }
 
     fn transmit(&mut self, _timestamp: smoltcp::time::Instant) -> Option<Self::TxToken<'_>> {
-        Some(TxTokenImpl { tx: &mut self.tx })
+        Some(self.tx_token())
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
-        // `Ip`, а не `Ethernet`: канального заголовка нет ни у TUN, ни у
-        // тоннеля, и ARP тут не нужен.
         caps.medium = Medium::Ip;
         caps.max_transmission_unit = self.mtu;
         caps
@@ -88,13 +90,18 @@ impl RxToken for RxTokenImpl {
 /// Токен передачи: принимает пакет от стека.
 pub struct TxTokenImpl<'a> {
     tx: &'a mut VecDeque<BytesMut>,
+    scratch: &'a mut BytesMut,
+    mtu: usize,
 }
 
 impl TxToken for TxTokenImpl<'_> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut packet = BytesMut::zeroed(len);
-        let result = f(&mut packet);
-        self.tx.push_back(packet);
+        if self.scratch.capacity() < len {
+            self.scratch.reserve(TX_BATCH * self.mtu.max(len));
+        }
+        self.scratch.resize(len, 0);
+        let result = f(self.scratch);
+        self.tx.push_back(self.scratch.split());
         result
     }
 }
@@ -119,6 +126,20 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_packets_stay_separate() {
+        let mut device = VirtualDevice::new(1280);
+        let now = smoltcp::time::Instant::from_micros(0);
+
+        for payload in [&b"one"[..], b"three", b"2"] {
+            let tx = device.transmit(now).expect("передатчик есть");
+            tx.consume(payload.len(), |buffer| buffer.copy_from_slice(payload));
+        }
+        assert_eq!(&device.take_tx().expect("пакет")[..], b"one");
+        assert_eq!(&device.take_tx().expect("пакет")[..], b"three");
+        assert_eq!(&device.take_tx().expect("пакет")[..], b"2");
+    }
+
+    #[test]
     fn empty_device_yields_nothing() {
         let mut device = VirtualDevice::new(1280);
         assert!(
@@ -131,8 +152,6 @@ mod tests {
 
     #[test]
     fn the_mtu_reaches_smoltcp() {
-        // Соврать здесь — значит объявить стеку MSS, который не пройдёт, и
-        // получить страницу, которая грузится наполовину.
         let device = VirtualDevice::new(1420);
         assert_eq!(device.capabilities().max_transmission_unit, 1420);
         assert_eq!(device.capabilities().medium, Medium::Ip);

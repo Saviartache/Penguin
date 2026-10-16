@@ -36,10 +36,7 @@ impl std::fmt::Debug for NaiveHttp2Outbound {
 }
 
 impl NaiveHttp2Outbound {
-    /// Устанавливает соединение с сервером и держит его открытым.
-    ///
-    /// Соединение одно на весь профиль: каждый `connect_tcp` открывает свой
-    /// поток `CONNECT` внутри него, а не поднимает TLS заново.
+    /// Устанавливает соединение; каждый `connect_tcp` — свой поток `CONNECT` в нём.
     pub async fn connect(
         id: OutboundId,
         config: NaiveConfig,
@@ -74,9 +71,6 @@ impl NaiveHttp2Outbound {
                 .await
                 .map_err(|e| NaiveError::Disconnected(e.to_string()))?;
             let status = response.status().as_u16();
-            // Тип дополнения решается по ответу на этот конкретный CONNECT —
-            // не по соединению целиком: так делает и эталон, см.
-            // `crate::padding`.
             let mode = padding::negotiate_h2(response.headers());
             let recv_stream = response.into_body();
             let io = PaddedStream::new(H2Stream::new(send_stream, recv_stream), mode);
@@ -100,15 +94,9 @@ impl Outbound for NaiveHttp2Outbound {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            // У CONNECT нет датаграмм ни в каком виде: соврать здесь значит
-            // отправить DNS-запрос в направление, которое его молча потеряет
-            // (`AGENTS.md`, §8, чек-лист приёмки).
             udp: false,
-            // Несколько потоков CONNECT делят одно соединение HTTP/2:
-            // TLS-рукопожатие платится один раз на весь профиль.
             multiplex: true,
             port_hopping: false,
-            // Имя уезжает на сервер в `:authority` и разрешается там.
             remote_dns: true,
         }
     }
@@ -121,16 +109,10 @@ impl Outbound for NaiveHttp2Outbound {
     }
 
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
-        // Не «выключено настройкой», а «такого не бывает»: маршрутизатор
-        // спрашивает возможности заранее и сюда с UDP не приходит, но если
-        // придёт — ответ обязан быть честным.
         Err(ProtocolError::Unsupported("UDP"))
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        // Без этого задача, качающая кадры соединения, пережила бы само
-        // направление: `tokio::spawn` не останавливает задачу сам, когда её
-        // `JoinHandle` роняют.
         self.transport.shutdown();
         Ok(())
     }

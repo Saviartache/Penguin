@@ -1,4 +1,4 @@
-//! Linux: installation and lifecycle of the systemd service.
+//! Linux: установка и жизненный цикл службы systemd.
 
 use std::path::{Path, PathBuf};
 
@@ -11,11 +11,8 @@ const SYSTEMCTL: &str = "systemctl";
 const UNIT: &str = "penguin.service";
 const UNIT_PATH: &str = "/etc/systemd/system/penguin.service";
 
-/// Stages the program, registers and enables the service without starting it.
-///
-/// Repeating it is how a wrong or outdated registration is repaired: the unit
-/// and the staged copy are both overwritten in place, and nothing is removed
-/// first.
+/// Кладёт копию программы, регистрирует и включает службу, не запуская; повторный вызов
+/// перезаписывает юнит и копию на месте, ничего не снимая заранее.
 pub fn install(executable: &Path) -> PlatformResult<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -32,23 +29,11 @@ pub fn install(executable: &Path) -> PlatformResult<()> {
     run(&["enable", UNIT])
 }
 
-/// Где лежит программа, возвращающая файлу предписанный контекст SELinux.
-///
-/// Два пути, потому что на одних системах `/sbin` — сам каталог, на других
-/// ссылка на `/usr/sbin`, и полагаться на `PATH` у службы нельзя.
+/// Пути `restorecon`: `/sbin` бывает каталогом или ссылкой на `/usr/sbin`, `PATH` у службы нет.
 const RESTORECON: [&str; 2] = ["/sbin/restorecon", "/usr/sbin/restorecon"];
 
-/// Возвращает файлу тот контекст SELinux, который предписывает политика.
-///
-/// Созданный нами файл получает контекст не от политики, а от каталога и от
-/// процесса, который его создал. Там, где SELinux включён — Fedora, RHEL,
-/// CentOS и родня, — это значит юнит, который systemd видит не тем, что он
-/// есть, и программу, запускаемую не в том домене. Наружу это выходит потоком
-/// записей в журнале аудита, и человек читает его вместо работы.
-///
-/// Необязательно и молча: `restorecon` есть только там, где есть SELinux, и
-/// его отсутствие — не отказ, а другая система. Неудача — тоже не отказ:
-/// служба ставится и без правильной метки, просто шумит.
+/// Возвращает файлу контекст SELinux по политике (иначе поток записей аудита). Молча: без SELinux
+/// `restorecon` нет, а неудача не мешает службе.
 fn restore_context(path: &str, recursive: bool) {
     let Some(program) = RESTORECON
         .iter()
@@ -72,13 +57,13 @@ fn restore_context(path: &str, recursive: bool) {
     }
 }
 
-/// Whether the registered unit is the very build asking the question.
+/// Та ли сборка зарегистрирована, что задаёт вопрос.
 pub(super) fn runs_current_build() -> bool {
     let registered = registered_executable().ok().flatten();
     stage::runs_current_build(registered.as_deref(), HELPER_PATH)
 }
 
-/// Stops the service and removes its registration, preserving real stop errors.
+/// Останавливает службу и снимает регистрацию; настоящие ошибки остановки не скрываются.
 pub fn uninstall() -> PlatformResult<()> {
     stop()?;
     if Path::new(UNIT_PATH).try_exists()? {
@@ -93,12 +78,12 @@ pub fn uninstall() -> PlatformResult<()> {
     run(&["daemon-reload"])
 }
 
-/// Starts the service; starting an already running service is harmless.
+/// Запускает службу; запуск работающей безвреден.
 pub fn start() -> PlatformResult<()> {
     run(&["start", UNIT])
 }
 
-/// Stops the service gracefully. Only an absent, inactive unit is ignored.
+/// Останавливает службу; игнорируется только отсутствующий неактивный юнит.
 pub fn stop() -> PlatformResult<()> {
     let report = command::run(
         SYSTEMCTL,
@@ -111,18 +96,18 @@ pub fn stop() -> PlatformResult<()> {
     run(&["stop", UNIT])
 }
 
-/// Queries service state, returning manager failures instead of "stopped".
+/// Состояние службы; отказ менеджера возвращается ошибкой, а не «остановлена».
 pub fn status() -> PlatformResult<ServiceStatus> {
     if !Path::new(UNIT_PATH).try_exists()? {
         return Ok(ServiceStatus::NotInstalled);
     }
-    // Unlike is-active, show succeeds for stopped and transitioning units.
+    // В отличие от `is-active`, `show` успешен и для остановленных, и для переходных состояний.
     let answer = command::run(SYSTEMCTL, &["show", "--property=ActiveState", UNIT])
         .map_err(|err| err.into_error(PlatformError::Service, "querying service"))?;
     systemd::state_from(&answer)
 }
 
-/// Returns the registered executable, or None for an absent/stale definition.
+/// Зарегистрированный файл; `None` — юнита нет или он чужой.
 pub fn registered_executable() -> PlatformResult<Option<PathBuf>> {
     match std::fs::read_to_string(UNIT_PATH) {
         Ok(text) => Ok(systemd::executable_from(&text)),

@@ -1,15 +1,11 @@
-//! Двунаправленное копирование с учётом трафика и корректным закрытием половин.
-//!
-//! Учёт делается обёрткой вокруг потока, а не в цикле копирования. Причина
-//! практическая: копированием занимается входящая точка (SOCKS5, TUN), и она
-//! про счётчики движка ничего не знает — да и не должна. Обёртка же
-//! возвращается ей как обычный поток.
+//! Поток, считающий трафик: обёртка, чтобы входящие точки не знали о счётчиках.
 
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 use penguin_core::id::OutboundId;
+use penguin_core::stats::Counters;
 use penguin_proto::stream::ProxyStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -17,13 +13,11 @@ use crate::metrics::counters::Metrics;
 
 /// Поток, считающий проходящие через него байты.
 ///
-/// «Вверх» и «вниз» здесь с точки зрения приложения: то, что оно **пишет** в
-/// этот поток, ушло наружу (`uploaded`); то, что **читает**, пришло снаружи
-/// (`downloaded`).
+/// Запись приложения — `uploaded`, чтение — `downloaded`.
 pub struct Metered {
     inner: Box<dyn ProxyStream>,
     metrics: Arc<Metrics>,
-    outbound: OutboundId,
+    outbound: Arc<Counters>,
     closed: bool,
 }
 
@@ -31,6 +25,7 @@ impl Metered {
     /// Оборачивает поток учётом.
     pub fn new(inner: Box<dyn ProxyStream>, metrics: Arc<Metrics>, outbound: OutboundId) -> Self {
         metrics.connection_opened(&outbound);
+        let outbound = metrics.outbound(&outbound);
         Self {
             inner,
             metrics,
@@ -42,8 +37,6 @@ impl Metered {
 
 impl Drop for Metered {
     fn drop(&mut self) {
-        // Закрытие учитывается ровно один раз, сколько бы раз ни звали
-        // `poll_shutdown`: иначе счётчик живых соединений уходит в минус.
         if !self.closed {
             self.metrics.connection_closed();
         }
@@ -61,7 +54,7 @@ impl AsyncRead for Metered {
         let read = buf.filled().len() - before;
 
         if read > 0 {
-            self.metrics.add_downloaded(&self.outbound, read as u64);
+            self.metrics.add_downloaded_to(&self.outbound, read as u64);
         }
         Poll::Ready(Ok(()))
     }
@@ -75,7 +68,7 @@ impl AsyncWrite for Metered {
     ) -> Poll<std::io::Result<usize>> {
         let written = ready!(Pin::new(&mut self.inner).poll_write(cx, buf))?;
         if written > 0 {
-            self.metrics.add_uploaded(&self.outbound, written as u64);
+            self.metrics.add_uploaded_to(&self.outbound, written as u64);
         }
         Poll::Ready(Ok(written))
     }
@@ -141,8 +134,6 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_then_drop_does_not_double_count() {
-        // `poll_shutdown` и `Drop` оба закрывают соединение; счётчик живых
-        // должен уменьшиться ровно один раз.
         let (ours, _theirs) = tokio::io::duplex(1024);
         let (mut metered, metrics) = wrap(Box::new(ours));
 

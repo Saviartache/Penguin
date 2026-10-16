@@ -30,10 +30,7 @@ impl ConfigStore {
         &self.paths
     }
 
-    /// Читает настройки.
-    ///
-    /// Файла нет — возвращаются умолчания, и это не ошибка: первый запуск
-    /// клиента ничем не отличается от любого другого.
+    /// Читает настройки; нет файла — умолчания.
     pub fn load(&self) -> ConfigResult<RootConfig> {
         let path = self.paths.config_file();
         let raw = match std::fs::read_to_string(&path) {
@@ -51,9 +48,6 @@ impl ConfigStore {
     }
 
     /// Разбирает содержимое файла.
-    ///
-    /// Отдельно от чтения: тесты и импорт настроек разбирают строку, у
-    /// которой файла нет.
     pub fn parse(raw: &str, path: &Path) -> ConfigResult<RootConfig> {
         toml::from_str(raw).map_err(|e| ConfigError::Parse {
             path: path.to_path_buf(),
@@ -61,11 +55,7 @@ impl ConfigStore {
         })
     }
 
-    /// Записывает настройки.
-    ///
-    /// Через временный файл и переименование: обрыв питания посреди записи
-    /// не должен оставить пользователя с наполовину записанным файлом и без
-    /// единого профиля. Прежнее содержимое сохраняется рядом в `.bak`.
+    /// Записывает через временный файл и `rename`; прежний файл остаётся в `.bak`.
     pub fn save(&self, config: &RootConfig) -> ConfigResult<()> {
         validate::validate(config)?;
         self.paths.ensure_dirs()?;
@@ -83,18 +73,11 @@ impl ConfigStore {
 
         let temp = temp_path(&path);
         std::fs::write(&temp, body.as_bytes()).map_err(|e| ConfigError::io(&temp, e))?;
-        // На Windows `rename` заменяет существующий файл (`MOVEFILE_REPLACE_EXISTING`),
-        // на POSIX это и так атомарная замена в пределах файловой системы.
-        // Временный файл лежит в том же каталоге именно поэтому.
         std::fs::rename(&temp, &path).map_err(|e| ConfigError::io(&path, e))?;
         Ok(())
     }
 
-    /// Записывает настройки по умолчанию, если файла ещё нет.
-    ///
-    /// Возвращает `true`, если файл создан. Нужно первому запуску: пустой
-    /// каталог настроек и файл с умолчаниями — разные вещи для пользователя,
-    /// который хочет посмотреть, что вообще можно настроить.
+    /// Записывает умолчания, если файла нет; `true` — файл создан.
     pub fn init_if_missing(&self) -> ConfigResult<bool> {
         if self.paths.config_file().exists() {
             return Ok(false);
@@ -160,7 +143,6 @@ mod tests {
         let profile = &loaded.profiles[0];
         assert_eq!(profile.name, "Домашний");
         assert_eq!(profile.outbound.protocol, "hysteria2");
-        // Непрозрачные параметры доезжают до протокола нетронутыми.
         assert_eq!(
             profile.outbound.field("server").and_then(|v| v.as_str()),
             Some("example.com:443")

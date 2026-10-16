@@ -1,11 +1,5 @@
-//! Сетевые интерфейсы, шлюз по умолчанию, метрики. Нужны, чтобы прямой
-//! трафик знал, куда идти.
-//!
-//! Когда TUN становится маршрутом по умолчанию, «выйти наружу» перестаёт быть
-//! очевидным действием: обычный сокет уедет в тоннель. Прямому выходу нужен
-//! адрес физического интерфейса, к которому он привяжется, — и этот адрес
-//! надо запомнить **до** поднятия тоннеля, пока система ещё отвечает на
-//! вопрос честно.
+//! Физический интерфейс, шлюз и метрика: прямой выход должен знать, куда идти, когда TUN —
+//! маршрут по умолчанию. Запоминается до подъёма тоннеля.
 
 use std::net::IpAddr;
 
@@ -20,19 +14,11 @@ pub struct DefaultRoute {
     pub address: IpAddr,
     /// Адрес шлюза.
     pub gateway: IpAddr,
-    /// Метрика маршрута.
-    ///
-    /// Маршрут тоннеля должен получить метрику **меньше**, иначе система
-    /// продолжит ходить мимо него.
+    /// Метрика маршрута; у маршрута тоннеля она должна быть меньше.
     pub metric: u32,
 }
 
-/// Находит интерфейс, через который машина выходит наружу.
-///
-/// Спрашивается «как дойти до этого адреса», а не «какой маршрут по
-/// умолчанию»: у машины бывает несколько маршрутов по умолчанию, и выбирает
-/// между ними всё равно система. Адрес взят из подсети, отведённой под
-/// документацию (RFC 5737), — соединяться с ним никто не будет.
+/// Находит интерфейс выхода наружу: спрашивается путь до адреса из RFC 5737, а не «маршрут по умолчанию».
 pub fn default_route() -> PlatformResult<DefaultRoute> {
     let probe: IpAddr = "192.0.2.1"
         .parse()
@@ -40,26 +26,14 @@ pub fn default_route() -> PlatformResult<DefaultRoute> {
     route_to(probe)
 }
 
-/// Имя интерфейса, если путь наружу ведёт через **чужой** тоннель.
-///
-/// `None` — путь ведёт обычным интерфейсом, и это норма.
-///
-/// Спрашивается до того, как поднят свой адаптер, поэтому «тоннель» здесь и
-/// значит «чужой»: другой VPN-клиент уже забрал себе маршрут по умолчанию.
-/// Наше соединение с сервером уйдёт внутрь него, и что с ним станет — решает
-/// он. Клиенты этого рода по умолчанию режут QUIC, то есть UDP на 443, а
-/// именно им ходят Hysteria 2, TUIC и MASQUE. Снаружи это неотличимо от
-/// недоступного сервера: рукопожатие не завершается, и переживает это любую
-/// перенастройку нашей стороны.
-///
-/// На Windows не проверяется: имя адаптеру там даёт производитель, и
-/// опознать по нему тоннель нельзя.
+/// Имя интерфейса, если путь наружу ведёт через чужой тоннель (чужой VPN режет QUIC); на Windows не проверяется.
 #[cfg(unix)]
 pub fn foreign_tunnel(route: &DefaultRoute) -> Option<String> {
     let name = interface_name(route.interface_index)?;
     is_tunnel(&name).then_some(name)
 }
 
+/// Имя интерфейса, если путь наружу ведёт через чужой тоннель (чужой VPN режет QUIC); на Windows не проверяется.
 #[cfg(not(unix))]
 pub fn foreign_tunnel(_route: &DefaultRoute) -> Option<String> {
     None
@@ -70,6 +44,7 @@ pub fn foreign_tunnel(_route: &DefaultRoute) -> Option<String> {
 #[allow(unsafe_code, reason = "имя интерфейса по номеру даёт только libc")]
 fn interface_name(index: u32) -> Option<String> {
     let mut buffer = [0 as libc::c_char; libc::IF_NAMESIZE];
+    // SAFETY: буфер `IF_NAMESIZE` — то, чего требует `if_indextoname`.
     if unsafe { libc::if_indextoname(index, buffer.as_mut_ptr()) }.is_null() {
         return None;
     }
@@ -77,22 +52,14 @@ fn interface_name(index: u32) -> Option<String> {
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(buffer.len());
-    #[allow(
-        clippy::cast_sign_loss,
-        reason = "имя интерфейса система составляет из ASCII"
-    )]
+    #[allow(clippy::cast_sign_loss, reason = "имя интерфейса — ASCII")]
     let bytes: Vec<u8> = buffer[..length].iter().map(|byte| *byte as u8).collect();
     String::from_utf8(bytes).ok()
 }
 
-/// Тоннельный ли это интерфейс — по имени, которое даёт ему система.
-///
-/// Свободная функция с тестом: ошибка здесь означает либо предупреждение при
-/// каждом обычном подключении, либо молчание там, ради чего всё затевалось.
+/// Тоннельный ли интерфейс — по имени (`utun`, `tun`, `wg`, `ppp`, `ipsec`).
 #[cfg(unix)]
 fn is_tunnel(name: &str) -> bool {
-    // `utun` — macOS, `tun`/`wg` — Linux, `ppp` и `ipsec` — оба. Физические
-    // интерфейсы называются иначе: `en`, `eth`, `wl`, `bridge`.
     const PREFIXES: [&str; 5] = ["utun", "tun", "wg", "ppp", "ipsec"];
     PREFIXES.iter().any(|prefix| {
         name.strip_prefix(prefix)
@@ -118,8 +85,7 @@ pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
     let mut row = MIB_IPFORWARD_ROW2::default();
     let mut source = SOCKADDR_INET::default();
 
-    // Интерфейс не задаём: пусть система сама решит, каким выйти. В этом и
-    // вопрос — мы спрашиваем «как дойти», а не «дойди вот этим».
+    // SAFETY: все указатели ведут на локальные структуры; интерфейс не задан — выбирает система.
     let code = unsafe {
         GetBestRoute2(
             None,
@@ -170,14 +136,7 @@ pub fn route_to(destination: IpAddr) -> PlatformResult<DefaultRoute> {
     Err(PlatformError::Unsupported("определение маршрута"))
 }
 
-/// Каким адресом машина выйдет к указанному узлу.
-///
-/// Спрашивается у сокета, а не у таблицы маршрутизации: `connect` на UDP не
-/// отправляет ни байта, но заставляет систему выбрать исходящий интерфейс —
-/// тот самый, которым она пошла бы на самом деле. Своя же копия этого выбора,
-/// собранная перебором интерфейсов, однажды разошлась бы с системой.
-///
-/// `None` — маршрута до узла нет вовсе.
+/// Исходящий адрес к узлу: `connect` на UDP не шлёт байт, но заставляет систему выбрать интерфейс.
 #[cfg(unix)]
 pub(crate) fn source_address_towards(destination: IpAddr) -> Option<IpAddr> {
     let bind = if destination.is_ipv4() {
@@ -187,8 +146,6 @@ pub(crate) fn source_address_towards(destination: IpAddr) -> Option<IpAddr> {
     };
 
     let socket = std::net::UdpSocket::bind(bind).ok()?;
-    // Порт любой: до отправки дело не дойдёт, а выбор интерфейса от него не
-    // зависит.
     socket.connect((destination, 53)).ok()?;
     Some(socket.local_addr().ok()?.ip())
 }
@@ -206,8 +163,6 @@ mod tunnel_names {
 
     #[test]
     fn physical_interfaces_are_left_alone() {
-        // Ложное срабатывание здесь — предупреждение о чужом VPN при каждом
-        // обычном подключении, и читать его перестанут в тот же день.
         for name in ["en0", "eth0", "wlan0", "bridge100", "lo0", "awdl0", "utun"] {
             assert!(!is_tunnel(name), "{name}");
         }
@@ -221,8 +176,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn finds_the_way_out() {
-        // На машине с сетью маршрут наружу обязан находиться: без него
-        // прямому выходу некуда привязываться.
         match default_route() {
             Ok(route) => {
                 assert!(route.interface_index > 0);
@@ -232,7 +185,7 @@ mod tests {
                 );
             }
             Err(err) => {
-                // Машина без сети — законное состояние для теста.
+                // Машина без сети — законное состояние.
                 assert!(
                     err.to_string().contains("маршрут"),
                     "неожиданная ошибка: {err}"
@@ -254,7 +207,6 @@ mod tests {
 
     #[test]
     fn probe_address_is_documentation_only() {
-        // Соединяться с ним никто не будет — это подсеть из RFC 5737.
         let probe: IpAddr = "192.0.2.1".parse().expect("адрес");
         assert!(!probe.is_loopback());
         assert!(!probe.is_unspecified());

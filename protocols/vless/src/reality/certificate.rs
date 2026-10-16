@@ -1,45 +1,24 @@
-//! Достаточно X.509 DER, чтобы достать из сертификата сервера открытый ключ
-//! Ed25519 и подпись, — не больше.
+//! Минимальный X.509 DER: открытый ключ Ed25519 и подпись из сертификата сервера.
 //!
-//! Reality не проверяет цепочку сертификатов вовсе (сервер подписывает
-//! сертификат сам себе, ключом, который никто не удостоверял): вместо этого
-//! `signatureValue` — это `HMAC-SHA512(AuthKey, subjectPublicKey)`
-//! (`auth.rs`). Если бы этот модуль тянул за собой полноценный разбор X.509,
-//! он проверял бы поля, которые Reality сознательно не использует по
-//! назначению.
-//!
-//! Полный разбор `Certificate` (RFC 8446 §4.4.2) и DER (ITU-T X.690, разделы
-//! 8.1.2–8.1.3 — тег и длина TLV) не нужен: только найти
-//! `SubjectPublicKeyInfo` с алгоритмом `id-Ed25519` (RFC 8410 §3, OID
-//! `1.3.101.112`) и взять последнее поле внешней `SEQUENCE` — `signatureValue`
-//! (RFC 5280 §4.1, `Certificate ::= SEQUENCE { tbsCertificate,
-//! signatureAlgorithm, signatureValue }`).
-//!
-//! Обход дерева рекурсивный и не привязан к точному месту
-//! `SubjectPublicKeyInfo` внутри `tbsCertificate` (там перед ним лежат поля
-//! переменной длины — серийный номер, издатель, срок действия, субъект):
-//! вместо этого он ищет любую `SEQUENCE` вида `SEQUENCE { SEQUENCE { OID
-//! id-Ed25519 }, BIT STRING }` — это и есть `SubjectPublicKeyInfo` для
-//! `Ed25519` (RFC 8410 §4: `parameters` у нашего алгоритма отсутствуют).
+//! Цепочка не проверяется: `signatureValue` — это `HMAC-SHA512(AuthKey, subjectPublicKey)`
+//! (`auth.rs`). Обход рекурсивный: ищется `SEQUENCE { SEQUENCE { OID id-Ed25519 }, BIT STRING }`
+//! (RFC 8410), подпись — последнее поле внешней `SEQUENCE` (RFC 5280 §4.1).
 
 use crate::reality::error::RealityError;
 
 const TAG_SEQUENCE: u8 = 0x30;
 const TAG_BIT_STRING: u8 = 0x03;
 const TAG_OID: u8 = 0x06;
-/// `1.3.101.112` (`id-Ed25519`, RFC 8410 §3) в DER-кодировке OID.
+/// `1.3.101.112` (`id-Ed25519`, RFC 8410 §3).
 const OID_ED25519: &[u8] = &[0x2b, 0x65, 0x70];
 
-/// Один элемент DER: тег и содержимое без заголовка (тег+длина).
+/// Элемент DER: тег и содержимое.
 struct Tlv<'a> {
     tag: u8,
     content: &'a [u8],
 }
 
-/// Читает длину TLV (X.690 §8.1.3): короткая форма — один байт со значением
-/// напрямую, длинная — старший бит установлен, остаток байта — число
-/// следующих байт длины. Неопределённая длина (`0x80`, только для BER) и
-/// длина больше 4 байт отвергаются — сертификату они не нужны.
+/// Длина TLV (X.690 §8.1.3); неопределённая и длиннее 4 байт отвергаются.
 fn read_length(bytes: &[u8]) -> Result<(usize, usize), RealityError> {
     let first = *bytes
         .first()
@@ -90,8 +69,7 @@ fn read_all(mut bytes: &[u8]) -> Result<Vec<Tlv<'_>>, RealityError> {
     Ok(out)
 }
 
-/// Содержимое `BIT STRING` без первого байта (число неиспользованных битов) —
-/// в X.509 он всегда `0`: сертификаты выровнены по байту.
+/// `BIT STRING` без байта неиспользованных битов (в X.509 всегда `0`).
 fn bit_string_bytes(content: &[u8]) -> Result<&[u8], RealityError> {
     match content.split_first() {
         Some((0, rest)) => Ok(rest),
@@ -118,8 +96,7 @@ fn find_ed25519_public_key(bytes: &[u8]) -> Result<Option<[u8; 32]>, RealityErro
     Ok(None)
 }
 
-/// Проверяет, что тело `SEQUENCE` — это ровно `SubjectPublicKeyInfo { SEQUENCE
-/// { OID id-Ed25519 }, BIT STRING }`, и если да, достаёт из него ключ.
+/// Если тело `SEQUENCE` — `SubjectPublicKeyInfo` на Ed25519, достаёт ключ.
 fn try_as_ed25519_spki(sequence_body: &[u8]) -> Result<Option<[u8; 32]>, RealityError> {
     let Ok(children) = read_all(sequence_body) else {
         return Ok(None);

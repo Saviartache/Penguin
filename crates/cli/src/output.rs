@@ -1,8 +1,6 @@
 //! Вывод: человекочитаемый и JSON.
 //!
-//! Два вида вывода нужны разным читателям. Человек смотрит на таблицу; скрипт
-//! разбирает JSON, и любое изменение оформления таблицы его бы сломало.
-//! Поэтому команды не печатают строки сами, а отдают данные сюда.
+//! Команды отдают данные сюда, а не печатают сами: таблица для человека, JSON для скриптов.
 
 use serde::Serialize;
 
@@ -36,8 +34,6 @@ where
         Format::Text => println!("{}", render(value)),
         Format::Json => match serde_json::to_string_pretty(value) {
             Ok(json) => println!("{json}"),
-            // Сериализация своих же типов не ломается, но паниковать в выводе
-            // всё равно не за что.
             Err(err) => eprintln!("не удалось собрать JSON: {err}"),
         },
     }
@@ -82,8 +78,7 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
 fn pad(out: &mut String, cell: &str, width: usize, last: bool) {
     out.push_str(cell);
     if !last {
-        // Считаем символы, а не байты: кириллица занимает по два байта, и
-        // выравнивание по длине в байтах разъехалось бы.
+        // Символы, не байты: кириллица.
         let padding = width.saturating_sub(cell.chars().count());
         out.push_str(&" ".repeat(padding));
         out.push_str("  ");
@@ -116,14 +111,11 @@ mod tests {
 
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(lines.len(), 4, "заголовок, разделитель и две строки");
-        // Колонка расширилась под самое длинное имя.
         assert!(lines[0].starts_with("имя                "));
     }
 
     #[test]
     fn table_counts_characters_not_bytes() {
-        // Кириллица занимает по два байта; выравнивание по байтам разъехалось
-        // бы на каждой русской строке.
         let rendered = table(&["a"], &[vec!["ЯЯЯ".to_owned()]]);
         let separator = rendered.lines().nth(1).expect("разделитель");
         assert_eq!(separator.chars().count(), 3);

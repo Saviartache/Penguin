@@ -1,41 +1,25 @@
-//! Кэш pid -> личность с инвалидацией по завершению процесса: pid переиспользуются.
-//!
-//! Путь по номеру процесса стоит трёх системных вызовов, а браузер открывает
-//! десятки соединений в секунду — все от одного и того же процесса. Без кэша
-//! эти вызовы повторялись бы на каждое соединение.
-//!
-//! Опасность у кэша ровно одна, и она настоящая: система переиспользует
-//! номера. Процесс завершился, номер достался другому, а в кэше лежит старый
-//! путь — и правило применилось не к тому приложению. Поэтому записи живут
-//! недолго, а при переподключении сбрасываются целиком.
+//! Кэш pid -> личность; записи короткоживущие, так как pid переиспользуются.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use dashmap::DashMap;
+use parking_lot::Mutex;
 
 use crate::identity::ProcessIdentity;
 
-/// Сколько живёт запись.
-///
-/// Тридцать секунд — заметно меньше, чем нужно системе, чтобы пройти круг по
-/// номерам процессов, и заметно больше, чем длится пачка соединений одного
-/// приложения.
+/// Время жизни записи.
 const TTL: Duration = Duration::from_secs(30);
 
-/// Сколько записей помнить.
-///
-/// Потолок нужен на случай, когда процессы создаются и умирают потоком:
-/// сборщик мусора у кэша срабатывает по времени, и без потолка память между
-/// его срабатываниями растёт неограниченно.
+/// Потолок числа записей.
 const MAX_ENTRIES: usize = 4096;
 
 /// Кэш личностей процессов.
 #[derive(Debug, Default)]
 pub struct IdentityCache {
-    entries: DashMap<u32, CacheEntry>,
+    entries: Mutex<HashMap<u32, CacheEntry>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CacheEntry {
     identity: Option<ProcessIdentity>,
     stored: Instant,
@@ -47,18 +31,14 @@ impl IdentityCache {
         Self::default()
     }
 
-    /// Отдаёт личность из кэша или вычисляет её.
-    ///
-    /// Отрицательный ответ тоже запоминается: процесс, до которого нет
-    /// доступа, не станет доступнее от повторного вопроса, а спрашивать про
-    /// него будут на каждое его соединение.
+    /// Отдаёт личность из кэша или вычисляет её; отрицательный ответ тоже кэшируется.
     pub fn get_or_insert<F>(&self, pid: u32, compute: F) -> Option<ProcessIdentity>
     where
         F: FnOnce() -> Option<ProcessIdentity>,
     {
         let now = Instant::now();
 
-        if let Some(entry) = self.entries.get(&pid)
+        if let Some(entry) = self.entries.lock().get(&pid)
             && now.duration_since(entry.stored) < TTL
         {
             return entry.identity.clone();
@@ -66,10 +46,11 @@ impl IdentityCache {
 
         let identity = compute();
 
-        if self.entries.len() >= MAX_ENTRIES {
-            self.evict_stale(now);
+        let mut entries = self.entries.lock();
+        if entries.len() >= MAX_ENTRIES {
+            evict(&mut entries, now);
         }
-        self.entries.insert(
+        entries.insert(
             pid,
             CacheEntry {
                 identity: identity.clone(),
@@ -81,38 +62,31 @@ impl IdentityCache {
 
     /// Забывает всё.
     pub fn clear(&self) {
-        self.entries.clear();
+        self.entries.lock().clear();
     }
 
     /// Сколько записей в кэше.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.lock().len()
     }
 
     /// Кэш пуст.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.lock().is_empty()
+    }
+}
+
+/// Выбрасывает просроченное; если не помогло, половину самого старого.
+fn evict(entries: &mut HashMap<u32, CacheEntry>, now: Instant) {
+    entries.retain(|_, entry| now.duration_since(entry.stored) < TTL);
+    if entries.len() < MAX_ENTRIES {
+        return;
     }
 
-    /// Выбрасывает просроченное; если не помогло — половину самого старого.
-    fn evict_stale(&self, now: Instant) {
-        self.entries
-            .retain(|_, entry| now.duration_since(entry.stored) < TTL);
-
-        if self.entries.len() < MAX_ENTRIES {
-            return;
-        }
-
-        // Просроченного не нашлось — значит, записи свежие и их просто много.
-        // Отдельные ключи собираются заранее: удалять во время обхода
-        // `DashMap` нельзя.
-        let mut by_age: Vec<(u32, Instant)> =
-            self.entries.iter().map(|e| (*e.key(), e.stored)).collect();
-        by_age.sort_unstable_by_key(|(_, stored)| *stored);
-
-        for (pid, _) in by_age.into_iter().take(MAX_ENTRIES / 2) {
-            self.entries.remove(&pid);
-        }
+    let mut by_age: Vec<(u32, Instant)> = entries.iter().map(|(k, e)| (*k, e.stored)).collect();
+    by_age.sort_unstable_by_key(|(_, stored)| *stored);
+    for (pid, _) in by_age.into_iter().take(MAX_ENTRIES / 2) {
+        entries.remove(&pid);
     }
 }
 
@@ -140,8 +114,6 @@ mod tests {
 
     #[test]
     fn remembers_negative_answers() {
-        // Процесс, до которого нет доступа, не станет доступнее от повторного
-        // вопроса, а спрашивать про него будут на каждое его соединение.
         let cache = IdentityCache::new();
         let mut calls = 0;
 
@@ -179,7 +151,6 @@ mod tests {
         let first = cache.get_or_insert(1, || identity(1)).expect("есть");
         let second = cache.get_or_insert(2, || identity(2)).expect("есть");
         assert_ne!(first.path, second.path);
-        // Повторный запрос отдаёт своё, а не соседское.
         assert_eq!(
             cache.get_or_insert(1, || None).expect("есть").path,
             first.path

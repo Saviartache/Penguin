@@ -1,10 +1,6 @@
 //! Направление через прокси MASQUE.
 //!
-//! `CONNECT-UDP` не переносит TCP ни в каком виде — только UDP, адресованный
-//! путём запроса (RFC 9298, §2). Поэтому [`MasqueOutbound::connect_tcp`]
-//! всегда отказывает: соврать здесь значило бы, что TCP-соединение уходит в
-//! направление, которое молча не умеет ничего, кроме UDP (тот же договор,
-//! что у `capabilities()`, — см. [`penguin_proto::capabilities::Capabilities`]).
+//! Только UDP: [`MasqueOutbound::connect_tcp`] всегда отказывает.
 
 use std::sync::Arc;
 
@@ -66,13 +62,8 @@ impl Outbound for MasqueOutbound {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             udp: true,
-            // Одно соединение HTTP/3 несёт сколько угодно каналов
-            // `CONNECT-UDP` — рукопожатие QUIC/TLS платится один раз на
-            // направление, а не на каждую UDP-ассоциацию.
             multiplex: true,
             port_hopping: false,
-            // `target_host` в пути запроса может быть доменным именем — его
-            // резолвит прокси (RFC 9298, §2), а не этот клиент.
             remote_dns: true,
         }
     }

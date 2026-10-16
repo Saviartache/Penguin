@@ -1,16 +1,5 @@
-//! Локальный SOCKS5-прокси. Работает без прав администратора и без драйвера.
-//!
-//! Самый дешёвый способ проверить, что протокол реализован верно: приложение
-//! настраивается на `127.0.0.1:1080`, и трафик идёт через тоннель, не трогая
-//! ни маршруты, ни адаптеры, ни брандмауэр.
-//!
-//! У режима есть и своё преимущество перед TUN: приложение отдаёт **имя**
-//! хоста, а не адрес. Значит, утечки DNS нет по построению — разрешать имя
-//! будет сервер на той стороне.
-//!
-//! Ограничение ровно одно, и оно принципиальное: работает только для
-//! приложений, которые умеют и настроены ходить через прокси. Всё остальное —
-//! задача TUN.
+//! Локальный SOCKS5-прокси: без прав и драйвера, приложение отдаёт имя хоста.
+//! Работает только для приложений, настроенных на прокси; остальное — задача TUN.
 
 pub mod address;
 pub mod auth;
@@ -19,13 +8,14 @@ pub mod request;
 pub mod udp;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use penguin_core::address::SocketAddress;
 use penguin_core::network::Network;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use penguin_proto::error::ProtocolError;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio_util::sync::CancellationToken;
 
@@ -34,8 +24,9 @@ use self::handshake::Chosen;
 use self::request::Command;
 use crate::error::{InboundError, InboundResult};
 use crate::inbound::{Inbound, InboundHandler, InboundRequest};
+use crate::relay::relay;
 
-/// Наибольший размер датаграммы, которую мы готовы принять от приложения.
+/// Наибольший размер датаграммы от приложения.
 const UDP_BUFFER: usize = 65_535;
 
 /// Локальный SOCKS5-прокси.
@@ -46,10 +37,7 @@ pub struct Socks5Inbound {
 }
 
 impl Socks5Inbound {
-    /// Занимает адрес и готовится обслуживать соединения.
-    ///
-    /// Адрес занимается сразу, а не в `serve`: ошибка «порт занят» должна
-    /// прийти тому, кто запускал клиент, а не утонуть в фоновой задаче.
+    /// Занимает адрес сразу, чтобы «порт занят» дошло до запускающего.
     pub async fn bind(
         listen: SocketAddr,
         handler: Arc<dyn InboundHandler>,
@@ -76,6 +64,7 @@ impl Inbound for Socks5Inbound {
     }
 
     async fn serve(self: Box<Self>, cancel: CancellationToken) {
+        let credentials = self.credentials.map(Arc::new);
         loop {
             let accepted = tokio::select! {
                 biased;
@@ -86,25 +75,20 @@ impl Inbound for Socks5Inbound {
             let (stream, source) = match accepted {
                 Ok(pair) => pair,
                 Err(err) => {
-                    // Исчерпание дескрипторов лечится только тем, что часть
-                    // соединений закроется. Выходить из цикла нельзя — прокси
-                    // перестал бы работать насовсем.
+                    // Выходить нельзя: прокси перестал бы работать насовсем.
                     tracing::warn!(%err, "не удалось принять соединение");
                     continue;
                 }
             };
 
             let handler = Arc::clone(&self.handler);
-            let credentials = self.credentials.clone();
+            let credentials = credentials.clone();
             let cancel = cancel.clone();
 
             tokio::spawn(async move {
                 if let Err(err) =
                     serve_connection(stream, source, handler, credentials, cancel).await
                 {
-                    // Обычный фон: клиент передумал, вкладка закрылась.
-                    // Уровень отладочный намеренно — иначе журнал состоит из
-                    // этих строк.
                     tracing::debug!(%source, %err, "соединение SOCKS5 завершилось с ошибкой");
                 }
             });
@@ -114,22 +98,20 @@ impl Inbound for Socks5Inbound {
     }
 }
 
-/// Обслуживает одно соединение от начала до конца.
 async fn serve_connection(
     mut stream: TcpStream,
     source: SocketAddr,
     handler: Arc<dyn InboundHandler>,
-    credentials: Option<Credentials>,
+    credentials: Option<Arc<Credentials>>,
     cancel: CancellationToken,
 ) -> InboundResult<()> {
-    // Задержка Нейгла на прокси вредна: она копит мелкие записи, а через
-    // прокси идут именно они — заголовки запросов и подтверждения.
+    // Nagle копит мелкие записи, а через прокси идут именно они.
     let _ = stream.set_nodelay(true);
 
     match handshake::negotiate(&mut stream, credentials.is_some()).await? {
         Chosen::NoAuth => {}
         Chosen::UserPass => {
-            let expected = credentials.as_ref().ok_or(InboundError::AuthFailed)?;
+            let expected = credentials.as_deref().ok_or(InboundError::AuthFailed)?;
             auth::verify(&mut stream, expected).await?;
         }
     }
@@ -137,7 +119,6 @@ async fn serve_connection(
     let command = match request::read(&mut stream).await {
         Ok(command) => command,
         Err(err) => {
-            // Отказ полагается отправить: без него клиент ждёт до тайм-аута.
             let _ = request::reply_failure(&mut stream, err.socks5_reply()).await;
             return Err(err);
         }
@@ -149,7 +130,6 @@ async fn serve_connection(
     }
 }
 
-/// Обслуживает CONNECT.
 async fn connect(
     mut stream: TcpStream,
     source: SocketAddr,
@@ -158,68 +138,40 @@ async fn connect(
 ) -> InboundResult<()> {
     let request = InboundRequest {
         source,
-        target: target.clone(),
+        target,
         network: Network::Tcp,
     };
 
-    let outbound = match handler.open_tcp(&request).await {
+    let mut outbound = match handler.open_tcp(&request).await {
         Ok(outbound) => outbound,
         Err(err) => {
-            tracing::debug!(%target, %err, "не удалось открыть соединение");
+            tracing::debug!(target = %request.target, %err, "не удалось открыть соединение");
             let _ = request::reply_failure(&mut stream, protocol_error_to_reply(&err)).await;
             return Ok(());
         }
     };
 
-    // Ответ уходит только теперь: код в нём — результат настоящей попытки.
     let bound = stream.local_addr()?;
     request::reply_success(&mut stream, bound).await?;
 
-    let (mut client_read, mut client_write) = stream.into_split();
-    let (mut remote_read, mut remote_write) = tokio::io::split(outbound);
-
-    // Обе половины качаются одновременно и до конца: полузакрытое соединение
-    // — законное состояние, и обрывать вторую половину, когда кончилась
-    // первая, значит терять хвост ответа.
-    let (up, down) = tokio::join!(
-        async {
-            let result = tokio::io::copy(&mut client_read, &mut remote_write).await;
-            let _ = remote_write.shutdown().await;
-            result
-        },
-        async {
-            let result = tokio::io::copy(&mut remote_read, &mut client_write).await;
-            let _ = client_write.shutdown().await;
-            result
-        }
-    );
-
-    tracing::debug!(
-        %target,
-        uploaded = up.unwrap_or(0),
-        downloaded = down.unwrap_or(0),
-        "соединение закрыто"
-    );
+    relay(&mut stream, &mut outbound, &request.target).await;
     Ok(())
 }
 
-/// Обслуживает UDP ASSOCIATE.
 async fn associate(
     mut stream: TcpStream,
     source: SocketAddr,
     handler: Arc<dyn InboundHandler>,
     cancel: CancellationToken,
 ) -> InboundResult<()> {
-    // Сокет на том же адресе, что и слушающий: клиент шлёт датаграммы туда,
-    // куда мы скажем в ответе, а сказать надо адрес, до которого он достучится.
+    // Адрес сокета сообщается клиенту, поэтому он на том же интерфейсе, что и TCP.
     let bind_ip = stream.local_addr()?.ip();
     let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await?;
     let local = socket.local_addr()?;
 
+    // Назначение неизвестно до первой датаграммы.
     let request = InboundRequest {
         source,
-        // Направление ещё не известно: адрес назначения появится с первой
-        // датаграммой. Маршрутизатор увидит его при первой же отправке.
         target: SocketAddress::ip(bind_ip, 0),
         network: Network::Udp,
     };
@@ -235,71 +187,49 @@ async fn associate(
 
     request::reply_success(&mut stream, local).await?;
 
-    let socket = Arc::new(socket);
-    let outbound = Arc::new(outbound);
+    let client = Mutex::new(None::<SocketAddr>);
 
-    // Адрес клиента узнаётся из первой пришедшей датаграммы: в запросе он
-    // часто нулевой, потому что приложение само ещё не знает своего порта.
-    let client: Arc<tokio::sync::Mutex<Option<SocketAddr>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let uplink = async {
+        let mut buf = vec![0u8; UDP_BUFFER];
+        loop {
+            let Ok((len, from)) = socket.recv_from(&mut buf).await else {
+                break;
+            };
+            let Some(packet) = udp::decode(&buf[..len]) else {
+                continue;
+            };
+            set_client(&client, from);
 
-    let uplink = {
-        let socket = Arc::clone(&socket);
-        let outbound = Arc::clone(&outbound);
-        let client = Arc::clone(&client);
-        async move {
-            let mut buf = vec![0u8; UDP_BUFFER];
-            loop {
-                let Ok((len, from)) = socket.recv_from(&mut buf).await else {
-                    break;
-                };
-                let Some(packet) = udp::decode(&buf[..len]) else {
-                    continue;
-                };
-
-                *client.lock().await = Some(from);
-
-                let payload = Bytes::copy_from_slice(packet.payload);
-                if let Err(err) = outbound.send_to(payload, &packet.target).await {
-                    tracing::debug!(%err, "датаграмма не отправлена");
-                }
+            if let Err(err) = outbound
+                .send_to(Bytes::copy_from_slice(packet.payload), &packet.target)
+                .await
+            {
+                tracing::debug!(%err, "датаграмма не отправлена");
             }
         }
     };
 
-    let downlink = {
-        let socket = Arc::clone(&socket);
-        let outbound = Arc::clone(&outbound);
-        let client = Arc::clone(&client);
-        async move {
-            loop {
-                let Ok((payload, from)) = outbound.recv_from().await else {
-                    break;
-                };
-                let Some(to) = *client.lock().await else {
-                    continue;
-                };
-                let datagram = udp::encode(&from, &payload);
-                if let Err(err) = socket.send_to(&datagram, to).await {
-                    tracing::debug!(%err, "ответ не доставлен приложению");
-                    break;
-                }
+    let downlink = async {
+        let mut out = BytesMut::new();
+        loop {
+            let Ok((payload, from)) = outbound.recv_from().await else {
+                break;
+            };
+            let Some(to) = get_client(&client) else {
+                continue;
+            };
+            udp::encode_into(&mut out, &from, &payload);
+            if let Err(err) = socket.send_to(&out, to).await {
+                tracing::debug!(%err, "ответ не доставлен приложению");
+                break;
             }
         }
     };
 
-    // Сессия живёт ровно столько, сколько открыто управляющее соединение.
-    // У UDP закрытия нет, и без этой привязки сокет висел бы до конца работы
-    // клиента.
+    // Сессия живёт, пока открыто управляющее TCP-соединение: у UDP закрытия нет.
     let control_closed = async {
         let mut buf = [0u8; 1];
-        loop {
-            match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
-                // Ноль байт — клиент закрыл управляющее соединение.
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
+        while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
     };
 
     tokio::select! {
@@ -314,9 +244,16 @@ async fn associate(
     Ok(())
 }
 
+fn set_client(slot: &Mutex<Option<SocketAddr>>, addr: SocketAddr) {
+    *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(addr);
+}
+
+fn get_client(slot: &Mutex<Option<SocketAddr>>) -> Option<SocketAddr> {
+    *slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Переводит ошибку протокола в код ответа SOCKS5.
-fn protocol_error_to_reply(err: &penguin_proto::error::ProtocolError) -> u8 {
-    use penguin_proto::error::ProtocolError;
+fn protocol_error_to_reply(err: &ProtocolError) -> u8 {
     match err {
         ProtocolError::Unreachable(_) => 0x04,
         ProtocolError::Unsupported(_) => 0x07,
@@ -331,14 +268,10 @@ impl<T> ClientStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 #[cfg(test)]
 mod tests {
-    use penguin_proto::error::ProtocolError;
-
     use super::*;
 
     #[test]
     fn protocol_errors_map_to_meaningful_codes() {
-        // Браузер по коду показывает разные сообщения; общий 0x01 на всё
-        // превратил бы разбор неполадок в гадание.
         assert_eq!(
             protocol_error_to_reply(&ProtocolError::Unreachable("x".into())),
             0x04

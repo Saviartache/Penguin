@@ -1,9 +1,5 @@
-//! Правило: условие, действие, приоритет, признак включённости.
-//!
-//! Скомпилированная форма [`penguin_config::schema::rule::RuleConfig`].
-//! Разница существенная: в конфигурации условие — это текст, здесь — готовое
-//! дерево сопоставителей с построенными индексами. Regex компилируется один
-//! раз, CIDR складываются в дерево, домены — в автомат Ахо — Корасик.
+//! Скомпилированная форма [`penguin_config::schema::rule::RuleConfig`]:
+//! готовое дерево сопоставителей вместо текста условия.
 
 use penguin_core::id::RuleId;
 use penguin_match::matcher::Matcher;
@@ -13,7 +9,7 @@ use crate::decision::Decision;
 
 /// Готовое к применению правило.
 pub struct Rule {
-    /// Идентификатор — он же попадает в объяснение решения.
+    /// Идентификатор.
     pub id: RuleId,
     /// Имя для интерфейса.
     pub name: String,
@@ -26,8 +22,7 @@ pub struct Rule {
 }
 
 impl std::fmt::Debug for Rule {
-    /// Условие выводится описанием, а не структурой: `Matcher` — это
-    /// поведение, а не данные, и `Debug` у него намеренно нет.
+    /// Условие выводится описанием: у `Matcher` нет `Debug`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Rule")
             .field("id", &self.id.as_str())

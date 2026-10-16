@@ -14,10 +14,6 @@
 //!         ▼
 //!   поток с учётом трафика — обратно входящей точке
 //! ```
-//!
-//! Это и есть то место, где собираются вместе все части клиента. Заметьте,
-//! чего здесь **нет**: ни одной строки, знающей про Hysteria 2, TUN или
-//! конкретное правило. Всё общение идёт через трейты.
 
 pub mod copy;
 pub mod tcp;
@@ -50,17 +46,9 @@ pub struct Pipeline {
     outbounds: Arc<OutboundPool>,
     processes: Arc<dyn FlowOwnerResolver>,
     metrics: Arc<Metrics>,
-    /// Искать ли владельца соединения.
-    ///
-    /// Выключается, когда правил по процессам нет: чтение таблицы соединений
-    /// стоит системного вызова на каждое новое соединение, и платить за него,
-    /// когда результат никому не нужен, незачем.
+    /// Искать ли владельца соединения (системный вызов на каждое).
     resolve_process: bool,
-    /// Куда рассказывать о решениях.
-    ///
-    /// Необязательно: конвейер собирают и в проверках, где шины событий нет
-    /// вовсе, а требовать её там значило бы тащить пол-движка ради одного
-    /// поля.
+    /// Шина решений; в проверках её нет.
     events: Option<EventBus>,
 }
 
@@ -91,11 +79,7 @@ impl Pipeline {
         }
     }
 
-    /// Куда рассказывать о решениях по соединениям.
-    ///
-    /// Без этого журнал окна знает только про подъём и падение тоннеля, а на
-    /// вопрос «куда сейчас идёт трафик и каким путём» ответить нечем — при
-    /// том что именно за этим в журнал и приходят.
+    /// Куда сообщать о решениях по соединениям.
     pub fn with_events(mut self, events: EventBus) -> Self {
         self.events = Some(events);
         self
@@ -131,12 +115,8 @@ impl Pipeline {
         flow
     }
 
-    /// Находит направление под решение маршрутизатора.
-    ///
-    /// Направление могло не подняться — тогда лучше выпустить трафик
-    /// напрямую, чем оборвать его: пользователь скорее простит незащищённое
-    /// соединение, чем неработающий интернет. Это поведение видно в журнале
-    /// и различимо в интерфейсе.
+    /// Направление под решение; не поднялось — трафик идёт напрямую (с
+    /// предупреждением в журнале).
     fn outbound_for(&self, decision: &ResolvedDecision) -> Option<Arc<dyn Outbound>> {
         match decision {
             ResolvedDecision::Tunnel(id) => self.outbounds.get(id).or_else(|| {
@@ -148,12 +128,7 @@ impl Pipeline {
         }
     }
 
-    /// Рассказывает о решении — в журнал службы и в окно.
-    ///
-    /// Одной строкой на соединение, а не четырьмя, как это делают иные
-    /// клиенты. Журнал окна держит последние строки, и четыре строки на
-    /// соединение означают, что при живом трафике в нём видно последние
-    /// полсекунды.
+    /// Сообщает о решении одной строкой — в журнал и в окно.
     fn announce(&self, request: &InboundRequest, flow: &FlowContext, verdict: &Verdict) {
         let process = flow.process.as_ref().map(|owner| owner.name.to_string());
 
@@ -175,10 +150,7 @@ impl Pipeline {
         }
     }
 
-    /// Правило, если решение принято по нему.
-    ///
-    /// Через кэш тоже: «из кэша» — это то же самое правило, просто найденное
-    /// быстрее, и прятать его имя незачем.
+    /// Правило, по которому принято решение (в том числе из кэша).
     fn rule_of(reason: &Reason) -> Option<RuleId> {
         match reason {
             Reason::Rule { id, .. } => Some(id.clone()),
@@ -237,9 +209,7 @@ impl InboundHandler for Pipeline {
             )));
         };
 
-        // Направление, не умеющее UDP, молча потеряло бы датаграммы — а вместе
-        // с ними и все запросы DNS. Лучше выпустить их напрямую и сказать об
-        // этом вслух.
+        // Иначе датаграммы (и DNS) терялись бы молча.
         if !outbound.capabilities().udp {
             tracing::warn!(
                 outbound = %outbound.id(),
@@ -280,8 +250,6 @@ mod tests {
 
     #[tokio::test]
     async fn direct_mode_reaches_a_real_socket() {
-        // Сквозная проверка прямого пути: слушаем свой порт и соединяемся с
-        // ним через конвейер.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("сокет");
@@ -302,8 +270,6 @@ mod tests {
 
     #[tokio::test]
     async fn missing_outbound_falls_back_to_direct() {
-        // Режим `full` шлёт всё в тоннель, но профиль `home` не поднят.
-        // Оборвать трафик было бы хуже, чем выпустить его напрямую.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("сокет");
@@ -324,14 +290,12 @@ mod tests {
         let pipeline = pipeline(TunnelMode::Off);
         let flow = pipeline.context_of(&request("example.com:443"));
         assert_eq!(flow.destination, SocketAddress::domain("example.com", 443));
-        // Приложение через прокси отдало имя, адреса здесь нет.
         assert!(flow.destination_ip().is_none());
     }
 
     #[tokio::test]
     async fn blocked_flow_is_refused_with_a_reason() {
         let pipeline = pipeline(TunnelMode::Off);
-        // Подменяем маршрутизатор на такой, который всё блокирует.
         let router = Arc::new(Router::passthrough(
             TunnelMode::Off,
             OutboundId::new("home"),
@@ -344,8 +308,6 @@ mod tests {
             resolve_process: false,
             events: None,
         };
-        // Без правил `Off` выпускает напрямую — проверяем, что решение
-        // «заблокировать» вообще доходит до отказа.
         let decision = ResolvedDecision::Block;
         assert!(blocked.outbound_for(&decision).is_none());
     }
