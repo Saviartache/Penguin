@@ -167,6 +167,7 @@ impl TunnelSession {
                     );
                 }
                 self.routes.pin_outside(&servers, outside)?;
+                self.routes.keep_outside_default(outside)?;
             }
             None => tracing::warn!("путь наружу неизвестен — трафик до сервера уйдёт в тоннель"),
         }
@@ -229,8 +230,9 @@ impl TunnelSession {
         }
 
         let mut first_error: Option<EngineError> = None;
-        let mut note = |result: PlatformResult<()>, what: &str| {
-            if let Err(err) = result {
+        let mut note = |result: PlatformResult<()>, what: &str| match result {
+            Ok(()) => tracing::debug!(what, "откат выполнен"),
+            Err(err) => {
                 tracing::error!(%err, what, "откат не завершился");
                 if first_error.is_none() {
                     first_error = Some(EngineError::Platform(err));
@@ -289,10 +291,12 @@ async fn server_addresses(config: &RootConfig, outbound: &OutboundId) -> Vec<IpA
 
     // Загрузочный разрешатель: системный вернул бы подставной fake-IP
     // (см. [`penguin_dns::bootstrap`]).
-    penguin_dns::bootstrap::resolver_for(&config.dns)
-        .resolve(host_of(server))
-        .await
-        .unwrap_or_default()
+    penguin_proto::dialer::Dialer::resolve(
+        &crate::direct::SystemDialer::bootstrapped(&config.dns),
+        host_of(server),
+    )
+    .await
+    .unwrap_or_default()
 }
 
 /// Имя сервера без порта; IPv6 полон двоеточий, поэтому отдельная функция.

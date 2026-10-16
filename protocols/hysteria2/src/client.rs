@@ -80,6 +80,13 @@ impl Hysteria2Client {
 
         let udp = UdpManager::new(transport.connection.clone());
 
+        // Задача живёт, пока живо соединение: `close()` его и завершает.
+        let watched = transport.connection.clone();
+        tokio::spawn(async move {
+            let reason = watched.closed().await;
+            tracing::info!(%reason, "соединение QUIC с сервером закрыто");
+        });
+
         if !response.udp_enabled {
             tracing::warn!("сервер не проксирует UDP — датаграммы пойдут мимо тоннеля");
         }
@@ -177,6 +184,46 @@ impl Outbound for Hysteria2Client {
         &self,
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
+        let opened = self.open_tcp(target).await;
+        match &opened {
+            Ok(_) => tracing::debug!(
+                %target,
+                rtt_ms = self.rtt().as_millis() as u64,
+                "поток Hysteria2 открыт"
+            ),
+            Err(err) => tracing::debug!(%target, %err, "поток Hysteria2 не открылся"),
+        }
+        opened
+    }
+
+    async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
+        if !self.udp_enabled {
+            return Err(Hysteria2Error::UdpDisabled.into());
+        }
+        tracing::debug!("сессия UDP Hysteria2 открыта");
+        Ok(Box::new(self.udp.open()))
+    }
+
+    fn is_alive(&self) -> bool {
+        self.transport.connection.close_reason().is_none()
+    }
+
+    async fn close(&self) -> Result<(), ProtocolError> {
+        self.udp.shutdown().await;
+        self.transport
+            .connection
+            .close(0u32.into(), b"closed by client");
+        self.transport.endpoint.wait_idle().await;
+        Ok(())
+    }
+}
+
+impl Hysteria2Client {
+    /// Открывает поток к `target` и ждёт ответа сервера (если не `fast_open`).
+    async fn open_tcp(
+        &self,
+        target: &SocketAddress,
+    ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
         let (mut send, mut recv) = self
             .transport
             .connection
@@ -206,26 +253,6 @@ impl Outbound for Hysteria2Client {
         }
 
         Ok(Box::new(TcpStream::established(send, recv)))
-    }
-
-    async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
-        if !self.udp_enabled {
-            return Err(Hysteria2Error::UdpDisabled.into());
-        }
-        Ok(Box::new(self.udp.open()))
-    }
-
-    fn is_alive(&self) -> bool {
-        self.transport.connection.close_reason().is_none()
-    }
-
-    async fn close(&self) -> Result<(), ProtocolError> {
-        self.udp.shutdown().await;
-        self.transport
-            .connection
-            .close(0u32.into(), b"closed by client");
-        self.transport.endpoint.wait_idle().await;
-        Ok(())
     }
 }
 

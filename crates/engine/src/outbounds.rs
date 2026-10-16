@@ -115,10 +115,15 @@ impl OutboundPool {
         };
 
         tracing::info!(%id, "соединение с сервером потеряно — поднимаю заново");
-        let fresh = self.build(&profile).await?;
-        if let Err(err) = outbound.close().await {
-            tracing::debug!(%id, %err, "умершее направление закрылось с ошибкой");
-        }
+        let fresh = self.build(&profile).await.inspect_err(|err| {
+            tracing::warn!(%id, %err, "направление не поднялось заново");
+        })?;
+        // Не под замком: закрытие QUIC ждёт прощания с сервером, а соединения ждали бы его.
+        tokio::spawn(async move {
+            if let Err(err) = outbound.close().await {
+                tracing::debug!(%id, %err, "умершее направление закрылось с ошибкой");
+            }
+        });
         Ok(fresh)
     }
 
@@ -129,6 +134,7 @@ impl OutboundPool {
             id: id.clone(),
             dialer: Arc::clone(&self.dialer),
         };
+        tracing::debug!(%id, protocol = profile.outbound.protocol, "направление поднимается");
 
         // Пакетный протокол приезжает в мосте и неотличим от обычного.
         let outbound: Arc<dyn Outbound> =
@@ -170,10 +176,10 @@ impl OutboundPool {
         let _guard = self.building.lock().await;
         self.profiles.write().remove(id);
         let removed = self.active.write().remove(id);
-        if let Some(outbound) = removed
-            && let Err(err) = outbound.close().await
-        {
-            tracing::debug!(%id, %err, "направление закрылось с ошибкой");
+        let Some(outbound) = removed else { return };
+        match outbound.close().await {
+            Ok(()) => tracing::debug!(%id, "направление закрыто"),
+            Err(err) => tracing::debug!(%id, %err, "направление закрылось с ошибкой"),
         }
     }
 

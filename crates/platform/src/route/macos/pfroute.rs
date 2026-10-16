@@ -43,6 +43,17 @@ impl Message {
         }
     }
 
+    /// Привязывает маршрут к интерфейсу (`RTF_IFSCOPE` читает номер отсюда).
+    pub(super) fn scope_to(&mut self, interface_index: u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "номер интерфейса в macOS помещается в u16"
+        )]
+        {
+            self.header.rtm_index = interface_index as libc::c_ushort;
+        }
+    }
+
     /// Дописывает адрес; порядок вызовов — порядок битов в `rtm_addrs` (назначение, шлюз, маска).
     pub(super) fn address(&mut self, slot: libc::c_int, bytes: &[u8]) {
         self.header.rtm_addrs |= slot;
@@ -219,6 +230,7 @@ fn classify(err: nix::errno::Errno) -> PlatformError {
         nix::errno::Errno::EPERM | nix::errno::Errno::EACCES => {
             PlatformError::PermissionDenied("изменение таблицы маршрутизации".to_owned())
         }
+        nix::errno::Errno::EEXIST => PlatformError::RouteExists,
         other => PlatformError::Route(other.to_string()),
     }
 }

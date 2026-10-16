@@ -11,6 +11,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use penguin_proto::dialer::Dialer;
 
 use crate::config::Upstream as UpstreamConfig;
 use crate::error::{DnsError, DnsResult};
@@ -23,11 +24,17 @@ use crate::upstream::Upstream;
 ///
 /// Общая точка для службы, локального прокси и проверки профилей: у всех
 /// троих системный резолвер может быть подменён прошлым запуском.
-pub fn resolver_for(config: &crate::config::DnsConfig) -> Arc<dyn Resolver> {
+///
+/// Сокеты берутся у `sockets`: при поднятом тоннеле обычный сокет ушёл бы в него же,
+/// к перехвату DNS, который сам ждёт этого ответа.
+pub fn resolver_for(
+    config: &crate::config::DnsConfig,
+    sockets: Arc<dyn Dialer>,
+) -> Arc<dyn Resolver> {
     // Ошибку подсети ловит проверка настроек; без неё лишь не фильтруется запасной путь.
     let fake_ip = FakeIpPool::parse(&config.fake_ip_range).ok();
 
-    match BootstrapResolver::from_config(&config.bootstrap) {
+    match BootstrapResolver::from_config(&config.bootstrap, sockets) {
         Ok(bootstrap) => Arc::new(bootstrap.rejecting(fake_ip)),
         Err(err) => {
             tracing::warn!(%err, "загрузочное разрешение имён не собрано");
@@ -54,9 +61,9 @@ impl std::fmt::Debug for BootstrapResolver {
 
 impl BootstrapResolver {
     /// Собирает разрешатель по настройкам загрузочных апстримов.
-    pub fn from_config(configs: &[UpstreamConfig]) -> DnsResult<Self> {
+    pub fn from_config(configs: &[UpstreamConfig], sockets: Arc<dyn Dialer>) -> DnsResult<Self> {
         Ok(Self {
-            upstreams: crate::upstream::build_all(configs)?,
+            upstreams: crate::upstream::build_all(configs, &Some(sockets))?,
             fake_ip: None,
         })
     }
@@ -127,10 +134,12 @@ impl Resolver for BootstrapResolver {
         }
 
         if addresses.is_empty() {
+            tracing::debug!(host, "загрузочное разрешение не удалось");
             return Err(DnsError::Upstream(format!(
                 "адрес `{host}` не назвали ни загрузочные апстримы, ни система"
             )));
         }
+        tracing::debug!(host, ?addresses, "загрузочное разрешение");
         Ok(addresses)
     }
 }

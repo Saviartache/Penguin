@@ -22,6 +22,10 @@ pub fn remove(route: &Route) -> PlatformResult<()> {
 
 fn send(kind: libc::c_int, route: &Route) -> PlatformResult<()> {
     let mut message = Message::new(kind_byte(kind), flags(route));
+    // Без номера снятие задело бы общий маршрут, а не свой.
+    if route.scoped {
+        message.scope_to(route.interface_index);
+    }
     describe(&mut message, route);
     pfroute::talk(message, false).map(|_| ())
 }
@@ -70,6 +74,9 @@ fn flags(route: &Route) -> libc::c_int {
     }
     if is_host(route) {
         flags |= libc::RTF_HOST;
+    }
+    if route.scoped {
+        flags |= libc::RTF_IFSCOPE;
     }
     flags
 }
@@ -143,6 +150,28 @@ mod tests {
         assert!(
             pfroute::to_address(found[1].1).is_none(),
             "шлюзом стоит интерфейс, а не адрес"
+        );
+    }
+
+    #[test]
+    fn a_scoped_route_names_its_interface() {
+        let mut route = Route::via_gateway(
+            "0.0.0.0/0".parse::<IpNet>().expect("подсеть"),
+            "172.20.10.1".parse().expect("шлюз"),
+            11,
+        );
+        assert_eq!(flags(&route) & libc::RTF_IFSCOPE, 0, "обычный не привязан");
+
+        route.scoped = true;
+        assert_eq!(flags(&route) & libc::RTF_IFSCOPE, libc::RTF_IFSCOPE);
+
+        let mut message = Message::new(kind_byte(libc::RTM_DELETE), flags(&route));
+        message.scope_to(route.interface_index);
+        let bytes = message.finish(1);
+        assert_eq!(
+            pfroute::interface_index(&bytes),
+            11,
+            "снятие не заденет общий"
         );
     }
 

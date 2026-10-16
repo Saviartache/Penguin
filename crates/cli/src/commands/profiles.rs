@@ -91,10 +91,7 @@ fn list(config: &RootConfig, format: Format) -> Result<()> {
 }
 
 fn check(config: &RootConfig, wanted: Option<&str>, format: Format) -> Result<()> {
-    // Загрузочный резолвер: системный может отвечать подменой прошлого запуска (`penguin_dns::bootstrap`).
-    let pool = OutboundPool::new(Arc::new(SystemDialer::new(
-        penguin_dns::bootstrap::resolver_for(&config.dns),
-    )));
+    let pool = OutboundPool::new(Arc::new(SystemDialer::bootstrapped(&config.dns)));
 
     let profiles: Vec<_> = match wanted {
         Some(name) => vec![
@@ -183,9 +180,7 @@ mod tests {
     #[test]
     fn check_separates_good_from_broken() {
         let config = config();
-        let pool = OutboundPool::new(Arc::new(SystemDialer::new(
-            penguin_dns::bootstrap::resolver_for(&config.dns),
-        )));
+        let pool = OutboundPool::new(Arc::new(SystemDialer::bootstrapped(&config.dns)));
 
         assert!(pool.validate(&config.profiles[0]).is_ok());
         assert!(

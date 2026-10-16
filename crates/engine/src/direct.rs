@@ -51,8 +51,8 @@ pub struct SystemDialer {
     bind_to: Option<IpAddr>,
     /// Номер физического интерфейса; ноль — тоннеля нет. Адреса мало: маршрут
     /// выбирает таблица, привязка к интерфейсу её обходит
-    /// ([`penguin_platform::bind`]).
-    interface: AtomicU32,
+    /// ([`penguin_platform::bind`]). Общий с сокетами загрузочного разрешателя.
+    interface: Arc<AtomicU32>,
     /// Разрешатель имён мимо тоннеля.
     resolver: Arc<dyn Resolver>,
 }
@@ -71,7 +71,22 @@ impl SystemDialer {
     pub fn new(resolver: Arc<dyn Resolver>) -> Self {
         Self {
             bind_to: None,
-            interface: AtomicU32::new(0),
+            interface: Arc::new(AtomicU32::new(0)),
+            resolver,
+        }
+    }
+
+    /// Выход с загрузочным разрешателем ([`penguin_dns::bootstrap`]): системный подменён
+    /// и отвечает fake-IP. Сокеты разрешателя защищены вместе со всеми: иначе при поднятом
+    /// тоннеле запрос ушёл бы в него же, к перехвату DNS, который ждёт этого ответа.
+    pub fn bootstrapped(dns: &penguin_dns::config::DnsConfig) -> Self {
+        // Разрешатель у этих сокетов не спрашивают: адреса апстримов числовые.
+        let sockets = Arc::new(Self::new(Arc::new(penguin_dns::resolver::SystemResolver)));
+        let resolver =
+            penguin_dns::bootstrap::resolver_for(dns, Arc::clone(&sockets) as Arc<dyn Dialer>);
+        Self {
+            bind_to: None,
+            interface: Arc::clone(&sockets.interface),
             resolver,
         }
     }
@@ -205,7 +220,11 @@ impl Outbound for DirectOutbound {
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
         let addr = socket_addr(&*self.dialer, target).await?;
-        Ok(Box::new(self.dialer.dial_tcp(addr).await?))
+        let stream = self.dialer.dial_tcp(addr).await.inspect_err(|err| {
+            tracing::debug!(%target, %addr, %err, "прямое соединение не открылось");
+        })?;
+        tracing::debug!(%target, %addr, "прямое соединение открыто");
+        Ok(Box::new(stream))
     }
 
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
@@ -215,6 +234,7 @@ impl Outbound for DirectOutbound {
         Ok(Box::new(DirectDatagram {
             socket,
             dialer: Arc::clone(&self.dialer),
+            resolved: parking_lot::Mutex::new(None),
         }))
     }
 }
@@ -223,12 +243,41 @@ impl Outbound for DirectOutbound {
 struct DirectDatagram {
     socket: UdpSocket,
     dialer: Arc<dyn Dialer>,
+    /// Последнее разрешённое имя: иначе каждая датаграмма QUIC уходила бы в DNS.
+    resolved: parking_lot::Mutex<Option<(SocketAddress, SocketAddr)>>,
+}
+
+impl DirectDatagram {
+    /// Адрес IPv4 назначения: сокет только IPv4, адрес IPv6 он отверг бы (`EINVAL`).
+    async fn address_of(&self, target: &SocketAddress) -> Result<SocketAddr, ProtocolError> {
+        let domain = match &target.host {
+            Address::Ip(ip) => return Ok(SocketAddr::new(*ip, target.port)),
+            Address::Domain(domain) => domain,
+        };
+        if let Some((name, addr)) = &*self.resolved.lock()
+            && name == target
+        {
+            return Ok(*addr);
+        }
+
+        let addr = self
+            .dialer
+            .resolve(domain)
+            .await?
+            .into_iter()
+            .find(IpAddr::is_ipv4)
+            .map(|ip| SocketAddr::new(ip, target.port))
+            .ok_or_else(|| ProtocolError::Unreachable(format!("у `{domain}` нет адреса IPv4")))?;
+        tracing::debug!(%target, %addr, "имя прямой датаграммы разрешено");
+        *self.resolved.lock() = Some((target.clone(), addr));
+        Ok(addr)
+    }
 }
 
 #[async_trait]
 impl ProxyDatagram for DirectDatagram {
     async fn send_to(&self, payload: Bytes, target: &SocketAddress) -> Result<(), ProtocolError> {
-        let addr = socket_addr(&*self.dialer, target).await?;
+        let addr = self.address_of(target).await?;
         self.socket.send_to(&payload, addr).await?;
         Ok(())
     }

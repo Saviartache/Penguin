@@ -52,7 +52,8 @@ impl DnsHijacker {
         let upstreams = if config.mode == DnsMode::System {
             Vec::new()
         } else {
-            upstream::build_all(&config.upstreams)?
+            // Мимо набирателя: запросы приложений идут по правилам, в том числе в тоннель.
+            upstream::build_all(&config.upstreams, &None)?
         };
 
         Ok(Self {
@@ -72,21 +73,35 @@ impl DnsHijacker {
     /// Отвечает на перехваченный запрос; апстриму он уходит как есть. Подставные ответы не кэшируются.
     pub async fn handle(&self, request: &[u8]) -> DnsResult<Vec<u8>> {
         let question = message::parse_query(request)?;
+        let name = question.name.as_str();
+        let kind = question.record_type;
 
         if let Some(answer) = self.answer_from_hosts(&question)? {
+            tracing::debug!(name, ?kind, "DNS: ответ из hosts");
             return Ok(answer);
         }
 
         if let Some(mut cached) = self.cache.get(&question.name, question.record_type) {
             message::set_id(&mut cached, question.id);
+            tracing::debug!(name, ?kind, "DNS: ответ из кэша");
             return Ok(cached);
         }
 
         if let Some(answer) = self.answer_with_fake_ip(&question)? {
+            tracing::debug!(name, ?kind, "DNS: подставной ответ");
             return Ok(answer);
         }
 
-        let response = self.ask_upstreams(request).await?;
+        let started = std::time::Instant::now();
+        let response = self.ask_upstreams(request).await.inspect_err(|err| {
+            tracing::debug!(name, ?kind, %err, "DNS: апстримы не ответили");
+        })?;
+        tracing::debug!(
+            name,
+            ?kind,
+            ms = started.elapsed().as_millis() as u64,
+            "DNS: ответ апстрима"
+        );
         let ttl = message::min_ttl(&response).unwrap_or(0);
         self.cache
             .insert(&question.name, question.record_type, response.clone(), ttl);

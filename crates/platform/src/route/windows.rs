@@ -216,6 +216,7 @@ mod tests {
             gateway: None,
             interface_index: 42,
             metric: None,
+            scoped: false,
         };
         let row = build_row(&route);
 
@@ -232,6 +233,7 @@ mod tests {
             gateway: None,
             interface_index: 1,
             metric: Some(500),
+            scoped: false,
         };
         assert_eq!(build_row(&route).Metric, 500);
     }
@@ -266,6 +268,7 @@ mod tests {
             gateway: None,
             interface_index: 3,
             metric: None,
+            scoped: false,
         };
         let row = build_row(&route);
         assert_eq!(row.DestinationPrefix.PrefixLength, 32);

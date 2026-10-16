@@ -3,16 +3,18 @@
 //! Прячет от провайдера имя VPN-сервера при загрузочном разрешении. TLS и
 //! проверка сертификата через хранилище системы те же, что у протоколов.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use penguin_proto::dialer::Dialer;
 use rustls::pki_types::ServerName;
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use super::Upstream;
+use super::{Sockets, Upstream, socket_error};
 use crate::config::UPSTREAM_TIMEOUT;
 use crate::error::{DnsError, DnsResult};
 
@@ -27,6 +29,7 @@ pub struct DotUpstream {
     address: String,
     server_name: String,
     connector: TlsConnector,
+    sockets: Sockets,
 }
 
 impl std::fmt::Debug for DotUpstream {
@@ -34,6 +37,7 @@ impl std::fmt::Debug for DotUpstream {
         f.debug_struct("DotUpstream")
             .field("address", &self.address)
             .field("server_name", &self.server_name)
+            .field("protected", &self.sockets.is_some())
             .finish()
     }
 }
@@ -57,7 +61,14 @@ impl DotUpstream {
             address,
             server_name: server_name.into(),
             connector: TlsConnector::from(Arc::new(config)),
+            sockets: None,
         })
+    }
+
+    /// Берёт сокеты у набирателя: мимо собственного тоннеля.
+    pub fn through(mut self, sockets: Arc<dyn Dialer>) -> Self {
+        self.sockets = Some(sockets);
+        self
     }
 }
 
@@ -69,7 +80,15 @@ impl Upstream for DotUpstream {
 
     async fn query(&self, request: &[u8]) -> DnsResult<Vec<u8>> {
         let exchange = async {
-            let stream = TcpStream::connect(&self.address).await?;
+            let stream = match &self.sockets {
+                Some(sockets) => {
+                    let address: SocketAddr = self.address.parse().map_err(|_| {
+                        DnsError::Config(format!("адрес DoT `{}` не числовой", self.address))
+                    })?;
+                    sockets.dial_tcp(address).await.map_err(socket_error)?
+                }
+                None => TcpStream::connect(&self.address).await?,
+            };
             let _ = stream.set_nodelay(true);
 
             let name = ServerName::try_from(self.server_name.clone()).map_err(|_| {

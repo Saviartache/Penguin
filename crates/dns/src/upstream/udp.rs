@@ -1,11 +1,13 @@
 //! DNS поверх UDP: открытый текст, но безопасный внутри тоннеля; мимо тоннеля есть [`super::dot`].
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use penguin_proto::dialer::Dialer;
 use tokio::net::UdpSocket;
 
-use super::Upstream;
+use super::{Sockets, Upstream, socket_error};
 use crate::config::UPSTREAM_TIMEOUT;
 use crate::error::{DnsError, DnsResult};
 
@@ -13,15 +15,34 @@ use crate::error::{DnsError, DnsResult};
 const MAX_RESPONSE: usize = 4096;
 
 /// DNS поверх UDP.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UdpUpstream {
     server: SocketAddr,
+    sockets: Sockets,
+}
+
+impl std::fmt::Debug for UdpUpstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpUpstream")
+            .field("server", &self.server)
+            .field("protected", &self.sockets.is_some())
+            .finish()
+    }
 }
 
 impl UdpUpstream {
     /// Создаёт апстрим.
     pub fn new(server: SocketAddr) -> Self {
-        Self { server }
+        Self {
+            server,
+            sockets: None,
+        }
+    }
+
+    /// Берёт сокеты у набирателя: мимо собственного тоннеля.
+    pub fn through(mut self, sockets: Arc<dyn Dialer>) -> Self {
+        self.sockets = Some(sockets);
+        self
     }
 
     /// Разбирает адрес из настроек; порт по умолчанию 53.
@@ -59,7 +80,10 @@ impl Upstream for UdpUpstream {
             SocketAddr::from(([0u16; 8], 0))
         };
 
-        let socket = UdpSocket::bind(local).await?;
+        let socket = match &self.sockets {
+            Some(sockets) => sockets.bind_udp(local).await.map_err(socket_error)?,
+            None => UdpSocket::bind(local).await?,
+        };
         socket.connect(self.server).await?;
         socket.send(request).await?;
 

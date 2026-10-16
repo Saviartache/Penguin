@@ -63,10 +63,7 @@ impl Engine {
     pub fn new(config: RootConfig) -> EngineResult<Arc<Self>> {
         let events = EventBus::new();
 
-        // Загрузочный, а не системный: тот подменён и отвечает fake-IP
-        // ([`penguin_dns::bootstrap`]).
-        let resolver = penguin_dns::bootstrap::resolver_for(&config.dns);
-        let dialer = Arc::new(SystemDialer::new(resolver));
+        let dialer = Arc::new(SystemDialer::bootstrapped(&config.dns));
         let outbounds = Arc::new(OutboundPool::new(Arc::clone(&dialer) as Arc<dyn Dialer>));
 
         let active = config

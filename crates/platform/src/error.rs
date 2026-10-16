@@ -16,6 +16,10 @@ pub enum PlatformError {
     #[error("маршрут: {0}")]
     Route(String),
 
+    /// Такой маршрут уже стоит.
+    #[error("маршрут уже стоит")]
+    RouteExists,
+
     /// Не удалось определить интерфейс.
     #[error("сетевой интерфейс: {0}")]
     Interface(String),

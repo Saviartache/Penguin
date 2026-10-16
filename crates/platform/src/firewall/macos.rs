@@ -96,6 +96,8 @@ fn ruleset(rules: &FirewallRules) -> String {
 
     text.push_str("block drop out all\n");
     text.push_str("pass out quick on lo0 all\n");
+    // Прямой выход и DNS службы: pf не различает процессов, служба — единственный свой root.
+    text.push_str("pass out quick proto { tcp udp } all user root\n");
 
     // Трафик тоннеля опознаётся по адресу источника из служебной подсети.
     if let Some(subnet) = &rules.tunnel_subnet {
@@ -141,6 +143,15 @@ mod tests {
     fn loopback_is_always_allowed() {
         let text = ruleset(&FirewallRules::default());
         assert!(text.contains("pass out quick on lo0 all"), "{text}");
+    }
+
+    #[test]
+    fn the_service_own_direct_traffic_passes() {
+        let text = ruleset(&FirewallRules::default());
+        assert!(
+            text.contains("pass out quick proto { tcp udp } all user root"),
+            "{text}"
+        );
     }
 
     #[test]

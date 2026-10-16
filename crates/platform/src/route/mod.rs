@@ -28,6 +28,8 @@ pub struct Route {
     pub interface_index: u32,
     /// Метрика; `None` — самая предпочтительная.
     pub metric: Option<u32>,
+    /// Только для сокетов, привязанных к интерфейсу (`RTF_IFSCOPE` в macOS); прочим не виден.
+    pub scoped: bool,
 }
 
 impl Route {
@@ -38,6 +40,7 @@ impl Route {
             gateway: None,
             interface_index,
             metric: None,
+            scoped: false,
         }
     }
 
@@ -48,6 +51,7 @@ impl Route {
             gateway: Some(gateway),
             interface_index,
             metric: None,
+            scoped: false,
         }
     }
 }
@@ -86,6 +90,34 @@ impl RouteGuard {
             let _ = remove_route(&route);
             self.add(route)?;
         }
+        Ok(())
+    }
+
+    /// Оставляет прямому выходу путь наружу: его сокеты привязаны к физическому интерфейсу,
+    /// а macOS ищет им маршрут только среди привязанных к нему же. Своего такого у основного
+    /// интерфейса нет — без этого маршрута всё «напрямую» получает `Network is unreachable`.
+    #[cfg(target_os = "macos")]
+    pub fn keep_outside_default(&self, outside: &DefaultRoute) -> PlatformResult<()> {
+        let destination = IpNet::V4(ipnet::Ipv4Net::default());
+        let mut route = if outside.gateway == outside.address {
+            Route::via_interface(destination, outside.interface_index)
+        } else {
+            Route::via_gateway(destination, outside.gateway, outside.interface_index)
+        };
+        route.scoped = true;
+
+        match self.add(route) {
+            Err(crate::error::PlatformError::RouteExists) => {
+                tracing::debug!("привязанный маршрут наружу уже есть у системы");
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    /// На других системах прямой выход находит путь сам.
+    #[cfg(not(target_os = "macos"))]
+    pub fn keep_outside_default(&self, _outside: &DefaultRoute) -> PlatformResult<()> {
         Ok(())
     }
 

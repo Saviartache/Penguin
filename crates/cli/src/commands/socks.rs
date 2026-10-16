@@ -35,10 +35,7 @@ pub enum Kind {
 pub async fn run(config: &RootConfig, args: &SocksArgs, kind: Kind) -> Result<()> {
     let profile = pick_profile(config, args.profile.as_deref())?;
 
-    // Загрузочный резолвер: системный может отвечать подменой прошлого запуска (`penguin_dns::bootstrap`).
-    let dialer = Arc::new(SystemDialer::new(penguin_dns::bootstrap::resolver_for(
-        &config.dns,
-    )));
+    let dialer = Arc::new(SystemDialer::bootstrapped(&config.dns));
     let outbounds = Arc::new(OutboundPool::new(dialer));
 
     outbounds

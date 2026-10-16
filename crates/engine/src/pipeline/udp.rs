@@ -30,12 +30,32 @@ pub const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Наибольшая датаграмма, которую имеет смысл принимать.
 pub const MAX_DATAGRAM: usize = 65_535;
 
+/// Сколько датаграмм ждёт сессию, пока она открывается или отправляет предыдущие.
+const SESSION_QUEUE: usize = 256;
+
 /// Ключ сессии: сокет приложения (без назначения).
 type SessionKey = std::net::SocketAddr;
 
-type Sessions = Arc<RwLock<HashMap<SessionKey, Arc<dyn ProxyDatagram>>>>;
+/// Датаграмма приложения к отправке наружу.
+type Outgoing = (Bytes, SocketAddress);
+
+/// Очередь каждой сессии: насос в неё только кладёт и никого не ждёт.
+type Sessions = Arc<RwLock<HashMap<SessionKey, mpsc::Sender<Outgoing>>>>;
+
+/// Общее для насоса и его сессий.
+#[derive(Clone)]
+struct Shared {
+    sessions: Sessions,
+    pipeline: Arc<Pipeline>,
+    /// Куда уходят ответы приложениям.
+    outgoing: mpsc::Sender<Datagram>,
+}
 
 /// Обслуживает UDP из тоннеля.
+///
+/// Насос не ждёт ни открытия канала, ни отправки: и то и другое может разрешать имя или
+/// поднимать соединение с сервером, а одна такая датаграмма иначе останавливала бы
+/// весь UDP, включая ответы DNS.
 pub async fn pump(
     mut incoming: mpsc::Receiver<Datagram>,
     outgoing: mpsc::Sender<Datagram>,
@@ -44,7 +64,11 @@ pub async fn pump(
     fake_ip: Option<Arc<FakeIpMap>>,
     cancel: CancellationToken,
 ) {
-    let sessions = Sessions::default();
+    let shared = Shared {
+        sessions: Sessions::default(),
+        pipeline,
+        outgoing,
+    };
 
     loop {
         let datagram = tokio::select! {
@@ -58,23 +82,24 @@ pub async fn pump(
         if datagram.destination.port() == DNS_PORT
             && let Some(hijacker) = &dns
         {
-            spawn_dns_answer(Arc::clone(hijacker), datagram, outgoing.clone());
+            spawn_dns_answer(Arc::clone(hijacker), datagram, shared.outgoing.clone());
             continue;
         }
 
-        let Some(session) = session_for(&sessions, &datagram, &pipeline, &outgoing, &cancel).await
-        else {
-            continue;
-        };
-
         let target = resolve_target(datagram.destination, fake_ip.as_ref());
-        if let Err(err) = session.send_to(datagram.payload, &target).await {
-            tracing::debug!(%target, %err, "датаграмма не отправлена");
-            sessions.write().remove(&datagram.source);
+        tracing::trace!(
+            source = %datagram.source,
+            %target,
+            bytes = datagram.payload.len(),
+            "датаграмма приложения"
+        );
+        let queue = session_for(&shared, &datagram, &cancel);
+        if queue.try_send((datagram.payload, target)).is_err() {
+            tracing::debug!(source = %datagram.source, "очередь сессии UDP полна, датаграмма отброшена");
         }
     }
 
-    sessions.write().clear();
+    shared.sessions.write().clear();
 }
 
 /// Отвечает на запрос DNS, не выпуская его наружу.
@@ -91,90 +116,148 @@ fn spawn_dns_answer(
                     destination: datagram.destination,
                     payload: Bytes::from(response),
                 };
-                let _ = outgoing.send(answer).await;
+                if outgoing.send(answer).await.is_err() {
+                    tracing::debug!("ответ DNS не ушёл: стек остановлен");
+                }
             }
-            Err(err) => tracing::debug!(%err, "запрос DNS не обслужен"),
+            Err(err) => tracing::debug!(app = %datagram.source, %err, "запрос DNS не обслужен"),
         }
     });
 }
 
-/// Находит или открывает канал наружу для этого сокета приложения.
-async fn session_for(
-    sessions: &Sessions,
+/// Очередь сессии этого сокета приложения; новой сессии открывается своя задача.
+fn session_for(
+    shared: &Shared,
     datagram: &Datagram,
-    pipeline: &Arc<Pipeline>,
-    outgoing: &mpsc::Sender<Datagram>,
     cancel: &CancellationToken,
-) -> Option<Arc<dyn ProxyDatagram>> {
-    if let Some(existing) = sessions.read().get(&datagram.source) {
-        return Some(Arc::clone(existing));
+) -> mpsc::Sender<Outgoing> {
+    if let Some(existing) = shared.sessions.read().get(&datagram.source)
+        && !existing.is_closed()
+    {
+        return existing.clone();
     }
+
+    let (queue, datagrams) = mpsc::channel(SESSION_QUEUE);
+    shared
+        .sessions
+        .write()
+        .insert(datagram.source, queue.clone());
 
     let request = InboundRequest {
         source: datagram.source,
         target: SocketAddress::from(datagram.destination),
         network: Network::Udp,
     };
-
-    let channel = match pipeline.open_udp(&request).await {
-        Ok(channel) => Arc::<dyn ProxyDatagram>::from(channel),
-        Err(err) => {
-            tracing::debug!(%err, "канал UDP не открылся");
-            return None;
-        }
-    };
-
-    sessions
-        .write()
-        .insert(datagram.source, Arc::clone(&channel));
-    spawn_reader(
-        Arc::clone(&channel),
-        datagram.source,
-        outgoing.clone(),
-        Arc::clone(sessions),
-        cancel.clone(),
-    );
-    Some(channel)
+    tokio::spawn(run_session(
+        request,
+        datagrams,
+        queue.downgrade(),
+        shared.clone(),
+        cancel.child_token(),
+    ));
+    queue
 }
 
-/// Читает ответы и возвращает их приложению.
-fn spawn_reader(
+/// Открывает канал наружу и отправляет в него очередь сессии до её конца.
+async fn run_session(
+    request: InboundRequest,
+    mut datagrams: mpsc::Receiver<Outgoing>,
+    queue: mpsc::WeakSender<Outgoing>,
+    shared: Shared,
+    done: CancellationToken,
+) {
+    let app = request.source;
+    let channel = match shared.pipeline.open_udp(&request).await {
+        Ok(channel) => Arc::<dyn ProxyDatagram>::from(channel),
+        Err(err) => {
+            tracing::debug!(%app, target = %request.target, %err, "канал UDP не открылся");
+            forget(&shared.sessions, app, &queue);
+            return;
+        }
+    };
+    tracing::debug!(%app, target = %request.target, "сессия UDP открыта");
+
+    tokio::spawn(read_answers(
+        Arc::clone(&channel),
+        app,
+        shared.outgoing.clone(),
+        done.clone(),
+    ));
+
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = done.cancelled() => break,
+            next = datagrams.recv() => next,
+        };
+        let Some((payload, target)) = next else { break };
+
+        if let Err(err) = channel.send_to(payload, &target).await {
+            tracing::debug!(%app, %target, %err, "датаграмма не отправлена");
+            break;
+        }
+    }
+
+    done.cancel();
+    forget(&shared.sessions, app, &queue);
+    let _ = channel.close().await;
+    tracing::debug!(%app, "сессия UDP закрыта");
+}
+
+/// Убирает сессию из таблицы, если там всё ещё она, а не открытая после неё.
+fn forget(sessions: &Sessions, app: SessionKey, queue: &mpsc::WeakSender<Outgoing>) {
+    let mut sessions = sessions.write();
+    if let (Some(current), Some(mine)) = (sessions.get(&app), queue.upgrade())
+        && current.same_channel(&mine)
+    {
+        sessions.remove(&app);
+    }
+}
+
+/// Читает ответы и возвращает их приложению; тишина дольше [`SESSION_TIMEOUT`] закрывает
+/// сессию.
+async fn read_answers(
     channel: Arc<dyn ProxyDatagram>,
     app: SessionKey,
     outgoing: mpsc::Sender<Datagram>,
-    sessions: Sessions,
-    cancel: CancellationToken,
+    done: CancellationToken,
 ) {
-    tokio::spawn(async move {
-        loop {
-            let received = tokio::select! {
-                biased;
-                () = cancel.cancelled() => break,
-                received = tokio::time::timeout(SESSION_TIMEOUT, channel.recv_from()) => received,
-            };
+    loop {
+        let received = tokio::select! {
+            biased;
+            () = done.cancelled() => break,
+            received = tokio::time::timeout(SESSION_TIMEOUT, channel.recv_from()) => received,
+        };
 
-            let Ok(Ok((payload, from))) = received else {
-                break;
-            };
-
-            // Ответ с именем вместо адреса в IP-пакет не собрать.
-            let Some(source) = from.as_socket_addr() else {
-                continue;
-            };
-
-            let answer = Datagram {
-                source: app,
-                destination: source,
-                payload,
-            };
-            if outgoing.send(answer).await.is_err() {
+        let (payload, from) = match received {
+            Ok(Ok(answer)) => answer,
+            Ok(Err(err)) => {
+                tracing::debug!(%app, %err, "ответ UDP не прочитан");
                 break;
             }
-        }
+            Err(_) => {
+                tracing::trace!(%app, "сессия UDP затихла");
+                break;
+            }
+        };
 
-        sessions.write().remove(&app);
-        let _ = channel.close().await;
-    });
+        // Ответ с именем вместо адреса в IP-пакет не собрать.
+        let Some(source) = from.as_socket_addr() else {
+            continue;
+        };
+
+        tracing::trace!(%app, from = %source, bytes = payload.len(), "ответ UDP");
+        let answer = Datagram {
+            source: app,
+            destination: source,
+            payload,
+        };
+        if outgoing.send(answer).await.is_err() {
+            break;
+        }
+    }
+
+    done.cancel();
 }
 
 /// Разворачивает подставной адрес обратно в имя.
@@ -229,6 +312,85 @@ mod tests {
         let destination: std::net::SocketAddr = "8.8.8.8:53".parse().expect("адрес");
         let target = resolve_target(destination, None);
         assert_eq!(target, SocketAddress::from(destination));
+    }
+
+    #[tokio::test]
+    async fn a_slow_session_does_not_hold_up_dns() {
+        use penguin_config::schema::routing::TunnelMode;
+        use penguin_core::id::OutboundId;
+        use penguin_dns::DnsConfig;
+        use penguin_dns::message::{self, RecordType};
+        use penguin_process::resolver::NoResolver;
+        use penguin_router::engine::Router;
+
+        use crate::direct::SystemDialer;
+        use crate::metrics::counters::Metrics;
+        use crate::outbounds::OutboundPool;
+
+        /// Разрешатель, который не отвечает никогда.
+        struct Silent;
+
+        #[async_trait::async_trait]
+        impl penguin_dns::Resolver for Silent {
+            async fn resolve(&self, _host: &str) -> penguin_dns::DnsResult<Vec<std::net::IpAddr>> {
+                std::future::pending().await
+            }
+        }
+
+        let dialer = Arc::new(SystemDialer::new(Arc::new(Silent)));
+        let pipeline = Arc::new(Pipeline::new(
+            Arc::new(Router::passthrough(
+                TunnelMode::Direct,
+                OutboundId::new("home"),
+            )),
+            Arc::new(OutboundPool::new(dialer)),
+            Arc::new(NoResolver),
+            Metrics::new(),
+        ));
+        let hijacker = Arc::new(DnsHijacker::new(&DnsConfig::default()).expect("собирается"));
+        let fake_ip = hijacker.fake_ip().cloned();
+        let slow = fake_ip
+            .as_ref()
+            .expect("режим fake-IP")
+            .address_for("slow.example")
+            .expect("адрес выдан");
+
+        let (to_pump, incoming) = mpsc::channel(8);
+        let (outgoing, mut from_pump) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        tokio::spawn(pump(
+            incoming,
+            outgoing,
+            pipeline,
+            Some(hijacker),
+            fake_ip,
+            cancel.clone(),
+        ));
+
+        to_pump
+            .send(Datagram {
+                source: "198.18.0.1:50000".parse().expect("адрес"),
+                destination: std::net::SocketAddr::new(slow.into(), 443),
+                payload: Bytes::from_static(b"quic"),
+            })
+            .await
+            .expect("насос жив");
+        let query = message::build_query("fast.example", RecordType::A, 7).expect("запрос");
+        to_pump
+            .send(Datagram {
+                source: "198.18.0.1:50001".parse().expect("адрес"),
+                destination: "198.18.0.2:53".parse().expect("адрес"),
+                payload: Bytes::from(query),
+            })
+            .await
+            .expect("насос жив");
+
+        let answer = tokio::time::timeout(Duration::from_secs(2), from_pump.recv())
+            .await
+            .expect("DNS ждал чужую датаграмму")
+            .expect("ответ");
+        assert_eq!(answer.destination.port(), DNS_PORT);
+        cancel.cancel();
     }
 
     #[test]
