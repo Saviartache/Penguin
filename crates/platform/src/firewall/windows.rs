@@ -15,7 +15,7 @@ use crate::firewall::policy;
 const RULE_PREFIX: &str = "Penguin-KillSwitch";
 
 /// Имена правил клиента; `netsh` не умеет удалять по маске.
-const RULE_NAMES: [&str; 2] = ["-AllowTunnel", "-AllowNet"];
+const RULE_NAMES: [&str; 3] = ["-AllowTunnel", "-AllowNet", "-AllowService"];
 
 /// Снимает запрет и правила прошлого запуска: правила ставятся до запрета и снимаются после.
 pub fn recover_leftovers() -> PlatformResult<()> {
@@ -38,6 +38,11 @@ pub fn engage(rules: &FirewallRules) -> PlatformResult<Saved> {
     }
 
     allow("remoteip=127.0.0.0/8")?;
+
+    // Служба сама шлёт «напрямую» и загрузочный DNS мимо тоннеля.
+    let exe = std::env::current_exe()
+        .map_err(|e| PlatformError::Firewall(format!("путь к службе не узнать: {e}")))?;
+    allow(&format!("program={}", exe.display()))?;
 
     if rules.allow_lan {
         for subnet in [
@@ -120,22 +125,27 @@ fn our_rules_present() -> bool {
 
 /// Разрешает исходящий трафик по условию; одноимённые правила удаляются одной командой.
 fn allow(condition: &str) -> PlatformResult<()> {
-    let name = if condition.starts_with("localip=") {
-        format!("{RULE_PREFIX}-AllowTunnel")
-    } else {
-        format!("{RULE_PREFIX}-AllowNet")
-    };
-
     netsh(&[
         "advfirewall",
         "firewall",
         "add",
         "rule",
-        &format!("name={name}"),
+        &format!("name={RULE_PREFIX}{}", rule_suffix(condition)),
         "dir=out",
         "action=allow",
         condition,
     ])
+}
+
+/// Окончание имени правила по его условию.
+fn rule_suffix(condition: &str) -> &'static str {
+    if condition.starts_with("localip=") {
+        "-AllowTunnel"
+    } else if condition.starts_with("program=") {
+        "-AllowService"
+    } else {
+        "-AllowNet"
+    }
 }
 
 /// Выполняет команду брандмауэра.
@@ -177,8 +187,15 @@ mod tests {
 
     #[test]
     fn the_tunnel_rule_is_told_apart_by_the_local_address() {
-        assert!("localip=198.18.0.0/15".starts_with("localip="));
-        assert!(!"remoteip=10.0.0.0/8".starts_with("localip="));
+        assert_eq!(rule_suffix("localip=198.18.0.0/15"), "-AllowTunnel");
+        assert_eq!(rule_suffix("remoteip=10.0.0.0/8"), "-AllowNet");
+    }
+
+    #[test]
+    fn the_service_own_direct_traffic_passes() {
+        let suffix = rule_suffix(r"program=C:\Program Files\Penguin\penguin.exe");
+        assert_eq!(suffix, "-AllowService");
+        assert!(RULE_NAMES.contains(&suffix), "правило не снимется");
     }
 
     #[test]

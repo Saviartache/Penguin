@@ -52,6 +52,8 @@ fn ruleset(rules: &FirewallRules) -> String {
     text.push_str("  chain output {\n");
     text.push_str("    type filter hook output priority 0; policy drop;\n");
     text.push_str("    oifname \"lo\" accept\n");
+    // Служба (root) сама шлёт «напрямую» и загрузочный DNS мимо тоннеля.
+    text.push_str("    meta skuid 0 accept\n");
 
     // Трафик тоннеля опознаётся по адресу источника из служебной подсети.
     if let Some(subnet) = &rules.tunnel_subnet {
@@ -88,6 +90,12 @@ mod tests {
     fn loopback_is_always_allowed() {
         let text = ruleset(&FirewallRules::default());
         assert!(text.contains("oifname \"lo\" accept"), "{text}");
+    }
+
+    #[test]
+    fn the_service_own_direct_traffic_passes() {
+        let text = ruleset(&FirewallRules::default());
+        assert!(text.contains("meta skuid 0 accept"), "{text}");
     }
 
     #[test]
