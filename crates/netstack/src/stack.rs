@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::StackConfig;
 use crate::device::VirtualDevice;
-use crate::ip::parse;
+use crate::ip::{echo, parse};
 use crate::poll::{Clock, clamp_delay};
 use crate::tcp::conn::TcpConnection;
 use crate::tcp::listener::{Accepted, TcpListener};
@@ -147,6 +147,7 @@ async fn run(
         iface.poll(now, &mut inner.device, &mut inner.sockets);
 
         while let Some(packet) = inner.device.take_tx() {
+            tracing::trace!(bytes = packet.len(), "пакет в адаптер");
             if let Err(err) = device.send(&packet).await {
                 tracing::debug!(%err, "пакет не ушёл в адаптер");
             }
@@ -215,15 +216,30 @@ struct Inner {
 
 /// Разбирает пришедший пакет; владение нужно, чтобы отдать TCP и срезать UDP без копии.
 fn handle_incoming(
-    packet: BytesMut,
+    mut packet: BytesMut,
     inner: &mut Inner,
     udp_incoming: &mpsc::Sender<Datagram>,
     config: &StackConfig,
 ) {
+    if echo::answer(&mut packet) {
+        tracing::trace!(bytes = packet.len(), "ответ на ping");
+        inner.device.queue_tx(packet);
+        return;
+    }
+
     let Some(parsed) = parse::parse(&packet) else {
+        tracing::trace!(bytes = packet.len(), "пакет из адаптера не разобран");
         return;
     };
     let (source, destination) = (parsed.source, parsed.destination);
+    tracing::trace!(
+        network = ?parsed.network,
+        %source,
+        %destination,
+        syn = parsed.is_syn,
+        bytes = packet.len(),
+        "пакет из адаптера"
+    );
 
     match parsed.network {
         penguin_core::network::Network::Tcp => {
@@ -252,7 +268,7 @@ fn handle_incoming(
             };
             // Блокировать нельзя: встал бы весь стек, включая TCP.
             if udp_incoming.try_send(datagram).is_err() {
-                tracing::trace!("очередь UDP переполнена, датаграмма отброшена");
+                tracing::debug!(%source, %destination, "очередь UDP переполнена, датаграмма отброшена");
             }
         }
     }
@@ -557,6 +573,24 @@ mod tests {
             TcpSeqNumber(5000),
             "сброс вне окна ОС не примет"
         );
+    }
+
+    #[test]
+    fn a_ping_is_answered_by_the_stack() {
+        let mut request = vec![0u8; 28];
+        request[0] = 0x45;
+        request[2..4].copy_from_slice(&28u16.to_be_bytes());
+        request[9] = crate::ip::parse::PROTO_ICMP;
+        request[12..16].copy_from_slice(&[198, 18, 0, 1]);
+        request[16..20].copy_from_slice(&[198, 18, 0, 35]);
+        request[20] = 8;
+
+        let mut harness = Harness::new(StackConfig::default());
+        harness.feed(&request);
+
+        let reply = harness.inner.device.take_tx().expect("стек промолчал");
+        assert_eq!(reply[20], 0, "не эхо-ответ");
+        assert_eq!(&reply[16..20], &[198, 18, 0, 1]);
     }
 
     #[test]
