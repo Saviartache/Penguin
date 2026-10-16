@@ -5,8 +5,8 @@
 #   bash servers/pingwin/deploy.sh
 #
 # Спрашивает, куда ставить, и делает всё остальное сам: ставит Docker, увозит
-# исходники, собирает образ, поднимает сервер и прикрытие, заводит ключи и
-# печатает ссылку-приглашение для клиента.
+# исходники, собирает образ, получает сертификат Let's Encrypt, заводит ключи,
+# поднимает сервер и печатает ссылку-приглашение для клиента.
 #
 # Запускать можно сколько угодно раз: скрипт сначала смотрит, что уже стоит на
 # сервере, и на повторном запуске предлагает просто завести ещё одного
@@ -14,7 +14,8 @@
 # трогаются в любом случае — иначе разосланные ссылки перестали бы работать.
 #
 # Что нужно на этой машине: ssh, tar и OpenSSH 8.4 или новее — тот, что умеет
-# SSH_ASKPASS_REQUIRE. Что нужно на той: доступ по SSH и выход в интернет.
+# SSH_ASKPASS_REQUIRE. Что нужно на той: доступ по SSH, выход в интернет и
+# доменное имя, которое указывает на неё: без него не выписать сертификат.
 
 set -euo pipefail
 
@@ -71,8 +72,8 @@ cat <<'HELLO'
 
   Pingwin — развёртывание сервера
 
-  Спрошу, куда ставить, и сделаю остальное сам. Всё, что понадобится
-  на той машине, — доступ по SSH и выход в интернет.
+  Спрошу, куда ставить, и сделаю остальное сам. Понадобится доступ
+  по SSH, выход в интернет и доменное имя, указывающее на сервер.
 
 HELLO
 
@@ -118,7 +119,7 @@ show_link() {
     local link
     link="$(remote "docker run --rm -v $REMOTE_DIR/pingwin.toml:/etc/pingwin/pingwin.toml:ro \
         pingwin-server:latest link --config /etc/pingwin/pingwin.toml --user '$USER_NAME' \
-        --host '$SSH_HOST:$CLIENT_PORT' --sni '$COVER_SNI' --name '$PROFILE_NAME'")"
+        --host '$DOMAIN:$CLIENT_PORT' --name '$PROFILE_NAME'")"
     [[ -n "$link" ]] || die "ссылка не собралась"
 
     printf '\n\033[1m▶ Готово\033[0m\n\n'
@@ -159,21 +160,24 @@ fi
 # --- каким будет профиль -----------------------------------------------------
 
 if [[ "$MODE" == "user" ]]; then
-    # Порт и имя прикрытия у работающего сервера уже выбраны: спрашивать их
-    # заново значило бы предлагать выдать ссылку, которая никуда не придёт.
+    # Порт и имя у работающего сервера уже выбраны: спрашивать их заново
+    # значило бы предлагать выдать ссылку, которая никуда не придёт.
     bold "Кому ссылку"
     CLIENT_PORT="$(remote "sed -n 's/^PINGWIN_PORT=//p' $REMOTE_DIR/.env 2>/dev/null" || true)"
-    COVER_SNI="$(remote "sed -n 's/^PINGWIN_SNI=//p' $REMOTE_DIR/.env 2>/dev/null" || true)"
-    CLIENT_PORT="${CLIENT_PORT:-9443}"
-    COVER_SNI="${COVER_SNI:-www.microsoft.com}"
-    info "порт $CLIENT_PORT, прикрытие $COVER_SNI — как при развёртывании"
+    DOMAIN="$(remote "sed -n 's/^PINGWIN_DOMAIN=//p' $REMOTE_DIR/.env 2>/dev/null" || true)"
+    CLIENT_PORT="${CLIENT_PORT:-443}"
+    [[ -n "$DOMAIN" ]] || die "в $REMOTE_DIR/.env нет PINGWIN_DOMAIN — пройдите развёртывание заново"
+    info "порт $CLIENT_PORT/udp, имя $DOMAIN — как при развёртывании"
 else
     bold "Каким будет сервер"
-    info 'Порт: 443 выглядит естественнее всего — TLS там никого не удивляет.'
-    info 'Но именно его чаще всего и разбирают по дороге: на проверочной линии'
-    info 'он давал оборот в 135 мс против 0.9 мс на 9443. Отсюда умолчание.'
-    CLIENT_PORT="$(ask 'Порт, на который будут приходить клиенты' '9443')"
-    COVER_SNI="$(ask 'Имя прикрытия (его увидит DPI)' 'www.microsoft.com')"
+    info 'Имя: на него выписывается сертификат, и его увидит DPI. Оно должно'
+    info 'уже указывать на этот сервер (запись A или AAAA), а порт 80/tcp —'
+    info 'быть открыт: через него Let'"'"'s Encrypt проверяет, что имя ваше.'
+    DOMAIN="$(ask 'Доменное имя сервера')"
+    [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "имя «$DOMAIN» не похоже на доменное"
+    info 'Порт: HTTP/3 браузеры ищут на 443/udp — там он и выглядит обычно.'
+    CLIENT_PORT="$(ask 'Порт UDP, на который будут приходить клиенты' '443')"
+    CERT_EMAIL="$(ask 'Почта для Let'"'"'s Encrypt (пусто — без неё)' '')"
 fi
 
 USER_NAME="$(ask 'Имя пользователя в профиле' 'client')"
@@ -181,7 +185,7 @@ USER_NAME="$(ask 'Имя пользователя в профиле' 'client')"
 # настройки работающего сервера.
 [[ "$USER_NAME" =~ ^[A-Za-z0-9._-]+$ ]] \
     || die "имя пользователя: латиница, цифры, точка, дефис, подчёркивание"
-PROFILE_NAME="$(ask 'Как назвать профиль в клиенте' "Pingwin $SSH_HOST")"
+PROFILE_NAME="$(ask 'Как назвать профиль в клиенте' "Pingwin $DOMAIN")"
 
 # Пароль машинный: человеческий подбирается, а вводить его руками всё равно
 # не придётся — он уедет в ссылку.
@@ -269,9 +273,8 @@ info "$(du -sh "$CONTEXT" | cut -f1) исходников"
 #
 # `cover` не сносится, хотя это тоже привезённое: он примонтирован в живой
 # контейнер, а bind-mount держит **inode**, а не путь. Удалить и создать
-# заново — значит оставить nginx с папкой, которой больше нет: он ответит
-# `403`, и прикрытие перестанет быть прикрытием. Файлы внутри tar заменит и
-# так.
+# заново — значит оставить сервер с папкой, которой больше нет, и прикрытие
+# ответит `404` на всё. Файлы внутри tar заменит и так.
 remote "rm -rf $REMOTE_DIR/crates $REMOTE_DIR/protocols $REMOTE_DIR/servers
         mkdir -p $REMOTE_DIR"
 tar -C "$CONTEXT" -czf - . | remote "tar -C $REMOTE_DIR -xzf -"
@@ -280,9 +283,9 @@ ok "исходники на месте"
 # Порт наружу спрашивается у человека, а файл в репозитории один на всех, —
 # поэтому он приезжает переменной окружения, а не правкой compose.yml.
 #
-# `PINGWIN_SNI` compose не читает: он лежит рядом, чтобы повторный запуск знал
-# имя прикрытия и не переспрашивал его ради одной ссылки.
-remote "printf 'PINGWIN_PORT=%s\nPINGWIN_SNI=%s\n' '$CLIENT_PORT' '$COVER_SNI' > $REMOTE_DIR/.env"
+# `PINGWIN_DOMAIN` compose не читает: он лежит рядом, чтобы повторный запуск и
+# продление сертификата знали имя и не переспрашивали его.
+remote "printf 'PINGWIN_PORT=%s\nPINGWIN_DOMAIN=%s\n' '$CLIENT_PORT' '$DOMAIN' > $REMOTE_DIR/.env"
 
 # --- сборка ------------------------------------------------------------------
 
@@ -291,12 +294,47 @@ info 'первый раз это минуты: сервер собирается
 remote "cd $REMOTE_DIR && docker compose build --quiet" || die "образ не собрался"
 ok "образ готов"
 
+# --- сертификат --------------------------------------------------------------
+
+bold "Сертификат"
+if remote "test -d $REMOTE_DIR/letsencrypt/live/$DOMAIN"; then
+    ok "уже выписан на $DOMAIN"
+else
+    if [[ -n "${CERT_EMAIL:-}" ]]; then
+        CERT_CONTACT="--email '$CERT_EMAIL'"
+    else
+        CERT_CONTACT="--register-unsafely-without-email"
+    fi
+    if remote 'command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"'; then
+        remote "ufw allow 80/tcp" >/dev/null 2>&1 && ok "порт 80/tcp открыт в ufw для проверки имени"
+    fi
+    info "прошу Let's Encrypt — он сходит на http://$DOMAIN/"
+    remote "cd $REMOTE_DIR && docker compose run --rm --service-ports certbot certonly \
+        --standalone -d '$DOMAIN' --agree-tos -n $CERT_CONTACT" >/dev/null 2>&1 \
+        || die "сертификат не выписан: $DOMAIN указывает на этот сервер? порт 80/tcp открыт?"
+    ok "выписан на $DOMAIN"
+fi
+remote "bash $REMOTE_DIR/renew.sh" || die "сертификат не разложился для сервера"
+
+# Сертификат живёт 90 дней. Продление — раз в неделю: certbot сам решает,
+# пора ли, а сервер перезапускается, только если файл сменился.
+remote "( crontab -l 2>/dev/null | grep -v pingwin-renew; \
+    echo '17 4 * * 1 bash $REMOTE_DIR/renew.sh >/dev/null 2>&1 # pingwin-renew' ) | crontab -" \
+    && ok "продление раз в неделю — в cron" \
+    || info "cron не настроился: продлевайте руками — bash $REMOTE_DIR/renew.sh"
+
 # --- ключи и настройки -------------------------------------------------------
 
 bold "Ключи и пользователи"
 if remote "test -s $REMOTE_DIR/pingwin.toml"; then
-    ok "настройки уже есть — не трогаю"
-    info 'ключ и пароли остаются прежними: иначе разосланные ссылки перестали бы работать'
+    ok "настройки уже есть — ключ и пароли не трогаю"
+    info 'иначе разосланные ссылки перестали бы работать'
+    # Настройки сервера поверх TCP: прикрытие было адресом, сертификата не было.
+    if remote "grep -q '^fallback' $REMOTE_DIR/pingwin.toml"; then
+        remote "sed -i 's|^fallback = .*|cert = \"/etc/pingwin/certs/fullchain.pem\"\\ncert_key = \"/etc/pingwin/certs/privkey.pem\"\\ncover = \"/srv/cover\"|' $REMOTE_DIR/pingwin.toml" \
+            || die "не переписал прежние настройки"
+        ok "прежние настройки переведены на HTTP/3"
+    fi
     USER_NAME="$(remote "sed -n 's/^name = \"\\(.*\\)\"$/\\1/p' $REMOTE_DIR/pingwin.toml | head -1")"
 else
     SERVER_KEY="$(remote 'docker run --rm pingwin-server:latest keygen' \
@@ -307,15 +345,18 @@ else
 # Настройки сервера Pingwin. Созданы при развёртывании.
 # Ключ и пароли есть только здесь — не копируйте этот файл никуда.
 
-# Внутри контейнера порт непривилегированный: наружу его публикует
+# UDP. Внутри контейнера порт непривилегированный: наружу его публикует
 # compose.yml на том, который спросили при развёртывании.
 listen = \"0.0.0.0:8443\"
 
 key = \"$SERVER_KEY\"
 
-# Имя службы прикрытия из compose.yml: сюда уходит всё, что не прошло
-# опознание.
-fallback = \"cover:80\"
+# Сертификат на $DOMAIN; его раскладывает и продлевает renew.sh.
+cert = \"/etc/pingwin/certs/fullchain.pem\"
+cert_key = \"/etc/pingwin/certs/privkey.pem\"
+
+# Сайт, который видит тот, кто не прошёл опознание.
+cover = \"/srv/cover\"
 
 [[users]]
 name = \"$USER_NAME\"
@@ -334,8 +375,7 @@ fi
 bold "Поднимаю"
 # `--force-recreate`, а не просто `up -d`: сам по себе он пересоздаёт только
 # то, у чего изменился образ, а привезённые файлы примонтированы — и
-# контейнер, оставшийся с прошлого раза, продолжил бы читать прошлые. Пауза
-# в пару секунд на развёртывании дешевле, чем прикрытие, показывающее `403`.
+# контейнер, оставшийся с прошлого раза, продолжил бы читать прошлые.
 remote "cd $REMOTE_DIR && docker compose up -d --force-recreate --remove-orphans" >/dev/null 2>&1 \
     || die "не поднялось; посмотрите docker compose logs pingwin на сервере"
 sleep 5
@@ -348,20 +388,20 @@ ok "работает"
 # --- брандмауэр --------------------------------------------------------------
 
 if remote 'command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"'; then
-    remote "ufw allow $CLIENT_PORT/tcp" >/dev/null 2>&1 && ok "порт $CLIENT_PORT открыт в ufw"
+    remote "ufw allow $CLIENT_PORT/udp" >/dev/null 2>&1 && ok "порт $CLIENT_PORT/udp открыт в ufw"
 fi
 
 # --- проверка снаружи --------------------------------------------------------
 
 bold "Проверяю снаружи"
-if command -v curl >/dev/null 2>&1; then
-    if curl -sS --max-time 15 -o /dev/null "http://$SSH_HOST:$CLIENT_PORT/" 2>/dev/null; then
-        ok "порт отвечает обычным сайтом — так и задумано: чужой видит прикрытие"
+if command -v curl >/dev/null 2>&1 && curl --version | grep -q HTTP3; then
+    if curl -sS --http3-only --max-time 15 -o /dev/null "https://$DOMAIN:$CLIENT_PORT/" 2>/dev/null; then
+        ok "по HTTP/3 отвечает обычный сайт — так и задумано: чужой видит прикрытие"
     else
-        info "порт снаружи не ответил; проверьте брандмауэр у хостера"
+        info "по HTTP/3 снаружи не ответил; проверьте UDP $CLIENT_PORT у хостера"
     fi
 else
-    info 'curl не нашёлся — проверку снаружи пропускаю'
+    info 'curl без HTTP/3 — проверку снаружи пропускаю'
 fi
 
 # --- ссылка ------------------------------------------------------------------

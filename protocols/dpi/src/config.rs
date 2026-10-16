@@ -107,8 +107,7 @@ mod tests {
 
     #[test]
     fn the_settings_section_is_the_usual_one() {
-        // Раздел тот же, что у `pingwin`: человек, знающий один, читает и
-        // второй.
+        // Раздел — общий формат `penguin_transport::desync`.
         let config: DpiConfig = serde_json::from_value(serde_json::json!({
             "desync": { "strategy": "disorder", "split_pos": ["midsld"], "delay_ms": 2 }
         }))

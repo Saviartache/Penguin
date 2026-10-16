@@ -25,7 +25,7 @@ mkdir -p "$TARGET"
 # Корневой манифест — свой, не репозиторный: почему, написано в нём самом.
 cp "$HERE/workspace.toml" "$TARGET/Cargo.toml"
 
-for CRATE in crates/core crates/proto protocols/transport protocols/utls \
+for CRATE in crates/core crates/proto protocols/transport \
              protocols/pingwin servers/pingwin; do
     mkdir -p "$TARGET/$CRATE"
     cp "$ROOT/$CRATE/Cargo.toml" "$TARGET/$CRATE/Cargo.toml"
@@ -37,6 +37,7 @@ done
 
 cp "$HERE/Dockerfile" "$TARGET/Dockerfile"
 cp "$HERE/compose.yml" "$TARGET/compose.yml"
+cp "$HERE/renew.sh" "$TARGET/renew.sh"
 cp -R "$HERE/cover" "$TARGET/cover"
 # Под своим именем: в репозитории файл лежит без точки, иначе он прятался бы
 # от `ls` и от глаз, а прячется в нём как раз самое важное — `target/`.

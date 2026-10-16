@@ -1,8 +1,11 @@
 # Сервер Pingwin в Docker
 
-Два контейнера: сервер и прикрытие — настоящий сайт, к которому уходят
-соединения, не прошедшие опознание. Без прикрытия сервер закрывает чужую
-пробу, а обычный сайт так себя не ведёт — по этому его и находят.
+Один контейнер: сервер HTTP/3 на UDP. Прикрытие он отдаёт сам — каталог
+`cover/html` видит тот, кто не прошёл опознание. Сертификат выписывает
+Let's Encrypt (служба `certbot`, запускается только по требованию).
+
+Нужно доменное имя, указывающее на сервер, и открытый порт 80/tcp на время
+проверки имени.
 
 ---
 
@@ -12,18 +15,14 @@
 bash servers/pingwin/deploy.sh
 ```
 
-Спросит адрес сервера, доступ по SSH, порт и имя прикрытия. Дальше сам:
-поставит Docker, увезёт исходники, соберёт образ, заведёт ключи, поднимет всё
-и напечатает ссылку-приглашение.
+Спросит адрес сервера, доступ по SSH, доменное имя и порт. Дальше сам:
+поставит Docker, увезёт исходники, соберёт образ, выпишет сертификат, заведёт
+ключи, поставит продление в cron, поднимет сервер и напечатает
+ссылку-приглашение.
 
-Порт по умолчанию — **9443**, и это выбор не в пользу маскировки: TLS на 443
-выглядит естественнее. Но 443 и разбирают по дороге чаще всего — на
-проверочной линии он давал оборот в 135 мс против 0.9 мс на 9443 и другой MSS
-у соединений к одному адресу. Если ваш провайдер к 443 равнодушен, ставьте
-443: скрипт спрашивает.
+Порт по умолчанию — **443/udp**: там браузеры ищут HTTP/3.
 
 Запускать можно сколько угодно раз: ключ и пароли не трогаются, ссылка та же.
-На сервере нужен только доступ по SSH и выход в интернет.
 
 ---
 
@@ -40,16 +39,22 @@ rsync -a --delete --exclude target /tmp/pingwin-ctx/ root@СЕРВЕР:/opt/ping
 
 ```bash
 cd /opt/pingwin
-docker run --rm pingwin-server:latest keygen   # если образ уже собран
+printf 'PINGWIN_PORT=443\nPINGWIN_DOMAIN=vpn.example.com\n' > .env
+docker compose run --rm --service-ports certbot certonly --standalone \
+    -d vpn.example.com --agree-tos --register-unsafely-without-email -n
+bash renew.sh                                     # раскладывает сертификат в certs/
+docker compose build
+docker run --rm pingwin-server:latest keygen
 ```
 
-Первая строка вывода — закрытый ключ, он идёт в `pingwin.toml` рядом с
-`compose.yml`:
+Первая строка вывода `keygen` — закрытый ключ, он идёт в `pingwin.toml`:
 
 ```toml
-listen   = "0.0.0.0:8443"   # внутри контейнера; наружу это 9443
+listen   = "0.0.0.0:8443"                        # внутри контейнера; наружу 443/udp
 key      = "<закрытый ключ>"
-fallback = "cover:80"       # имя службы прикрытия из compose.yml
+cert     = "/etc/pingwin/certs/fullchain.pem"
+cert_key = "/etc/pingwin/certs/privkey.pem"
+cover    = "/srv/cover"
 
 [[users]]
 name     = "petya"
@@ -61,12 +66,9 @@ password = "<длинный случайный пароль>"
 
 ```bash
 chown 10001:10001 pingwin.toml && chmod 600 pingwin.toml
-docker compose up -d --build
-docker compose logs -f pingwin
+docker compose up -d
+echo '17 4 * * 1 bash /opt/pingwin/renew.sh # pingwin-renew' | crontab -
 ```
-
-Первая сборка занимает минуты: сервер собирается из исходников на месте — он
-обязан быть из того же дерева, что и клиент.
 
 ---
 
@@ -74,12 +76,10 @@ docker compose logs -f pingwin
 
 ```bash
 docker compose run --rm --no-deps --entrypoint pingwin-server pingwin \
-    link --config /etc/pingwin/pingwin.toml --host СЕРВЕР:9443
+    link --config /etc/pingwin/pingwin.toml --host vpn.example.com:443
 ```
 
-Полученную ссылку вставляют в клиент: «Добавить сервер» → «Ссылка». Руками то
-же самое: протокол `pingwin`, адрес `СЕРВЕР:9443`, публичный ключ из `keygen`,
-пароль из `[[users]]`, имя прикрытия — любое существующее доменное имя.
+Полученную ссылку вставляют в клиент: «Добавить сервер» → «Ссылка».
 
 ---
 
@@ -93,17 +93,14 @@ bash servers/pingwin/deploy.sh
 
 ```bash
 bash servers/pingwin/docker/stage.sh /tmp/pingwin-ctx
-rsync -a --delete --exclude target --exclude pingwin.toml /tmp/pingwin-ctx/ root@СЕРВЕР:/opt/pingwin/
+rsync -a --delete --exclude target --exclude pingwin.toml --exclude .env \
+    --exclude certs --exclude letsencrypt /tmp/pingwin-ctx/ root@СЕРВЕР:/opt/pingwin/
 ssh root@СЕРВЕР 'cd /opt/pingwin && docker compose up -d --build --force-recreate'
 ```
 
-`--exclude pingwin.toml` обязателен: ключ и пароли живут только на сервере.
-
-`--force-recreate` — тоже. `up -d` пересоздаёт только то, у чего изменился
-образ, а `pingwin.toml` и папка прикрытия примонтированы. Docker держит
-**inode**, а не путь: папка, снесённая и созданная заново, до контейнера не
-доедет — nginx останется с прежней и ответит `403`. Поэтому и настройки после
-правки требуют пересоздания контейнера, а не перезапуска.
+`--exclude` обязательны: ключ, пароли и сертификат живут только на сервере.
+`--force-recreate` — тоже: примонтированные файлы Docker держит по inode, и
+контейнер без пересоздания читал бы прежние.
 
 ---
 
@@ -113,9 +110,10 @@ ssh root@СЕРВЕР 'cd /opt/pingwin && docker compose up -d --build --force-r
 |---|---|
 | `../deploy.sh` | развёртывание одной командой |
 | `Dockerfile` | сборка сервера из исходников, образ на `debian-slim` |
-| `workspace.toml` | корень workspace на шесть крейтов; `stage.sh` кладёт его в контекст как `Cargo.toml` |
+| `workspace.toml` | корень workspace на пять крейтов; `stage.sh` кладёт его в контекст как `Cargo.toml` |
 | `stage.sh` | вырезает из репозитория контекст сборки |
-| `dockerignore` | ложится в контекст как `.dockerignore`: держит `target/` и ключ подальше от образа |
-| `compose.yml` | сервер и прикрытие |
-| `cover/` | сайт прикрытия |
+| `dockerignore` | ложится в контекст как `.dockerignore`: держит `target/`, ключ и сертификат подальше от образа |
+| `compose.yml` | сервер и `certbot` |
+| `renew.sh` | продление сертификата и перезапуск сервера, если он сменился |
+| `cover/html` | сайт прикрытия |
 | `pingwin.toml` | ключ и пользователи; создаётся на сервере, в репозиторий не входит |

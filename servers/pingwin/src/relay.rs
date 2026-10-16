@@ -1,174 +1,197 @@
-//! Что сервер делает с открытым потоком и датаграммным каналом.
+//! Что сервер делает с опознанным `CONNECT` и каналом датаграмм.
 //!
 //! ```text
-//!  поток:      клиент ─► OPEN(адрес) ─► сюда ─► TcpStream ─► цель
-//!  датаграммы: клиент ─► UDP(адрес)  ─► сюда ─► UdpSocket ─► цель
+//!  поток:      клиент ─► CONNECT host:port ─► сюда ─► TcpStream ─► цель
+//!  датаграммы: клиент ─► датаграмма(адрес)  ─► сюда ─► UdpSocket ─► цель
 //! ```
 //!
-//! Имя цели разрешается **здесь**, а не у клиента: ради этого прокси и
-//! существует. Отсюда же и запрет держать разрешённый адрес дольше одного
-//! соединения — кэш имён на сервере означал бы, что два разных клиента
-//! получают один ответ.
+//! Имя цели разрешается **здесь**: ради этого прокси и существует.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
+use http::{Response, StatusCode};
 use penguin_core::address::{Address, SocketAddress};
-use penguin_pingwin::mux::{DatagramRequest, StreamRequest};
-use penguin_proto::datagram::ProxyDatagram;
+use penguin_pingwin::wire::udp;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::mpsc;
+
+use crate::cover::Stream;
 
 /// Сколько ждать соединения с целью.
 ///
-/// Клиент подтверждения не ждёт — он уже отдал поток приложению и, скорее
-/// всего, уже прислал первые данные. Срок здесь нужен другому: чтобы висящая
-/// цель не держала поток и его очередь бесконечно. Восьми секунд хватает
-/// любому живому серверу, а мёртвый за это время не оживёт.
+/// Клиент ответа не ждёт и, скорее всего, уже прислал данные; срок нужен,
+/// чтобы висящая цель не держала поток бесконечно.
 const DIAL_LIMIT: Duration = Duration::from_secs(8);
 
-/// Через сколько тишины закрывать датаграммный канал.
-///
-/// У UDP нет закрытия, и единственный способ освободить сокет — перестать
-/// ждать. Минута покрывает и DNS, и QUIC с его периодическими посылками.
+/// Через сколько тишины закрывать датаграммный канал: у UDP нет закрытия.
 const UDP_IDLE: Duration = Duration::from_secs(60);
 
 /// Наибольшая датаграмма, которую сервер принимает от цели.
 const UDP_BUFFER: usize = 64 * 1024;
 
-/// Сколько читать за раз при переливании потока.
-///
-/// Ровно столько, сколько влезает в кадр, — ни байтом больше. Шестнадцать
-/// килобайт ровно были бы хуже: кадр вмещает на семь байт меньше, и каждый
-/// прочитанный кусок разваливался бы на большой кадр и хвостик в двадцать три
-/// байта. Половина записей на проводе оказывалась бы пустышками.
-const COPY_BUFFER: usize = penguin_pingwin::wire::frame::MAX_PAYLOAD;
+/// Сколько читать от цели за раз.
+const COPY_BUFFER: usize = 32 * 1024;
 
 /// Соединяет клиента с целью и переливает байты в обе стороны.
-pub async fn stream(request: StreamRequest) {
-    let target = request.target().clone();
-
-    let upstream = match tokio::time::timeout(DIAL_LIMIT, dial(&target)).await {
-        Ok(Ok(upstream)) => upstream,
-        Ok(Err(err)) => {
-            tracing::debug!(target = %target.to_wire(), %err, "цель недоступна");
-            let _ = request.reject(&err.to_string()).await;
-            return;
-        }
-        Err(_) => {
-            let _ = request.reject("цель не ответила за отведённое время").await;
-            return;
-        }
+pub async fn stream(authority: &str, mut stream: Stream) {
+    let dialed = match authority.parse::<SocketAddress>() {
+        Ok(target) => tokio::time::timeout(DIAL_LIMIT, dial(&target))
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::other(
+                    "цель не ответила за отведённое время",
+                ))
+            }),
+        Err(err) => Err(std::io::Error::other(err.to_string())),
     };
-
-    let mut client = match request.accept().await {
-        Ok(client) => client,
+    let upstream = match dialed {
+        Ok(upstream) => upstream,
         Err(err) => {
-            tracing::debug!(%err, "подтверждение не ушло");
+            tracing::debug!(target = authority, %err, "цель недоступна");
+            refuse(stream, &err.to_string()).await;
             return;
         }
     };
-    let mut upstream = upstream;
-    // Обе стороны читаются одновременно: иначе поток, из которого не читают,
-    // остановил бы всю сессию (см. `penguin_pingwin::mux::session`).
-    //
-    // Буферы под размер записи, а не восемь килобайт по умолчанию: каждый
-    // прочитанный кусок становится отдельным кадром и отдельной записью, и с
-    // умолчанием на каждую запись приходилось бы по два лишних заголовка и по
-    // лишнему шифрованию.
-    let copied = tokio::io::copy_bidirectional_with_sizes(
-        &mut client,
-        &mut upstream,
-        COPY_BUFFER,
-        COPY_BUFFER,
-    )
-    .await;
-    if let Err(err) = copied {
-        tracing::debug!(target = %target.to_wire(), %err, "поток оборвался");
+    if let Err(err) = stream.send_response(ok()).await {
+        tracing::debug!(%err, "подтверждение не ушло");
+        return;
+    }
+    if let Err(err) = pump(stream, upstream).await {
+        tracing::debug!(target = authority, %err, "поток оборвался");
+    }
+}
+
+/// Переливает до конца обеих сторон; ошибка одной обрывает обе.
+async fn pump(stream: Stream, upstream: TcpStream) -> anyhow::Result<()> {
+    let (mut send, mut recv) = stream.split();
+    let (mut from_target, mut to_target) = upstream.into_split();
+
+    let up = async {
+        while let Some(mut chunk) = recv.recv_data().await? {
+            to_target.write_all_buf(&mut chunk).await?;
+        }
+        to_target.shutdown().await?;
+        anyhow::Ok(())
+    };
+    let down = async {
+        loop {
+            let mut buffer = BytesMut::with_capacity(COPY_BUFFER);
+            if from_target.read_buf(&mut buffer).await? == 0 {
+                break;
+            }
+            send.send_data(buffer.freeze()).await?;
+        }
+        send.finish().await?;
+        anyhow::Ok(())
+    };
+
+    tokio::pin!(up, down);
+    tokio::select! {
+        done = &mut up => { done?; down.await }
+        done = &mut down => { done?; up.await }
     }
 }
 
 /// Открывает соединение с целью, разрешая имя на этой стороне.
 async fn dial(target: &SocketAddress) -> std::io::Result<TcpStream> {
-    match &target.host {
-        Address::Ip(ip) => TcpStream::connect(SocketAddr::new(*ip, target.port)).await,
-        Address::Domain(domain) => TcpStream::connect((domain.as_str(), target.port)).await,
+    let stream = match &target.host {
+        Address::Ip(ip) => TcpStream::connect(SocketAddr::new(*ip, target.port)).await?,
+        Address::Domain(domain) => TcpStream::connect((domain.as_str(), target.port)).await?,
+    };
+    // Запрос — ответ мелкими посылками: склейка дала бы задержку на каждом.
+    stream.set_nodelay(true)?;
+    Ok(stream)
+}
+
+/// `502` с причиной в теле.
+async fn refuse(mut stream: Stream, reason: &str) {
+    let response = Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(());
+    let Ok(response) = response else {
+        return;
+    };
+    let sent = async {
+        stream.send_response(response).await?;
+        stream
+            .send_data(Bytes::copy_from_slice(reason.as_bytes()))
+            .await?;
+        stream.finish().await
+    };
+    if let Err(err) = sent.await {
+        tracing::trace!(%err, "отказ не ушёл");
     }
+}
+
+fn ok() -> Response<()> {
+    let mut response = Response::new(());
+    *response.status_mut() = StatusCode::OK;
+    response
 }
 
 /// Обслуживает датаграммный канал: один сокет на канал, адрес на посылке.
 ///
-/// Один сокет, а не по одному на каждого собеседника: так же ведёт себя
-/// обычный NAT, и приложению, которое шлёт запросы десяти серверам имён,
-/// незачем платить десятью сокетами.
-pub async fn datagram(request: DatagramRequest) {
+/// Один сокет, а не по одному на собеседника: так же ведёт себя обычный NAT.
+/// `incoming` — датаграммы этого запроса, уже без номера потока.
+pub async fn datagram(
+    mut stream: Stream,
+    quic: quinn::Connection,
+    mut incoming: mpsc::Receiver<Bytes>,
+) {
+    let stream_id = stream.id().into_inner();
     let socket = match UdpSocket::bind(("0.0.0.0", 0)).await {
-        Ok(socket) => Arc::new(socket),
+        Ok(socket) => socket,
         Err(err) => {
             tracing::debug!(%err, "не открылся сокет для датаграмм");
+            refuse(stream, "сокет для датаграмм не открылся").await;
             return;
         }
     };
+    if let Err(err) = stream.send_response(ok()).await {
+        tracing::debug!(%err, "подтверждение не ушло");
+        return;
+    }
 
-    let channel: Arc<dyn ProxyDatagram> = match request.accept().await {
-        Ok(channel) => Arc::new(channel),
-        Err(err) => {
-            tracing::debug!(%err, "подтверждение не ушло");
-            return;
+    let outgoing = async {
+        while let Ok(Some(payload)) = tokio::time::timeout(UDP_IDLE, incoming.recv()).await {
+            let Some((target, data)) = udp::decode(payload) else {
+                continue;
+            };
+            let Some(addr) = resolve(&target).await else {
+                tracing::debug!(target = %target.to_wire(), "имя не разрешилось");
+                continue;
+            };
+            if socket.send_to(&data, addr).await.is_err() {
+                return;
+            }
         }
     };
-
-    let outgoing = tokio::spawn({
-        let socket = Arc::clone(&socket);
-        let channel = Arc::clone(&channel);
-        async move { pump_out(&channel, &socket).await }
-    });
-    let incoming = tokio::spawn({
-        let socket = Arc::clone(&socket);
-        let channel = Arc::clone(&channel);
-        async move { pump_in(&channel, &socket).await }
-    });
-
-    // Кончился любой из двух — канала больше нет: второй ждал бы вечно.
-    tokio::select! {
-        _ = outgoing => {}
-        _ = incoming => {}
-    }
-    let _ = channel.close().await;
-}
-
-/// От клиента к цели.
-async fn pump_out(channel: &Arc<dyn ProxyDatagram>, socket: &UdpSocket) {
-    loop {
-        let Ok(Ok((payload, target))) = tokio::time::timeout(UDP_IDLE, channel.recv_from()).await
-        else {
-            return;
-        };
-        let Some(addr) = resolve(&target).await else {
-            tracing::debug!(target = %target.to_wire(), "имя не разрешилось");
-            continue;
-        };
-        if socket.send_to(&payload, addr).await.is_err() {
-            return;
-        }
-    }
-}
-
-/// От цели к клиенту.
-async fn pump_in(channel: &Arc<dyn ProxyDatagram>, socket: &UdpSocket) {
-    let mut buffer = vec![0u8; UDP_BUFFER];
-    loop {
-        let Ok(Ok((len, from))) =
+    let returning = async {
+        let mut buffer = vec![0u8; UDP_BUFFER];
+        while let Ok(Ok((len, from))) =
             tokio::time::timeout(UDP_IDLE, socket.recv_from(&mut buffer)).await
-        else {
-            return;
-        };
-        let payload = Bytes::copy_from_slice(&buffer[..len]);
-        let from = SocketAddress::ip(from.ip(), from.port());
-        if channel.send_to(payload, &from).await.is_err() {
-            return;
+        {
+            let Ok(payload) = udp::encode(&SocketAddress::from(from), &buffer[..len]) else {
+                continue;
+            };
+            match quic.send_datagram(udp::datagram::encode(stream_id, &payload)) {
+                // Не влезла — теряется, как потерялась бы в сети.
+                Ok(()) | Err(quinn::SendDatagramError::TooLarge) => {}
+                Err(_) => return,
+            }
         }
+    };
+    // Конец или сброс потока запроса — канал закрыт.
+    let closed = async { while let Ok(Some(_)) = stream.recv_data().await {} };
+
+    tokio::select! {
+        () = outgoing => {}
+        () = returning => {}
+        () = closed => {}
     }
 }
 

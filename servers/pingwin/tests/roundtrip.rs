@@ -1,22 +1,21 @@
 //! Проверка от края до края: настоящий клиент, настоящий сервер, настоящие
-//! сокеты.
+//! сокеты, QUIC и HTTP/3 на петле.
 //!
-//! Разбор кадров и ключевое расписание проверены своими тестами в
-//! `protocols/pingwin`. Здесь проверяется то, чего они увидеть не могут:
-//! что клиент и сервер, собранные порознь, договариваются друг с другом и
-//! действительно переносят байты — включая случай, когда клиент чужой и
-//! соединение обязано уйти прикрытию.
+//! Ключи, токен и датаграммы проверены своими тестами в `protocols/pingwin`.
+//! Здесь — то, чего они увидеть не могут: что клиент и сервер, собранные
+//! порознь, опознают друг друга, переносят байты и что чужой видит сайт.
 
-// Проверка падает там, где сервер повёл себя не по протоколу: это не
-// «ошибка, которую надо обработать», а провалившийся тест.
-#![allow(clippy::expect_used)]
+// Проверка падает там, где сервер повёл себя не по протоколу.
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use penguin_core::address::SocketAddress;
+use penguin_core::address::{Address, SocketAddress};
 use penguin_core::id::OutboundId;
 use penguin_pingwin::config::PingwinConfig;
 use penguin_pingwin::outbound::PingwinOutbound;
@@ -25,6 +24,9 @@ use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::factory::ProtocolFactory;
 use penguin_proto::outbound::Outbound;
+use penguin_transport::h3::{self, Request};
+use penguin_transport::quic;
+use penguin_transport::tls::{ALPN_H3, TlsConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
@@ -45,24 +47,33 @@ impl Dialer for Direct {
             .map_err(|err| ProtocolError::Connect(err.to_string()))
     }
 
-    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, ProtocolError> {
-        Ok(tokio::net::lookup_host((host, 0))
-            .await
-            .map_err(|err| ProtocolError::Connect(err.to_string()))?
-            .map(|addr| addr.ip())
-            .collect())
+    async fn resolve(&self, _host: &str) -> Result<Vec<IpAddr>, ProtocolError> {
+        Ok(vec![IpAddr::from([127, 0, 0, 1])])
     }
 }
 
-/// Поднимает сервер Pingwin на свободном порту.
+/// Файлы `tests/fixtures`: корень `ca.crt` и лист `localhost.crt` от него.
 ///
-/// Возвращает адрес, открытый ключ и сторожа: пока он жив, сервер работает.
-async fn start_server(
-    cover: Option<SocketAddr>,
-) -> (SocketAddr, String, tokio::task::JoinHandle<()>) {
-    // Порт выбирает система: два теста, запущенные разом, не должны драться
-    // за одно и то же число.
-    let probe = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
+/// Лист живёт 825 дней (до 18.01.2029) — дольше macOS не принимает даже от
+/// своего корня. Истёк — выпустить новый тем же `openssl x509 -req` от
+/// нового корня: `serverAuth`, `DNS:localhost`, `-days 825`.
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+/// Каталог прикрытия с одной страницей.
+fn cover_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("pingwin-cover-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("каталог");
+    std::fs::write(dir.join("index.html"), "<h1>cover</h1>").expect("страница");
+    dir
+}
+
+/// Поднимает сервер на свободном порту; возвращает адрес и открытый ключ.
+async fn start_server() -> (SocketAddr, String) {
+    let probe = UdpSocket::bind(("127.0.0.1", 0)).await.expect("порт");
     let addr = probe.local_addr().expect("адрес");
     drop(probe);
 
@@ -70,64 +81,58 @@ async fn start_server(
     let config = ServerConfig {
         listen: addr.to_string(),
         key: penguin_core::base64::encode(&keys.secret_bytes()),
-        fallback: cover.map(|addr| addr.to_string()).unwrap_or_default(),
+        cert: fixture("localhost.crt"),
+        cert_key: fixture("localhost.key"),
+        cover: Some(cover_dir()),
         users: vec![User {
             name: "petya".to_owned(),
             password: "secret".to_owned(),
         }],
     };
-    let public = penguin_core::base64::encode(&keys.public);
-
     let server = Arc::new(Server::new(config).expect("сервер собирается"));
-    let running = tokio::spawn(async move {
-        let _ = server.run(std::future::pending::<()>()).await;
-    });
-
-    // Даём слушателю встать: без этого первое же соединение попадёт в
-    // закрытый порт, и тест упадёт не на том, что проверяет.
-    for _ in 0..50 {
-        if TcpStream::connect(addr).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-
-    (addr, public, running)
+    tokio::spawn(async move { server.run(std::future::pending::<()>()).await });
+    // Первый пакет до привязки сокета не потеряется насовсем: QUIC его
+    // повторит. Пауза лишь избавляет тест от лишней секунды.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (addr, penguin_core::base64::encode(&keys.public))
 }
 
-/// Собирает направление клиента.
-fn client(server: SocketAddr, key: &str, zero_rtt: bool) -> PingwinOutbound {
-    let config = PingwinConfig {
+fn config(server: SocketAddr, key: &str, password: &str) -> PingwinConfig {
+    PingwinConfig {
         server: server.to_string(),
         key: key.to_owned(),
-        password: "secret".to_owned(),
-        zero_rtt,
-        ..PingwinConfig::default()
-    };
-    PingwinOutbound::new(OutboundId::new("test"), config, Arc::new(Direct))
-        .expect("направление собирается")
+        password: password.to_owned(),
+        sni: "localhost".to_owned(),
+        // Сертификат проверяется по-настоящему: свой корень вместо общего.
+        ca: Some(fixture("ca.crt").display().to_string()),
+    }
 }
 
-/// Поднимает сервер, который отвечает тем же, что ему прислали.
+fn client(server: SocketAddr, key: &str) -> PingwinOutbound {
+    PingwinOutbound::new(
+        OutboundId::new("test"),
+        config(server, key, "secret"),
+        Arc::new(Direct),
+    )
+    .expect("направление собирается")
+}
+
+/// Сервер, который отвечает тем же, что ему прислали.
 async fn start_echo() -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
     let addr = listener.local_addr().expect("адрес");
     tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
             tokio::spawn(async move {
-                let mut buffer = [0u8; 1024];
-                while let Ok(read) = socket.read(&mut buffer).await {
-                    if read == 0 || socket.write_all(&buffer[..read]).await.is_err() {
-                        return;
-                    }
-                }
+                let (mut read, mut write) = socket.split();
+                let _ = tokio::io::copy(&mut read, &mut write).await;
             });
         }
     });
     addr
 }
 
-/// Поднимает сервер датаграмм, отвечающий тем же, что ему прислали.
+/// Сервер датаграмм, отвечающий тем же, что ему прислали.
 async fn start_udp_echo() -> SocketAddr {
     let socket = UdpSocket::bind(("127.0.0.1", 0)).await.expect("порт");
     let addr = socket.local_addr().expect("адрес");
@@ -142,126 +147,6 @@ async fn start_udp_echo() -> SocketAddr {
     addr
 }
 
-#[tokio::test]
-async fn a_stream_carries_bytes_both_ways() {
-    let echo = start_echo().await;
-    let (server, key, _running) = start_server(None).await;
-    let client = client(server, &key, true);
-
-    let mut stream = client
-        .connect_tcp(&SocketAddress::ip(echo.ip(), echo.port()))
-        .await
-        .expect("поток открылся");
-
-    let hello = "привет".as_bytes();
-    stream.write_all(hello).await.expect("записалось");
-    let mut answer = vec![0u8; hello.len()];
-    stream.read_exact(&mut answer).await.expect("прочиталось");
-    assert_eq!(answer, hello);
-
-    client.close().await.expect("закрылось");
-}
-
-#[tokio::test]
-async fn the_second_stream_reuses_the_same_session() {
-    // Ради этого мультиплексор и заведён: рукопожатие платится один раз, а
-    // вкладок в браузере сотня.
-    let echo = start_echo().await;
-    let (server, key, _running) = start_server(None).await;
-    let client = client(server, &key, true);
-    let target = SocketAddress::ip(echo.ip(), echo.port());
-
-    let mut first = client.connect_tcp(&target).await.expect("первый поток");
-    let mut second = client.connect_tcp(&target).await.expect("второй поток");
-
-    first.write_all(b"one").await.expect("записалось");
-    second.write_all(b"two").await.expect("записалось");
-
-    let mut one = [0u8; 3];
-    let mut two = [0u8; 3];
-    first.read_exact(&mut one).await.expect("прочиталось");
-    second.read_exact(&mut two).await.expect("прочиталось");
-    assert_eq!(&one, b"one");
-    assert_eq!(&two, b"two");
-}
-
-/// Сколько байт перекачивает один поток за секунду на петле.
-///
-/// Печатается, а не проверяется порогом: цифра зависит от машины, и падающий
-/// на чужом ноутбуке тест — худший способ следить за скоростью. Смотреть на
-/// неё стоит после каждой правки пути данных: на петле она измеряет наш код и
-/// ничего больше.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn how_fast_one_stream_goes_on_loopback() {
-    const BYTES: usize = 64 * 1024 * 1024;
-
-    let sink = start_sink().await;
-    let (server, key, _running) = start_server(None).await;
-    let client = client(server, &key, true);
-
-    let mut stream = client
-        .connect_tcp(&SocketAddress::ip(sink.ip(), sink.port()))
-        .await
-        .expect("поток открылся");
-
-    let chunk = vec![0x5Au8; 256 * 1024];
-    let started = std::time::Instant::now();
-    let mut sent = 0;
-    while sent < BYTES {
-        stream.write_all(&chunk).await.expect("записалось");
-        sent += chunk.len();
-    }
-    stream.flush().await.expect("сбросилось");
-    let took = started.elapsed();
-
-    let speed = sent as f64 / took.as_secs_f64() / 1_000_000.0;
-    println!("    скорость одного потока на петле: {speed:.0} МБ/с");
-    assert!(
-        speed > 1.0,
-        "меньше мегабайта в секунду на петле — это поломка"
-    );
-}
-
-/// То же самое в обратную сторону: скачивание.
-///
-/// Путь у него другой — задача разбора, очередь потока, `poll_read`, — и
-/// мерить надо оба: отдача может летать, пока приём стоит.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn how_fast_one_stream_downloads_on_loopback() {
-    const BYTES: usize = 64 * 1024 * 1024;
-
-    let source = start_source(BYTES).await;
-    let (server, key, _running) = start_server(None).await;
-    let client = client(server, &key, true);
-
-    let mut stream = client
-        .connect_tcp(&SocketAddress::ip(source.ip(), source.port()))
-        .await
-        .expect("поток открылся");
-    stream.write_all(b"go").await.expect("записалось");
-
-    let started = std::time::Instant::now();
-    let mut buffer = vec![0u8; 256 * 1024];
-    let mut got = 0;
-    while got < BYTES {
-        match stream.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(read) => got += read,
-        }
-    }
-    let took = started.elapsed();
-
-    let speed = got as f64 / took.as_secs_f64() / 1_000_000.0;
-    println!(
-        "    скорость скачивания на петле: {speed:.0} МБ/с ({} МБ)",
-        got / 1_000_000
-    );
-    assert!(
-        speed > 1.0,
-        "меньше мегабайта в секунду на петле — это поломка"
-    );
-}
-
 /// Сервер, который на любой запрос выливает `bytes` байт.
 async fn start_source(bytes: usize) -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
@@ -273,10 +158,7 @@ async fn start_source(bytes: usize) -> SocketAddr {
                 let _ = socket.read(&mut hello).await;
                 let chunk = vec![0x5Au8; 256 * 1024];
                 let mut sent = 0;
-                while sent < bytes {
-                    if socket.write_all(&chunk).await.is_err() {
-                        return;
-                    }
+                while sent < bytes && socket.write_all(&chunk).await.is_ok() {
                     sent += chunk.len();
                 }
             });
@@ -285,7 +167,7 @@ async fn start_source(bytes: usize) -> SocketAddr {
     addr
 }
 
-/// Сервер, который читает и выбрасывает: мерить скорость эхо мешает.
+/// Сервер, который читает и выбрасывает.
 async fn start_sink() -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
     let addr = listener.local_addr().expect("адрес");
@@ -300,28 +182,45 @@ async fn start_sink() -> SocketAddr {
     addr
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn many_streams_at_once_do_not_scramble_the_records() {
-    // Записи шифруются считаемым нонсом: порядок, в котором они уходят в
-    // сокет, обязан совпадать с порядком, в котором их запечатали. Стоит
-    // двум потокам разъехаться — и метка не сойдётся, а сессия умрёт целиком.
-    // Проверка нагружает запись с четырёх сторон разом: по одному потоку эта
-    // ошибка не воспроизводится никогда.
+fn target(addr: SocketAddr) -> SocketAddress {
+    SocketAddress::ip(addr.ip(), addr.port())
+}
+
+#[tokio::test]
+async fn a_stream_carries_bytes_both_ways() {
     let echo = start_echo().await;
-    let (server, key, _running) = start_server(None).await;
-    let client = Arc::new(client(server, &key, true));
-    let target = SocketAddress::ip(echo.ip(), echo.port());
+    let (server, key) = start_server().await;
+    let client = client(server, &key);
+
+    let mut stream = client.connect_tcp(&target(echo)).await.expect("поток");
+    let hello = "привет".as_bytes();
+    stream.write_all(hello).await.expect("записалось");
+    let mut answer = vec![0u8; hello.len()];
+    stream.read_exact(&mut answer).await.expect("прочиталось");
+    assert_eq!(answer, hello);
+
+    // Полузакрытие доезжает до цели, и её конец — до клиента.
+    stream.shutdown().await.expect("конец записи");
+    let mut rest = Vec::new();
+    stream.read_to_end(&mut rest).await.expect("дочиталось");
+    assert!(rest.is_empty());
+
+    client.close().await.expect("закрылось");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_streams_at_once_share_one_connection() {
+    let echo = start_echo().await;
+    let (server, key) = start_server().await;
+    let client = Arc::new(client(server, &key));
 
     let mut tasks = Vec::new();
     for index in 0u8..8 {
         let client = Arc::clone(&client);
-        let target = target.clone();
         tasks.push(tokio::spawn(async move {
-            let mut stream = client.connect_tcp(&target).await.expect("поток открылся");
-            // Куски разной длины, и заведомо больше одной записи: короткие
-            // сложились бы в одну и скрыли бы как раз то, что проверяется.
+            let mut stream = client.connect_tcp(&target(echo)).await.expect("поток");
             let payload = vec![index; 200_000 + usize::from(index) * 3000];
-            for _ in 0..8 {
+            for _ in 0..4 {
                 stream.write_all(&payload).await.expect("записалось");
                 let mut answer = vec![0u8; payload.len()];
                 stream.read_exact(&mut answer).await.expect("прочиталось");
@@ -329,34 +228,70 @@ async fn many_streams_at_once_do_not_scramble_the_records() {
             }
         }));
     }
-
     for task in tasks {
         task.await.expect("поток отработал без паники");
     }
 }
 
+/// Скорость одного потока на петле: печатается, а не проверяется порогом.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn how_fast_one_stream_goes_on_loopback() {
+    const BYTES: usize = 64 * 1024 * 1024;
+    let sink = start_sink().await;
+    let (server, key) = start_server().await;
+    let client = client(server, &key);
+
+    let mut stream = client.connect_tcp(&target(sink)).await.expect("поток");
+    let chunk = vec![0x5Au8; 256 * 1024];
+    let started = std::time::Instant::now();
+    let mut sent = 0;
+    while sent < BYTES {
+        stream.write_all(&chunk).await.expect("записалось");
+        sent += chunk.len();
+    }
+    stream.flush().await.expect("сбросилось");
+    let speed = sent as f64 / started.elapsed().as_secs_f64() / 1_000_000.0;
+    println!("    отдача на петле: {speed:.0} МБ/с");
+    assert!(
+        speed > 1.0,
+        "меньше мегабайта в секунду на петле — это поломка"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn how_fast_one_stream_downloads_on_loopback() {
+    const BYTES: usize = 64 * 1024 * 1024;
+    let source = start_source(BYTES).await;
+    let (server, key) = start_server().await;
+    let client = client(server, &key);
+
+    let mut stream = client.connect_tcp(&target(source)).await.expect("поток");
+    stream.write_all(b"go").await.expect("записалось");
+    let started = std::time::Instant::now();
+    let mut buffer = vec![0u8; 256 * 1024];
+    let mut got = 0;
+    while got < BYTES {
+        match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => got += read,
+        }
+    }
+    let speed = got as f64 / started.elapsed().as_secs_f64() / 1_000_000.0;
+    println!(
+        "    скачивание на петле: {speed:.0} МБ/с ({} МБ)",
+        got / 1_000_000
+    );
+    assert_eq!(got, BYTES);
+}
+
 #[tokio::test]
-async fn the_latency_shown_to_a_person_is_measured_and_not_zero() {
-    // Открытие потока подтверждения не ждёт и меряет ноль — на этом кнопка
-    // «Проверить» показывала бы ноль миллисекунд у сервера на другом
-    // континенте. Задержку поэтому спрашивают у самой несущей.
-    let echo = start_echo().await;
-    let (server, key, _running) = start_server(None).await;
-    let client = client(server, &key, true);
+async fn the_latency_comes_from_quic() {
+    let (server, key) = start_server().await;
+    let client = client(server, &key);
+    assert!(client.rtt().await.is_none(), "соединения ещё нет");
 
-    // Без несущей мерить нечего: пусть её поднимет первый поток.
-    assert!(client.rtt().await.is_none(), "несущей ещё нет");
-    let _stream = client
-        .connect_tcp(&SocketAddress::ip(echo.ip(), echo.port()))
-        .await
-        .expect("поток открылся");
-
-    let rtt = tokio::time::timeout(std::time::Duration::from_secs(5), client.rtt())
-        .await
-        .expect("замер не уложился в срок")
-        .expect("несущая есть — задержку она знает");
-    // На петле это ноль миллисекунд, и это правильный ответ: мерилось
-    // настоящее хождение туда и обратно, а не выдумка.
+    client.warm_up().await.expect("подключились");
+    let rtt = client.rtt().await.expect("QUIC знает оборот");
     assert!(
         rtt.millis < 1000,
         "петля не может отвечать секунду: {rtt:?}"
@@ -364,108 +299,164 @@ async fn the_latency_shown_to_a_person_is_measured_and_not_zero() {
 }
 
 #[tokio::test]
-async fn a_stream_works_without_early_data_too() {
-    // 0-RTT можно выключить: рукопожатие тогда обычное, в один оборот.
-    let echo = start_echo().await;
-    let (server, key, _running) = start_server(None).await;
-    let client = client(server, &key, false);
-
-    let mut stream = client
-        .connect_tcp(&SocketAddress::ip(echo.ip(), echo.port()))
-        .await
-        .expect("поток открылся");
-    stream.write_all(b"ping").await.expect("записалось");
-
-    let mut answer = [0u8; 4];
-    stream.read_exact(&mut answer).await.expect("прочиталось");
-    assert_eq!(&answer, b"ping");
-}
-
-#[tokio::test]
 async fn a_datagram_goes_out_and_comes_back() {
     let echo = start_udp_echo().await;
-    let (server, key, _running) = start_server(None).await;
-    let client = client(server, &key, true);
+    let (server, key) = start_server().await;
+    let client = client(server, &key);
 
     let channel = client.bind_udp().await.expect("канал открылся");
-    let target = SocketAddress::ip(echo.ip(), echo.port());
     channel
-        .send_to(Bytes::from_static(b"query"), &target)
+        .send_to(Bytes::from_static(b"query"), &target(echo))
         .await
         .expect("ушла");
-
-    let (payload, from) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), channel.recv_from())
-            .await
-            .expect("не дождались ответа")
-            .expect("пришла");
+    let (payload, from) = tokio::time::timeout(Duration::from_secs(5), channel.recv_from())
+        .await
+        .expect("не дождались ответа")
+        .expect("пришла");
     assert_eq!(payload, Bytes::from_static(b"query"));
-    assert_eq!(from.port, echo.port());
+    assert_eq!(from, target(echo));
+    channel.close().await.expect("закрылся");
 }
 
 #[tokio::test]
 async fn an_unreachable_target_says_so_on_the_first_read() {
-    // Поток открывается сразу, не дожидаясь ответа сервера: за подтверждение
-    // пришлось бы платить оборотом на каждом соединении. Отказ поэтому
-    // приезжает туда же, куда приехали бы данные, — в первое чтение. Молчания
-    // здесь быть не должно: приложение сочло бы его обрывом и пробовало снова.
-    let (server, key, _running) = start_server(None).await;
-    let client = client(server, &key, true);
+    let (server, key) = start_server().await;
+    let client = client(server, &key);
 
-    // Порт, на котором заведомо никого нет: слушателя открыли и закрыли.
     let closed = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
     let addr = closed.local_addr().expect("адрес");
     drop(closed);
 
     let mut stream = client
-        .connect_tcp(&SocketAddress::ip(addr.ip(), addr.port()))
+        .connect_tcp(&target(addr))
         .await
-        .expect("поток открывается не дожидаясь ответа");
-
+        .expect("поток открывается, не дожидаясь ответа");
     let mut answer = [0u8; 64];
-    let err = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut answer))
+    let err = tokio::time::timeout(Duration::from_secs(10), stream.read(&mut answer))
         .await
         .expect("отказ не пришёл за десять секунд")
         .expect_err("цели нет, чтения быть не может");
-    assert!(
-        err.to_string().contains("отказ")
-            || err.to_string().contains("refused")
-            || err.to_string().contains("Connection refused"),
-        "причина отказа потерялась: {err}"
-    );
+    let text = err.to_string();
+    assert!(text.contains(&addr.to_string()), "цель потерялась: {text}");
+    // Повторное чтение не паникует и говорит то же.
+    assert!(stream.read(&mut answer).await.is_err());
 }
 
 #[tokio::test]
-async fn a_wrong_key_gets_the_cover_site() {
-    // Устойчивость к активной проверке: тот, кто не знает ключа, видит
-    // обычный сайт, а не отказ.
-    let cover = start_echo().await;
-    let (server, _key, _running) = start_server(Some(cover)).await;
+async fn a_wrong_password_is_an_auth_rejection() {
+    let (server, key) = start_server().await;
+    let client = PingwinOutbound::new(
+        OutboundId::new("test"),
+        config(server, &key, "другой"),
+        Arc::new(Direct),
+    )
+    .expect("направление собирается");
+    let err = ProtocolError::from(client.warm_up().await.expect_err("пускать нельзя"));
+    assert!(matches!(err, ProtocolError::AuthRejected), "{err}");
+}
 
-    let mut probe = TcpStream::connect(server).await.expect("соединились");
-    // Что угодно, лишь бы это была запись TLS: сервер прочитает её, не узнает
-    // и отдаст прикрытию вместе с прочитанным.
-    let junk = [0x16, 0x03, 0x01, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF];
-    probe.write_all(&junk).await.expect("записалось");
+#[tokio::test]
+async fn a_server_with_another_key_is_an_auth_rejection() {
+    let (server, _key) = start_server().await;
+    let other = penguin_core::base64::encode(&penguin_pingwin::StaticKeyPair::generate().public);
+    let client = client(server, &other);
+    let err = ProtocolError::from(client.warm_up().await.expect_err("сервер не тот"));
+    assert!(matches!(err, ProtocolError::AuthRejected), "{err}");
+}
 
-    let mut echoed = [0u8; 9];
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        probe.read_exact(&mut echoed),
+#[tokio::test]
+async fn a_certificate_for_another_name_does_not_connect() {
+    let (server, key) = start_server().await;
+    let client = PingwinOutbound::new(
+        OutboundId::new("test"),
+        PingwinConfig {
+            sni: "other.example.com".to_owned(),
+            ..config(server, &key, "secret")
+        },
+        Arc::new(Direct),
+    )
+    .expect("направление собирается");
+    assert!(client.warm_up().await.is_err());
+}
+
+/// Обычный клиент HTTP/3 на соединении без опознания.
+async fn probe(server: SocketAddr) -> (quic::QuicLink, h3::Connection) {
+    let tls = TlsConfig {
+        ca: Some(fixture("ca.crt").display().to_string()),
+        ..TlsConfig::default()
+    };
+    let link = quic::connect(
+        &Direct,
+        &Address::Ip(server.ip()),
+        server.port(),
+        "localhost",
+        &tls,
+        &[ALPN_H3],
     )
     .await
-    .expect("прикрытие молчит")
-    .expect("прочиталось");
-    assert_eq!(echoed, junk, "прикрытию достались не те байты");
+    .expect("QUIC");
+    let h3 = h3::Connection::new(link.connection.clone(), h3::Options::default())
+        .await
+        .expect("HTTP/3");
+    (link, h3)
+}
+
+#[tokio::test]
+async fn a_stranger_sees_a_static_site() {
+    let (server, _key) = start_server().await;
+    let (_link, h3) = probe(server).await;
+
+    let mut page = h3
+        .send_request(&Request::new("GET", "localhost", "/"))
+        .await
+        .expect("запрос");
+    page.finish().expect("конец");
+    assert_eq!(page.response().await.expect("ответ").status(), 200);
+    let mut body = String::new();
+    page.read_to_string(&mut body).await.expect("тело");
+    assert_eq!(body, "<h1>cover</h1>");
+
+    // Чужое опознание неотличимо от его отсутствия.
+    let mut forged = h3
+        .send_request(
+            &Request::new("GET", "localhost", "/").header("authorization", "Pingwin AAAA"),
+        )
+        .await
+        .expect("запрос");
+    forged.finish().expect("конец");
+    assert_eq!(forged.response().await.expect("ответ").status(), 200);
+
+    for (method, path, status) in [
+        ("GET", "/nope", 404),
+        ("GET", "/../Cargo.toml", 404),
+        ("POST", "/", 405),
+    ] {
+        let mut stream = h3
+            .send_request(&Request::new(method, "localhost", path))
+            .await
+            .expect("запрос");
+        stream.finish().expect("конец");
+        assert_eq!(
+            stream.response().await.expect("ответ").status(),
+            status,
+            "{method} {path}"
+        );
+    }
+
+    // CONNECT без опознания — тоже сайт, а не прокси.
+    let echo = start_echo().await;
+    let mut connect = h3
+        .send_request(&Request::connect(echo.to_string()))
+        .await
+        .expect("запрос");
+    assert_eq!(connect.response().await.expect("ответ").status(), 405);
 }
 
 #[tokio::test]
 async fn a_server_that_does_not_answer_is_reported_at_connect_time() {
-    // Ради этого несущая и поднимается при подключении профиля. Без этого
-    // направление собиралось бы, ни разу не сходив к серверу, окно писало бы
-    // «подключено», а человек с провайдером, который режет путь до сервера,
-    // искал бы поломку у себя.
-    let closed = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
+    // Направление поднимает соединение при подключении профиля: иначе окно
+    // писало бы «подключено», ни разу не сходив к серверу.
+    let closed = UdpSocket::bind(("127.0.0.1", 0)).await.expect("порт");
     let addr = closed.local_addr().expect("адрес");
     drop(closed);
 
@@ -473,9 +464,9 @@ async fn a_server_that_does_not_answer_is_reported_at_connect_time() {
         "server": addr.to_string(),
         "key": penguin_core::base64::encode(&[7u8; 32]),
         "password": "secret",
+        "sni": "localhost",
     });
-    let factory = penguin_pingwin::PingwinFactory::new();
-    let built = factory
+    let built = penguin_pingwin::PingwinFactory::new()
         .build(
             penguin_proto::factory::BuildContext {
                 id: OutboundId::new("test"),
@@ -484,114 +475,5 @@ async fn a_server_that_does_not_answer_is_reported_at_connect_time() {
             &params,
         )
         .await;
-
     assert!(built.is_err(), "направление собралось до мёртвого сервера");
-}
-
-#[tokio::test]
-async fn a_hello_killed_on_the_way_is_retried_with_a_decoy() {
-    // Так это и выглядело на живой линии: TCP до сервера доходит, прикрытие
-    // отвечает, а наше приветствие рвут по дороге. Направление обязано
-    // догадаться само — иначе человек видит «не работает» и ничего больше.
-    let killer = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
-    let addr = killer.local_addr().expect("адрес");
-    let flights = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
-
-    let seen = Arc::clone(&flights);
-    tokio::spawn(async move {
-        while let Ok((mut socket, _)) = killer.accept().await {
-            let seen = Arc::clone(&seen);
-            tokio::spawn(async move {
-                // Ждём первую посылку и считаем в ней приветствия: одно —
-                // обычная попытка, два — попытка с ложным впереди.
-                let mut buffer = vec![0u8; 64 * 1024];
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let read = socket.read(&mut buffer).await.unwrap_or(0);
-                let hellos = buffer[..read]
-                    .windows(3)
-                    .filter(|head| head[0] == 0x16 && head[1] == 0x03 && head[2] == 0x01)
-                    .count();
-                if let Ok(mut seen) = seen.lock() {
-                    seen.push(hellos);
-                }
-                // И рвём — как это делает оборудование по дороге.
-                drop(socket);
-            });
-        }
-    });
-
-    let config = PingwinConfig {
-        server: addr.to_string(),
-        key: penguin_core::base64::encode(&[7u8; 32]),
-        password: "secret".to_owned(),
-        ..PingwinConfig::default()
-    };
-    let client = PingwinOutbound::new(OutboundId::new("test"), config, Arc::new(Direct))
-        .expect("направление собирается");
-
-    // Обе попытки провалятся — сервера там нет вовсе; проверяем не исход, а
-    // то, что вторая попытка была и была с ложным приветствием. Заодно —
-    // что первая не съела общий срок: на молчащем сервере обе попытки должны
-    // уложиться заметно быстрее двух полных сроков рукопожатия.
-    let started = std::time::Instant::now();
-    let _ = client.warm_up().await;
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(9),
-        "первая попытка досиживает полный срок: {:?}",
-        started.elapsed()
-    );
-
-    let seen = flights.lock().expect("замок").clone();
-    assert_eq!(seen.len(), 2, "второй попытки не было: {seen:?}");
-    assert_eq!(seen[0], 1, "в первой попытке ложное приветствие лишнее");
-    assert_eq!(seen[1], 2, "во второй попытке нет ложного приветствия");
-}
-
-#[tokio::test]
-async fn a_wrong_password_does_not_connect() {
-    let (server, key, _running) = start_server(None).await;
-    let config = PingwinConfig {
-        server: server.to_string(),
-        key,
-        password: "другой".to_owned(),
-        ..PingwinConfig::default()
-    };
-    let client = PingwinOutbound::new(OutboundId::new("test"), config, Arc::new(Direct))
-        .expect("направление собирается");
-
-    let target = SocketAddress::domain("example.com", 80);
-    assert!(client.connect_tcp(&target).await.is_err());
-}
-
-#[tokio::test]
-async fn desync_does_not_break_the_handshake() {
-    // Обход DPI меняет то, как посылка уходит в сеть, но не то, что в ней
-    // написано: сервер обязан собрать её как обычно.
-    let echo = start_echo().await;
-    let (server, key, _running) = start_server(None).await;
-
-    for strategy in ["multisplit", "disorder", "fake", "fakedsplit"] {
-        let params = serde_json::json!({
-            "server": server.to_string(),
-            "key": key,
-            "password": "secret",
-            "desync": { "strategy": strategy, "ttl": 64 },
-        });
-        let config: PingwinConfig = serde_json::from_value(params).expect("разбирается");
-        let client = PingwinOutbound::new(OutboundId::new("test"), config, Arc::new(Direct))
-            .expect("направление собирается");
-
-        let mut stream = client
-            .connect_tcp(&SocketAddress::ip(echo.ip(), echo.port()))
-            .await
-            .unwrap_or_else(|err| panic!("{strategy}: {err}"));
-        stream.write_all(b"dpi").await.expect("записалось");
-
-        let mut answer = [0u8; 3];
-        stream
-            .read_exact(&mut answer)
-            .await
-            .unwrap_or_else(|err| panic!("{strategy}: {err}"));
-        assert_eq!(&answer, b"dpi", "{strategy}");
-    }
 }

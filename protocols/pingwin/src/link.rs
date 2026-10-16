@@ -1,7 +1,7 @@
 //! Ссылка-приглашение: профиль одной строкой.
 //!
 //! ```text
-//! pingwin://<пароль>@<хост>:<порт>?key=<ключ>&sni=<прикрытие>#<имя>
+//! pingwin://<пароль>@<хост>:<порт>?key=<ключ>&sni=<имя в сертификате>#<профиль>
 //! ```
 //!
 //! Запись та же, что у Trojan и Hysteria 2, и это не подражание: ссылку
@@ -23,9 +23,7 @@
 //! # Что попадает в ссылку
 //!
 //! Всё, без чего не подключиться, и ничего сверх: адрес, пароль, открытый
-//! ключ сервера, имя прикрытия. Отпечаток браузера, шифр, 0-RTT и обход DPI
-//! в ссылку не идут — у них рабочие умолчания, а обход к тому же подбирают
-//! под сеть, в которой сидит клиент, а не под сервер, который выдал ссылку.
+//! ключ сервера и имя в сертификате, если оно не совпадает с хостом.
 
 use crate::wire::keys::PUBLIC_LEN;
 
@@ -46,7 +44,7 @@ pub struct LinkParams<'a> {
     pub password: &'a str,
     /// Открытый ключ сервера.
     pub server_public: &'a [u8; PUBLIC_LEN],
-    /// Имя прикрытия — то, что уйдёт в SNI.
+    /// Имя в сертификате сервера. Пусто — то же, что хост.
     pub sni: &'a str,
     /// Имя профиля, которое увидит человек.
     pub name: &'a str,
@@ -74,7 +72,7 @@ pub fn build(params: &LinkParams<'_>) -> String {
     link.push_str("?key=");
     link.push_str(&penguin_core::base64::encode_url(params.server_public));
 
-    if !params.sni.is_empty() {
+    if !params.sni.is_empty() && params.sni != params.host {
         link.push_str("&sni=");
         link.push_str(&escape(params.sni));
     }
@@ -112,19 +110,28 @@ mod tests {
     /// Ровно эта строка стоит в тесте окна
     /// (`penguin_gui::forms::protocol::pingwin`). Правка формата ломает оба
     /// теста сразу — в этом и смысл.
-    const SAMPLE: &str = "pingwin://s3cret@example.com:443\
+    const SAMPLE: &str = "pingwin://s3cret@203.0.113.5:443\
 ?key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc\
-&sni=www.microsoft.com#%D0%94%D0%BE%D0%BC%D0%B0";
+&sni=vpn.example.com#%D0%94%D0%BE%D0%BC%D0%B0";
 
     fn params<'a>(password: &'a str, name: &'a str) -> LinkParams<'a> {
         LinkParams {
-            host: "example.com",
+            host: "203.0.113.5",
             port: 443,
             password,
             server_public: &[7u8; PUBLIC_LEN],
-            sni: "www.microsoft.com",
+            sni: "vpn.example.com",
             name,
         }
+    }
+
+    #[test]
+    fn a_name_equal_to_the_host_is_not_repeated() {
+        let link = build(&LinkParams {
+            host: "vpn.example.com",
+            ..params("s3cret", "")
+        });
+        assert!(!link.contains("sni="), "{link}");
     }
 
     #[test]

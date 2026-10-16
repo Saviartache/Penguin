@@ -12,6 +12,8 @@ target/
 # подсовывает их томом, потому что образ пересобирается, а ключ — нет.
 pingwin.toml
 .env
+certs/
+letsencrypt/
 
 .git/
 .DS_Store

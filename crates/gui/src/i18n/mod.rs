@@ -259,14 +259,6 @@ pub struct Strings {
     pub flow_example: &'static str,
     /// Что вписать в ключ сервера Pingwin.
     pub pingwin_key_example: &'static str,
-    /// Имя сайта, за который выдаёт себя соединение.
-    pub cover_name: &'static str,
-    /// Что вписать в имя прикрытия.
-    pub cover_name_example: &'static str,
-    /// Чьим приветствием TLS притворяться.
-    pub browser_fingerprint: &'static str,
-    /// Слать первый запрос вместе с приветствием.
-    pub zero_rtt: &'static str,
     /// Способ обхода DPI в первой посылке.
     pub desync_strategy: &'static str,
     /// Чем режим DPI отличается от тоннеля.
@@ -571,10 +563,6 @@ mod tests {
                 table.flow,
                 table.flow_example,
                 table.pingwin_key_example,
-                table.cover_name,
-                table.cover_name_example,
-                table.browser_fingerprint,
-                table.zero_rtt,
                 table.desync_strategy,
                 table.dpi_no_tunnel,
                 table.need_server,

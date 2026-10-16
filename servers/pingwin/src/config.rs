@@ -1,9 +1,11 @@
-//! Настройки сервера: где слушать, чей ключ, кого пускать, чем прикрываться.
+//! Настройки сервера: где слушать, чей ключ, какой сертификат, кого пускать.
 //!
 //! ```toml
-//! listen   = "0.0.0.0:443"
-//! key      = "…"                # закрытый ключ, base64; выдаёт `keygen`
-//! fallback = "127.0.0.1:8080"   # куда уходит всё, что не наше
+//! listen   = "0.0.0.0:443"                        # UDP
+//! key      = "…"                                  # закрытый ключ, base64; выдаёт `keygen`
+//! cert     = "/etc/pingwin/fullchain.pem"
+//! cert_key = "/etc/pingwin/privkey.pem"
+//! cover    = "/srv/cover"                         # статический сайт для чужих
 //!
 //! [[users]]
 //! name     = "petya"
@@ -11,38 +13,34 @@
 //! ```
 
 use std::net::SocketAddr;
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use penguin_pingwin::wire::keys::{KEY_LEN, StaticKeyPair};
 use serde::{Deserialize, Serialize};
 
-/// Сколько ждать рукопожатия.
-///
-/// Короче, чем у клиента: сервер держит тысячи соединений, и каждое
-/// молчащее — это память. Тот, кто не успел, попробует ещё раз.
-const HANDSHAKE_LIMIT: Duration = Duration::from_secs(10);
-
 /// Настройки сервера целиком.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Адрес и порт, на которых слушать.
+    /// Адрес и порт UDP, на которых слушать.
     pub listen: String,
 
     /// Закрытый ключ сервера, тридцать два байта в base64.
-    ///
-    /// В `Debug` не попадает: вывод пишется вручную ниже.
     pub key: String,
 
-    /// Куда отдавать соединения, которые не прошли опознание.
+    /// Цепочка сертификатов в PEM, лист первым.
+    pub cert: PathBuf,
+
+    /// Закрытый ключ сертификата в PEM.
+    pub cert_key: PathBuf,
+
+    /// Каталог статического сайта, который видит тот, кого не узнали.
     ///
-    /// Настоящий сайт — в этом весь смысл: тот, кто пробует сервер, увидит
-    /// его, а не отказ. Пусто — соединение просто закрывается; так делать не
-    /// стоит, и [`Self::validate`] об этом предупредит.
+    /// Пусто — на всё `404`. Так можно, но сайт без единой страницы
+    /// выглядит странно.
     #[serde(default)]
-    pub fallback: String,
+    pub cover: Option<PathBuf>,
 
     /// Кого пускать.
     pub users: Vec<User>,
@@ -63,7 +61,9 @@ impl std::fmt::Debug for ServerConfig {
         f.debug_struct("ServerConfig")
             .field("listen", &self.listen)
             .field("key", &"<скрыт>")
-            .field("fallback", &self.fallback)
+            .field("cert", &self.cert)
+            .field("cert_key", &self.cert_key)
+            .field("cover", &self.cover)
             .field("users", &self.users.len())
             .finish()
     }
@@ -101,43 +101,30 @@ impl ServerConfig {
     pub fn keys(&self) -> Result<StaticKeyPair> {
         let bytes = penguin_core::base64::decode_exact(self.key.trim(), KEY_LEN, "ключ сервера")
             .map_err(|err| anyhow::anyhow!("ключ сервера: {err}"))?;
-        let mut secret = [0u8; KEY_LEN];
-        let chunk: &[u8; KEY_LEN] = bytes
+        let secret: [u8; KEY_LEN] = bytes
             .first_chunk()
+            .copied()
             .context("ключ сервера не тридцати двух байт")?;
-        secret.copy_from_slice(chunk);
         Ok(StaticKeyPair::from_bytes(secret))
     }
 
-    /// Куда отдавать чужие соединения. `None` — прикрытия нет.
-    pub fn fallback_addr(&self) -> Option<&str> {
-        let fallback = self.fallback.trim();
-        (!fallback.is_empty()).then_some(fallback)
-    }
-
-    /// Сколько ждать рукопожатия.
-    pub fn handshake_limit(&self) -> Duration {
-        HANDSHAKE_LIMIT
-    }
-
-    /// Проверяет настройки, ничего не открывая.
+    /// Проверяет настройки, не открывая сокетов. Сертификат читает
+    /// [`crate::tls`].
     pub fn validate(&self) -> Result<()> {
         self.listen_addr()?;
         self.keys()?;
-
         if self.users.is_empty() {
             bail!("в настройках нет ни одного пользователя: пускать некого");
         }
         if let Some(empty) = self.users.iter().find(|user| user.password.is_empty()) {
             bail!("у пользователя `{}` пустой пароль", empty.name);
         }
-        if self.fallback_addr().is_none() {
-            // Не ошибка, но и не мелочь: сервер без прикрытия отвечает на
-            // пробу закрытым соединением, и по этому его находят.
-            tracing::warn!(
-                "прикрытие не задано: сервер, закрывающий чужое соединение, \
-                 отличим от обычного сайта"
-            );
+        match &self.cover {
+            Some(cover) if !cover.is_dir() => {
+                bail!("прикрытие `{}` — не каталог", cover.display())
+            }
+            Some(_) => {}
+            None => tracing::warn!("прикрытие не задано: чужой увидит сайт без единой страницы"),
         }
         Ok(())
     }
@@ -151,7 +138,9 @@ mod tests {
         ServerConfig {
             listen: "0.0.0.0:443".to_owned(),
             key: penguin_core::base64::encode(&[7u8; KEY_LEN]),
-            fallback: "127.0.0.1:8080".to_owned(),
+            cert: "fullchain.pem".into(),
+            cert_key: "privkey.pem".into(),
+            cover: None,
             users: vec![User {
                 name: "petya".to_owned(),
                 password: "secret".to_owned(),
@@ -166,8 +155,6 @@ mod tests {
 
     #[test]
     fn a_config_without_users_is_refused() {
-        // Сервер без пользователей молча не пускает никого — и разбираться с
-        // этим будут по журналу клиента, а не сервера.
         let config = ServerConfig {
             users: Vec::new(),
             ..config()
@@ -200,9 +187,16 @@ mod tests {
     }
 
     #[test]
+    fn a_cover_that_is_not_a_directory_is_refused() {
+        let config = ServerConfig {
+            cover: Some("/нет/такого/каталога".into()),
+            ..config()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn the_config_reads_back_the_way_it_is_written() {
-        // Файл настроек пишут руками: разойтись формату записи и разбора
-        // нельзя.
         let text = toml::to_string(&config()).expect("записывается");
         let parsed: ServerConfig = toml::from_str(&text).expect("разбирается");
         assert_eq!(parsed.listen, config().listen);
@@ -211,9 +205,8 @@ mod tests {
 
     #[test]
     fn an_unknown_field_is_refused() {
-        // Опечатка в имени поля означала бы настройку, которая выглядит
-        // применённой и не применена.
-        let text = "listen = \"0.0.0.0:443\"\nkey = \"x\"\nfallbak = \"y\"\nusers = []";
+        let text = "listen = \"0.0.0.0:443\"\nkey = \"x\"\ncert = \"a\"\ncert_key = \"b\"\n\
+                    fallback = \"y\"\nusers = []";
         assert!(toml::from_str::<ServerConfig>(text).is_err());
     }
 
@@ -221,7 +214,6 @@ mod tests {
     fn debug_hides_the_secrets() {
         let rendered = format!("{:?}", config());
         assert!(!rendered.contains(&config().key), "ключ в Debug");
-
         let user = format!("{:?}", config().users[0]);
         assert!(!user.contains("secret"), "пароль в Debug: {user}");
     }

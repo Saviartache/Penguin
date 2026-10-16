@@ -50,7 +50,7 @@
 
 ## Протоколы
 
-Pingwin (свой, с сервером в этом же дереве), WireGuard, Hysteria 2, TUIC,
+Pingwin (свой, поверх HTTP/3, с сервером в этом же дереве), WireGuard, Hysteria 2, TUIC,
 Juicity, AnyTLS, VLESS, VMess, Trojan, Shadowsocks, NaiveProxy, MASQUE,
 TrustTunnel, SOCKS5.
 

@@ -64,8 +64,9 @@ enum Command {
         /// далеко не всегда.
         #[arg(long)]
         host: String,
-        /// Имя прикрытия, которое клиент поставит в SNI.
-        #[arg(long, default_value = penguin_pingwin::config::DEFAULT_SNI)]
+        /// Имя в сертификате сервера, если `--host` задан адресом или другим
+        /// именем.
+        #[arg(long, default_value = "")]
         sni: String,
         /// Имя профиля в клиенте.
         #[arg(long, default_value = "Pingwin")]

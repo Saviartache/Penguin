@@ -4,7 +4,7 @@
 #
 # Зачем отдельный, а не корневой: в корневом два десятка членов, и половина
 # из них тянет `quinn`, `iced`, `smoltcp` и подмодуль с UI-китом. Серверу из
-# всего этого не нужно ничего — ему нужны шесть крейтов и десяток внешних
+# всего этого не нужно ничего — ему нужны пять крейтов и десяток внешних
 # зависимостей, и собирать ради него весь клиент значит платить за это
 # каждый раз, когда сервер надо пересобрать на месте.
 #
@@ -20,7 +20,6 @@ members = [
     "crates/core",
     "crates/proto",
     "protocols/transport",
-    "protocols/utls",
     "protocols/pingwin",
     "servers/pingwin",
 ]
@@ -37,12 +36,16 @@ authors = ["Saviartache"]
 penguin-core = { path = "crates/core" }
 penguin-proto = { path = "crates/proto" }
 penguin-transport = { path = "protocols/transport" }
-penguin-utls = { path = "protocols/utls" }
 penguin-pingwin = { path = "protocols/pingwin" }
 
 tokio = { version = "1", default-features = false }
 async-trait = "0.1"
 
+quinn = { version = "0.11", default-features = false }
+http = "1"
+h2 = "0.4"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
 rustls = { version = "0.23", default-features = false }
 rustls-platform-verifier = "0.5"
 rustls-pemfile = "2"
