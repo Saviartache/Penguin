@@ -85,7 +85,7 @@ mod tests {
     fn router(rules: serde_json::Value) -> Router {
         let rules: Vec<RuleConfig> = serde_json::from_value(rules).expect("правила разбираются");
         let config = RoutingConfig {
-            mode: TunnelMode::Full,
+            mode: TunnelMode::Tunnel,
             rules,
             ..RoutingConfig::default()
         };
@@ -143,7 +143,7 @@ mod tests {
         let explanation = explain(&router, &flow("1.2.3.4:443", None));
         assert_eq!(explanation.decision, "proxy[home]");
         assert!(
-            explanation.reason.contains("full"),
+            explanation.reason.contains("tunnel"),
             "режим не назван: {}",
             explanation.reason
         );

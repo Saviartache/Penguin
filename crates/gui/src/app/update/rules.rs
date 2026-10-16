@@ -4,7 +4,7 @@
 //! щелчок перезаписывал бы файл и пересобирал набор.
 
 use iced::Task;
-use penguin_config::schema::routing::TunnelMode;
+use penguin_config::schema::rule::RuleConfig;
 use penguin_ipc::schema::Request;
 
 use crate::app::App;
@@ -16,8 +16,14 @@ use crate::forms::rule;
 pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
     match message {
         SplitTunnelMessage::ModeSelected(mode) => {
-            if let Some(mode) = parse_mode(&mode) {
+            if app.state().config.routing.mode != mode {
                 app.state_mut().config.routing.mode = mode;
+                app.state_mut().dirty = true;
+            }
+            Task::none()
+        }
+        SplitTunnelMessage::RuleMoved(from, to) => {
+            if move_rule(&mut app.state_mut().config.routing.rules, from, to) {
                 app.state_mut().dirty = true;
             }
             Task::none()
@@ -58,7 +64,7 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             Task::none()
         }
         SplitTunnelMessage::ProbeRequested => probe(app),
-        SplitTunnelMessage::EditorOpened => open_editor(app),
+        SplitTunnelMessage::EditorOpened(index) => open_editor(app, index),
         SplitTunnelMessage::EditorClosed => {
             app.state_mut().split_tunnel.editor = None;
             Task::none()
@@ -81,9 +87,15 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             }
             Task::none()
         }
-        SplitTunnelMessage::DraftAddressesChanged(value) => {
+        SplitTunnelMessage::DraftHostsChanged(value) => {
             if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
-                draft.addresses = value;
+                draft.hosts = value;
+            }
+            Task::none()
+        }
+        SplitTunnelMessage::DraftPortsChanged(value) => {
+            if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
+                draft.ports = value;
             }
             Task::none()
         }
@@ -93,7 +105,7 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             }
             Task::none()
         }
-        SplitTunnelMessage::RuleAdded => add_rule(app),
+        SplitTunnelMessage::DraftSaved => save_draft(app),
         SplitTunnelMessage::Save => save_rules(app),
     }
 }
@@ -113,11 +125,22 @@ fn probe(app: &App) -> Task<Message> {
     })
 }
 
-/// Открывает окно нового правила: поиск и жалоба от прошлого не переносятся,
-/// список запущенного мог устареть.
-fn open_editor(app: &mut App) -> Task<Message> {
+/// Открывает окно группы: поиск и жалоба от прошлого не переносятся, список
+/// запущенного мог устареть. Правило, которое форма не покажет, не открывается.
+fn open_editor(app: &mut App, index: Option<usize>) -> Task<Message> {
+    let draft = match index {
+        Some(index) => {
+            let rules = &app.state().config.routing.rules;
+            rules.get(index).and_then(|found| rule::load(index, found))
+        }
+        None => Some(rule::Draft::default()),
+    };
+    let Some(draft) = draft else {
+        return Task::none();
+    };
+
     let split = &mut app.state_mut().split_tunnel;
-    split.editor = Some(rule::Draft::default());
+    split.editor = Some(draft);
     split.app_search.clear();
     split.pick_error = None;
     request_processes()
@@ -157,24 +180,49 @@ fn picked_file(app: &mut App, picked: Result<Option<String>, String>) -> Task<Me
     Task::none()
 }
 
-fn add_rule(app: &mut App) -> Task<Message> {
-    let id = rule::unique_id(&app.state().config.routing.rules);
-    let new_rule = app
-        .state()
-        .split_tunnel
-        .editor
-        .as_ref()
-        .and_then(|draft| draft.build(id));
-    // Без условий правило совпало бы со всем подряд.
-    let Some(new_rule) = new_rule else {
+/// Новая группа встаёт в конец, правленая — на своё место с прежними
+/// идентификатором, включённостью и приоритетом.
+fn save_draft(app: &mut App) -> Task<Message> {
+    let state = app.state();
+    let Some(draft) = state.split_tunnel.editor.as_ref() else {
         return Task::none();
     };
+    let rules = &state.config.routing.rules;
+    let previous = draft.index.and_then(|index| rules.get(index));
+    let id = previous.map_or_else(|| rule::unique_id(rules), |found| found.id.clone());
 
-    app.state_mut().config.routing.rules.push(new_rule);
-    // Окно закрывается сразу, иначе черновик выглядит ещё не добавленным.
+    // Без условий правило совпало бы со всем подряд.
+    let Some(mut built) = draft.build(id) else {
+        return Task::none();
+    };
+    if let Some(previous) = previous {
+        built.enabled = previous.enabled;
+        built.priority = previous.priority;
+    }
+    let place = previous.and(draft.index);
+
+    let rules = &mut app.state_mut().config.routing.rules;
+    match place {
+        Some(index) => rules[index] = built,
+        None => rules.push(built),
+    }
+    // Окно закрывается сразу, иначе черновик выглядит ещё не сохранённым.
     app.state_mut().split_tunnel.editor = None;
     app.state_mut().dirty = true;
     Task::none()
+}
+
+/// Меняет местами два правила; приоритет остаётся за местом, иначе перестановка
+/// не изменила бы порядок проверки.
+fn move_rule(rules: &mut [RuleConfig], from: usize, to: usize) -> bool {
+    if from == to || from >= rules.len() || to >= rules.len() {
+        return false;
+    }
+    let (first, second) = (rules[from].priority, rules[to].priority);
+    rules.swap(from, to);
+    rules[from].priority = first;
+    rules[to].priority = second;
+    true
 }
 
 /// Спрашивает список запущенных приложений.
@@ -206,20 +254,9 @@ fn failure(reason: impl std::fmt::Display) -> String {
     format!("{}: {reason}", crate::i18n::s().pick_failed)
 }
 
-/// Разбирает режим из значения в списке.
-pub fn parse_mode(label: &str) -> Option<TunnelMode> {
-    Some(match label {
-        "full" => TunnelMode::Full,
-        "allowlist" => TunnelMode::Allowlist,
-        "blocklist" => TunnelMode::Blocklist,
-        "off" => TunnelMode::Off,
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use penguin_config::schema::rule::RuleConfig;
+    use penguin_config::schema::routing::TunnelMode;
     use serde_json::json;
 
     use super::*;
@@ -229,14 +266,6 @@ mod tests {
         app.state_mut().config.routing.rules =
             serde_json::from_value::<Vec<RuleConfig>>(rules).expect("правила разбираются");
         app
-    }
-
-    #[test]
-    fn every_mode_parses() {
-        for mode in ["full", "allowlist", "blocklist", "off"] {
-            assert!(parse_mode(mode).is_some(), "режим `{mode}` не разбирается");
-        }
-        assert!(parse_mode("нет такого").is_none());
     }
 
     #[test]
@@ -280,9 +309,67 @@ mod tests {
         let mut app = app_with_rules(json!([]));
         let _ = handle(
             &mut app,
-            SplitTunnelMessage::ModeSelected("allowlist".to_owned()),
+            SplitTunnelMessage::ModeSelected(TunnelMode::Block),
         );
-        assert_eq!(app.state().config.routing.mode, TunnelMode::Allowlist);
+        assert_eq!(app.state().config.routing.mode, TunnelMode::Block);
+        assert!(app.state().dirty);
+    }
+
+    #[test]
+    fn moving_a_rule_changes_the_order_of_checking() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "priority": -100, "when": { "dest_port": [443] }, "action": "direct" },
+            { "id": "r2", "when": { "dest_port": [80] }, "action": "block" }
+        ]));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleMoved(1, 0));
+
+        let rules = &app.state().config.routing.rules;
+        assert_eq!(rules[0].id, "r2");
+        assert_eq!(rules[0].priority, -100, "приоритет ушёл вместе с правилом");
+        assert!(app.state().dirty);
+    }
+
+    #[test]
+    fn moving_past_the_edge_does_nothing() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "when": { "dest_port": [443] }, "action": "direct" }
+        ]));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleMoved(0, 1));
+        assert!(!app.state().dirty);
+    }
+
+    #[test]
+    fn editing_a_group_keeps_its_place_and_identity() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "when": { "dest_port": [443] }, "action": "direct" },
+            { "id": "keep", "enabled": false, "when": { "domain_suffix": ["a.com"] }, "action": "block" }
+        ]));
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(Some(1)));
+        let _ = handle(
+            &mut app,
+            SplitTunnelMessage::DraftHostsChanged("b.com".to_owned()),
+        );
+        let _ = handle(&mut app, SplitTunnelMessage::DraftSaved);
+
+        let rules = &app.state().config.routing.rules;
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[1].id, "keep");
+        assert!(!rules[1].enabled, "правка включила выключенное");
+        assert_eq!(
+            rules[1].when,
+            penguin_config::schema::rule::Condition::Leaf(
+                penguin_config::schema::rule::Leaf::DomainSuffix(vec!["b.com".to_owned()])
+            )
+        );
+    }
+
+    #[test]
+    fn a_handwritten_rule_does_not_open() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "when": { "not": { "dest_port": [443] } }, "action": "direct" }
+        ]));
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(Some(0)));
+        assert!(app.state().split_tunnel.editor.is_none());
     }
 
     #[test]
@@ -300,7 +387,7 @@ mod tests {
     fn adding_a_rule_puts_it_in_the_config_and_clears_the_draft() {
         let mut app = app_with_rules(json!([]));
 
-        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
         let _ = handle(
             &mut app,
             SplitTunnelMessage::DraftNameChanged("Игры".to_owned()),
@@ -309,7 +396,7 @@ mod tests {
             &mut app,
             SplitTunnelMessage::AppToggled("c:/games/steam.exe".to_owned(), true),
         );
-        let _ = handle(&mut app, SplitTunnelMessage::RuleAdded);
+        let _ = handle(&mut app, SplitTunnelMessage::DraftSaved);
 
         assert_eq!(app.state().config.routing.rules.len(), 1);
         assert_eq!(app.state().config.routing.rules[0].name, "Игры");
@@ -323,12 +410,12 @@ mod tests {
     #[test]
     fn an_empty_draft_adds_nothing() {
         let mut app = app_with_rules(json!([]));
-        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
         let _ = handle(
             &mut app,
             SplitTunnelMessage::DraftNameChanged("Пусто".to_owned()),
         );
-        let _ = handle(&mut app, SplitTunnelMessage::RuleAdded);
+        let _ = handle(&mut app, SplitTunnelMessage::DraftSaved);
 
         assert!(app.state().config.routing.rules.is_empty());
         assert!(!app.state().dirty, "ничего не добавилось — и правок нет");
@@ -340,12 +427,12 @@ mod tests {
             { "id": "rule-1", "when": { "dest_port": [443] }, "action": "direct" }
         ]));
 
-        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
         let _ = handle(
             &mut app,
-            SplitTunnelMessage::DraftAddressesChanged("example.com".to_owned()),
+            SplitTunnelMessage::DraftHostsChanged("example.com".to_owned()),
         );
-        let _ = handle(&mut app, SplitTunnelMessage::RuleAdded);
+        let _ = handle(&mut app, SplitTunnelMessage::DraftSaved);
 
         let ids: Vec<&str> = app
             .state()
@@ -373,7 +460,7 @@ mod tests {
     #[test]
     fn a_chosen_file_becomes_a_condition() {
         let mut app = app_with_rules(json!([]));
-        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
         let _ = handle(
             &mut app,
             SplitTunnelMessage::AppSearchChanged("doom".to_owned()),
@@ -400,7 +487,7 @@ mod tests {
     #[test]
     fn a_closed_window_adds_nothing() {
         let mut app = app_with_rules(json!([]));
-        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
         let _ = handle(&mut app, SplitTunnelMessage::AppPicked(Ok(None)));
 
         let draft = app
@@ -416,7 +503,7 @@ mod tests {
     #[test]
     fn a_window_that_did_not_open_is_reported() {
         let mut app = app_with_rules(json!([]));
-        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
         let _ = handle(
             &mut app,
             SplitTunnelMessage::AppPicked(Err("нечем показать".to_owned())),
@@ -432,7 +519,7 @@ mod tests {
     #[test]
     fn only_one_window_at_a_time() {
         let mut app = app_with_rules(json!([]));
-        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
         app.state_mut().split_tunnel.picking = true;
         app.state_mut().split_tunnel.pick_error = Some("прошлая беда".to_owned());
 
@@ -449,7 +536,7 @@ mod tests {
     fn a_new_window_forgets_the_previous_complaint() {
         let mut app = app_with_rules(json!([]));
         app.state_mut().split_tunnel.pick_error = Some("прошлая беда".to_owned());
-        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened);
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
 
         assert!(app.state().split_tunnel.pick_error.is_none());
     }

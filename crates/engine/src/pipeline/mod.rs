@@ -115,14 +115,17 @@ impl Pipeline {
         flow
     }
 
-    /// Направление под решение; не поднялось — трафик идёт напрямую (с
-    /// предупреждением в журнале).
+    /// Направление под решение; не поднялось — соединение обрывается: напрямую
+    /// оно ушло бы мимо тоннеля, которого от него ждали.
     fn outbound_for(&self, decision: &ResolvedDecision) -> Option<Arc<dyn Outbound>> {
         match decision {
-            ResolvedDecision::Tunnel(id) => self.outbounds.get(id).or_else(|| {
-                tracing::warn!(%id, "направление не поднято — трафик уходит напрямую");
-                Some(self.outbounds.direct())
-            }),
+            ResolvedDecision::Tunnel(id) => {
+                let outbound = self.outbounds.get(id);
+                if outbound.is_none() {
+                    tracing::warn!(%id, "направление не поднято — соединение оборвано");
+                }
+                outbound
+            }
             ResolvedDecision::Direct => Some(self.outbounds.direct()),
             ResolvedDecision::Block => None,
         }
@@ -258,7 +261,7 @@ mod tests {
             let _ = listener.accept().await;
         });
 
-        let pipeline = pipeline(TunnelMode::Off);
+        let pipeline = pipeline(TunnelMode::Direct);
         let stream = pipeline
             .open_tcp(&request(&addr.to_string()))
             .await
@@ -269,7 +272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_outbound_falls_back_to_direct() {
+    async fn missing_outbound_never_leaks_direct() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("сокет");
@@ -278,16 +281,14 @@ mod tests {
             let _ = listener.accept().await;
         });
 
-        let pipeline = pipeline(TunnelMode::Full);
-        pipeline
-            .open_tcp(&request(&addr.to_string()))
-            .await
-            .expect("соединение открыто");
+        let pipeline = pipeline(TunnelMode::Tunnel);
+        let opened = pipeline.open_tcp(&request(&addr.to_string())).await;
+        assert!(matches!(opened, Err(ProtocolError::Unreachable(_))));
     }
 
     #[tokio::test]
     async fn context_carries_the_target() {
-        let pipeline = pipeline(TunnelMode::Off);
+        let pipeline = pipeline(TunnelMode::Direct);
         let flow = pipeline.context_of(&request("example.com:443"));
         assert_eq!(flow.destination, SocketAddress::domain("example.com", 443));
         assert!(flow.destination_ip().is_none());
@@ -295,9 +296,9 @@ mod tests {
 
     #[tokio::test]
     async fn blocked_flow_is_refused_with_a_reason() {
-        let pipeline = pipeline(TunnelMode::Off);
+        let pipeline = pipeline(TunnelMode::Direct);
         let router = Arc::new(Router::passthrough(
-            TunnelMode::Off,
+            TunnelMode::Direct,
             OutboundId::new("home"),
         ));
         let blocked = Pipeline {

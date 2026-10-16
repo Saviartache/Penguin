@@ -1,12 +1,13 @@
-//! Вкладка правил: режим, кнопки, таблица.
+//! Вкладка правил: кнопки, группы сверху вниз, под ними «всё остальное».
 //!
 //! Та же таблица ([`crate::screens::table`]), что у серверов: значения сравнивают
-//! между строками. Главный столбец — условие (какое соединение правило заберёт),
-//! описывается тем же кодом, что и в проверке ([`super::describe`]).
+//! между строками. Главный столбец — что группа заберёт, описывается тем же
+//! кодом, что и в проверке ([`super::describe`]). Порядок на экране — порядок
+//! проверки: первая подошедшая группа забирает соединение.
 //!
 //! Форма и проверка живут в модальных окнах, у вкладки нет своей прокрутки.
-//! Выключенное правило приглушено и помечено словом: вычёркивания нет в шрифте,
-//! а спрятанное правило ищут и не находят.
+//! Выключенная группа приглушена и помечена словом: вычёркивания нет в шрифте,
+//! а спрятанную группу ищут и не находят.
 
 use iced::widget::button;
 use iced::{Alignment, Element, Length};
@@ -18,6 +19,7 @@ use uikit::widgets::ButtonVariant;
 use crate::app::TAB_GAP;
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
+use crate::forms::rule;
 use crate::screens::rules::describe::{describe_action, describe_condition};
 use crate::screens::rules::mode;
 use crate::screens::table::{
@@ -28,21 +30,36 @@ use crate::ui;
 /// Ширина столбца имени в знаках; длинное режется, а не двигает условие.
 const NAME_WIDTH: usize = 20;
 
-/// Ширина столбца условия — самого широкого.
-const CONDITION_WIDTH: usize = 46;
+/// Ширина столбца условия — самого широкого; уже, чем у серверов: справа кнопки
+/// порядка.
+const CONDITION_WIDTH: usize = 36;
 
 /// Ширина столбца действия: «в тоннель -> office» не должно ломать таблицу.
 const ACTION_WIDTH: usize = 20;
 
-/// Ширина кнопки удаления в точках.
-const REMOVE_WIDTH: f32 = 76.0;
+/// Ширина переключателя `[ВЫКЛ]` в точках.
+const TOGGLE_WIDTH: f32 = 56.0;
+
+/// Ширина кнопки в один знак: выше, ниже, удалить.
+const GLYPH_WIDTH: f32 = 30.0;
+
+/// Место под кнопки строки — его же оставляет шапка.
+const ACTIONS_WIDTH: f32 = TOGGLE_WIDTH + GLYPH_WIDTH * 3.0;
+
+/// Выше.
+const UP: &str = "↑";
+
+/// Ниже.
+const DOWN: &str = "↓";
+
+/// Удалить.
+const REMOVE: &str = "✕";
 
 /// Собирает вкладку целиком.
 pub fn view(state: &State) -> Element<'_, Message> {
     Flex::col()
         .w(Size::FILL)
         .h(Size::FILL)
-        .push_auto(mode::view(state))
         .push_auto(toolbar(state))
         .push(panel(state))
         .gap(TAB_GAP)
@@ -56,7 +73,7 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         .push_auto(
             ui::button(ButtonVariant::Primary, crate::i18n::s().add_rule)
                 .h(px(BUTTON_HEIGHT))
-                .on_press(Message::SplitTunnel(SplitTunnelMessage::EditorOpened)),
+                .on_press(Message::SplitTunnel(SplitTunnelMessage::EditorOpened(None))),
         )
         .push_auto(
             ui::button(ButtonVariant::Secondary, crate::i18n::s().probe_rule)
@@ -85,7 +102,14 @@ fn panel(state: &State) -> Element<'_, Message> {
             |value| Message::SplitTunnel(SplitTunnelMessage::SearchChanged(value)),
         ),
         head(state),
-        rows(state),
+        Flex::col()
+            .w(Size::FILL)
+            .h(Size::FILL)
+            .push(rows(state))
+            .push_auto(table::divider(&state.palette))
+            .push_auto(mode::view(state))
+            .gap(gap::XS)
+            .build(),
         crate::i18n::s().toggle_hint,
     )
 }
@@ -109,7 +133,7 @@ fn head(state: &State) -> Element<'_, Message> {
                 .padding(ROW_PADDING)
                 .width(Length::Fill),
         )
-        .push_auto(iced::widget::Space::new().width(Length::Fixed(REMOVE_WIDTH)))
+        .push_auto(iced::widget::Space::new().width(Length::Fixed(ACTIONS_WIDTH)))
         .gap(gap::NONE)
         .build()
 }
@@ -131,12 +155,13 @@ fn rows(state: &State) -> Element<'_, Message> {
         return table::empty(&state.palette, crate::i18n::s().nothing_found);
     }
 
+    let last = rules.len() - 1;
     let list = Flex::col()
         .w(Size::FILL)
         .extend(
             shown
                 .into_iter()
-                .map(|(index, rule)| row(state, index, rule)),
+                .map(|(index, rule)| row(state, index, last, rule)),
         )
         .gap(ROW_GAP)
         .build();
@@ -155,8 +180,14 @@ fn found(rule: &RuleConfig, query: &str) -> bool {
     table::matches(query, &[&rule.name, &rule.id, &condition, &action])
 }
 
-/// Строка правила: щелчок включает и выключает, кнопка справа удаляет.
-fn row<'a>(state: &'a State, index: usize, rule: &'a RuleConfig) -> Element<'a, Message> {
+/// Строка группы: щелчок открывает правку, справа — вкл/выкл, порядок, удаление.
+/// Правило, написанное в файле руками, форма не откроет — строка не нажимается.
+fn row<'a>(
+    state: &'a State,
+    index: usize,
+    last: usize,
+    rule: &'a RuleConfig,
+) -> Element<'a, Message> {
     let palette = &state.palette;
     let action = describe_action(&rule.action);
 
@@ -196,26 +227,54 @@ fn row<'a>(state: &'a State, index: usize, rule: &'a RuleConfig) -> Element<'a, 
         ),
     );
 
-    let toggle = button(cells)
+    let edit = button(cells)
         .width(Length::Fill)
         .padding(ROW_PADDING)
         // Волна помечает включённое: «какие сейчас работают» видно боковым зрением.
         .style(table::row_style(rule.enabled))
-        .on_press(Message::SplitTunnel(SplitTunnelMessage::RuleToggled(
-            index,
-            !rule.enabled,
-        )));
+        .on_press_maybe(
+            rule::load(index, rule)
+                .map(|_| Message::SplitTunnel(SplitTunnelMessage::EditorOpened(Some(index)))),
+        );
+
+    let strings = crate::i18n::s();
+    let switch = if rule.enabled {
+        strings.on
+    } else {
+        strings.off
+    };
 
     Flex::row()
-        .push(toggle)
+        .push(edit)
         .push_auto(table::action(
-            crate::i18n::s().remove,
-            REMOVE_WIDTH,
+            switch,
+            TOGGLE_WIDTH,
+            Message::SplitTunnel(SplitTunnelMessage::RuleToggled(index, !rule.enabled)),
+        ))
+        .push_auto(shift(index.checked_sub(1), index, UP))
+        .push_auto(shift((index < last).then_some(index + 1), index, DOWN))
+        .push_auto(table::action(
+            REMOVE,
+            GLYPH_WIDTH,
             Message::SplitTunnel(SplitTunnelMessage::RuleRemoved(index)),
         ))
         .gap(gap::NONE)
         .align(Alignment::Center)
         .build()
+}
+
+/// Кнопка перестановки; у края списка — пустое место той же ширины.
+fn shift<'a>(to: Option<usize>, from: usize, glyph: &str) -> Element<'a, Message> {
+    match to {
+        Some(to) => table::action(
+            glyph,
+            GLYPH_WIDTH,
+            Message::SplitTunnel(SplitTunnelMessage::RuleMoved(from, to)),
+        ),
+        None => iced::widget::Space::new()
+            .width(Length::Fixed(GLYPH_WIDTH))
+            .into(),
+    }
 }
 
 /// Ряд ячеек — общий для шапки и строк, чтобы столбцы не разъезжались.

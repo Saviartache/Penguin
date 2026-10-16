@@ -124,10 +124,10 @@ impl Router {
 
 /// Решение для соединения, не подошедшего ни под одно правило.
 pub fn default_decision(mode: TunnelMode, active: &OutboundId) -> ResolvedDecision {
-    if mode.defaults_to_tunnel() {
-        Decision::ActiveTunnel.resolve(active)
-    } else {
-        ResolvedDecision::Direct
+    match mode {
+        TunnelMode::Tunnel => Decision::ActiveTunnel.resolve(active),
+        TunnelMode::Direct => ResolvedDecision::Direct,
+        TunnelMode::Block => ResolvedDecision::Block,
     }
 }
 
@@ -171,8 +171,8 @@ mod tests {
     }
 
     #[test]
-    fn full_mode_sends_everything_to_the_tunnel() {
-        let router = router(TunnelMode::Full, json!([]));
+    fn tunnel_mode_sends_everything_to_the_tunnel() {
+        let router = router(TunnelMode::Tunnel, json!([]));
         let verdict = router.resolve(&flow("1.2.3.4:443", None, None));
         assert_eq!(
             verdict.decision,
@@ -182,8 +182,8 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_mode_sends_everything_direct() {
-        let router = router(TunnelMode::Allowlist, json!([]));
+    fn direct_mode_sends_everything_direct() {
+        let router = router(TunnelMode::Direct, json!([]));
         assert_eq!(
             router.resolve(&flow("1.2.3.4:443", None, None)).decision,
             ResolvedDecision::Direct
@@ -191,9 +191,25 @@ mod tests {
     }
 
     #[test]
+    fn block_mode_refuses_everything_unlisted() {
+        let router = router(
+            TunnelMode::Block,
+            json!([{ "id": "лан", "when": { "dest_ip": ["192.168.0.0/16"] }, "action": "direct" }]),
+        );
+        assert_eq!(
+            router.resolve(&flow("1.2.3.4:443", None, None)).decision,
+            ResolvedDecision::Block
+        );
+        assert_eq!(
+            router.resolve(&flow("192.168.1.1:80", None, None)).decision,
+            ResolvedDecision::Direct
+        );
+    }
+
+    #[test]
     fn rules_beat_the_mode() {
         let router = router(
-            TunnelMode::Full,
+            TunnelMode::Tunnel,
             json!([{ "id": "лан", "when": { "dest_ip": ["192.168.0.0/16"] }, "action": "direct" }]),
         );
         assert_eq!(
@@ -211,7 +227,7 @@ mod tests {
     #[test]
     fn allowlist_and_blocklist_coexist_in_one_set() {
         let router = router(
-            TunnelMode::Full,
+            TunnelMode::Tunnel,
             json!([
                 {
                     "id": "патчи-стима",
@@ -247,7 +263,7 @@ mod tests {
     #[test]
     fn verdict_names_the_rule() {
         let router = router(
-            TunnelMode::Full,
+            TunnelMode::Tunnel,
             json!([{ "id": "r1", "name": "Локальная сеть", "when": { "dest_ip": ["10.0.0.0/8"] }, "action": "direct" }]),
         );
         let verdict = router.resolve(&flow("10.1.2.3:443", None, None));
@@ -256,7 +272,7 @@ mod tests {
 
     #[test]
     fn second_lookup_comes_from_the_cache() {
-        let router = router(TunnelMode::Full, json!([]));
+        let router = router(TunnelMode::Tunnel, json!([]));
         let first = router.resolve(&flow("1.2.3.4:443", None, None));
         let second = router.resolve(&flow("1.2.3.4:443", None, None));
         assert!(matches!(first.reason, Reason::Mode));
@@ -266,7 +282,7 @@ mod tests {
 
     #[test]
     fn changing_rules_clears_the_cache() {
-        let router = router(TunnelMode::Full, json!([]));
+        let router = router(TunnelMode::Tunnel, json!([]));
         router.resolve(&flow("1.2.3.4:443", None, None));
 
         let rules: Vec<RuleConfig> = serde_json::from_value(json!([
@@ -274,7 +290,7 @@ mod tests {
         ]))
         .expect("правила разбираются");
         let config = RoutingConfig {
-            mode: TunnelMode::Full,
+            mode: TunnelMode::Tunnel,
             rules,
             ..RoutingConfig::default()
         };
@@ -288,7 +304,7 @@ mod tests {
 
     #[test]
     fn switching_profile_redirects_active_tunnel_rules() {
-        let router = router(TunnelMode::Full, json!([]));
+        let router = router(TunnelMode::Tunnel, json!([]));
         assert_eq!(
             router.resolve(&flow("1.2.3.4:443", None, None)).decision,
             ResolvedDecision::Tunnel(OutboundId::new("home"))
@@ -304,7 +320,7 @@ mod tests {
     #[test]
     fn unknown_process_falls_back_to_the_mode() {
         let router = router(
-            TunnelMode::Full,
+            TunnelMode::Tunnel,
             json!([{ "id": "r1", "when": { "process_name": ["app.exe"] }, "action": "direct" }]),
         );
         let verdict = router.resolve(&flow("1.2.3.4:443", None, None));
@@ -317,7 +333,7 @@ mod tests {
     #[test]
     fn block_rules_work() {
         let router = router(
-            TunnelMode::Full,
+            TunnelMode::Tunnel,
             json!([{ "id": "реклама", "when": { "domain_keyword": ["doubleclick"] }, "action": "block" }]),
         );
         let verdict = router.resolve(&flow("1.2.3.4:443", Some("ad.doubleclick.net"), None));

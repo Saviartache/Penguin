@@ -22,6 +22,8 @@ pub struct Parsed {
     pub domains: Vec<String>,
     /// Порты.
     pub ports: Vec<u16>,
+    /// Диапазоны портов, включительно.
+    pub ranges: Vec<(u16, u16)>,
     /// Что не удалось опознать.
     pub unknown: Vec<String>,
 }
@@ -29,7 +31,10 @@ pub struct Parsed {
 impl Parsed {
     /// Есть ли хоть одно понятое значение.
     pub fn is_empty(&self) -> bool {
-        self.networks.is_empty() && self.domains.is_empty() && self.ports.is_empty()
+        self.networks.is_empty()
+            && self.domains.is_empty()
+            && self.ports.is_empty()
+            && self.ranges.is_empty()
     }
 }
 
@@ -65,9 +70,10 @@ pub fn parse(raw: &str) -> Parsed {
         match classify(token) {
             Some(Kind::Network) => parsed.networks.push(token.to_owned()),
             Some(Kind::Domain) => parsed.domains.push(token.to_owned()),
-            Some(Kind::Port) => match token.parse::<u16>() {
-                Ok(port) => parsed.ports.push(port),
-                Err(_) => parsed.ports.extend(expand_range(token)),
+            Some(Kind::Port) => match port_range(token) {
+                Some((from, to)) if from == to => parsed.ports.push(from),
+                Some(range) => parsed.ranges.push(range),
+                None => parsed.unknown.push(token.to_owned()),
             },
             None => parsed.unknown.push(token.to_owned()),
         }
@@ -85,6 +91,13 @@ fn is_port_spec(value: &str) -> bool {
     }
 }
 
+/// `443` или `8000-9000`; перевёрнутый диапазон — не диапазон.
+fn port_range(token: &str) -> Option<(u16, u16)> {
+    let (from, to) = token.split_once('-').unwrap_or((token, token));
+    let (from, to) = (from.trim().parse().ok()?, to.trim().parse().ok()?);
+    (from <= to).then_some((from, to))
+}
+
 fn is_domain(value: &str) -> bool {
     let value = value.trim_start_matches('.');
 
@@ -94,24 +107,6 @@ fn is_domain(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
-}
-
-/// Разворачивает `8000-8010` в перечень; длинные диапазоны не раскрываются
-/// (тысяча значений в файле настроек).
-fn expand_range(token: &str) -> Vec<u16> {
-    const MAX_SPAN: u32 = 64;
-
-    let Some((from, to)) = token.split_once('-') else {
-        return Vec::new();
-    };
-    let (Ok(from), Ok(to)) = (from.trim().parse::<u16>(), to.trim().parse::<u16>()) else {
-        return Vec::new();
-    };
-    if from > to || u32::from(to - from) > MAX_SPAN {
-        return Vec::new();
-    }
-
-    (from..=to).collect()
 }
 
 #[cfg(test)]
@@ -174,10 +169,10 @@ mod tests {
     }
 
     #[test]
-    fn short_port_ranges_expand_and_huge_ones_do_not() {
-        assert_eq!(parse("8000-8003").ports, [8000, 8001, 8002, 8003]);
-        assert!(parse("8000-9000").ports.is_empty());
-        assert!(parse("500-100").ports.is_empty());
+    fn port_ranges_stay_ranges() {
+        assert_eq!(parse("27000-27100").ranges, [(27000, 27100)]);
+        assert_eq!(parse("443-443").ports, [443]);
+        assert_eq!(parse("500-100").unknown, ["500-100"]);
     }
 
     #[test]

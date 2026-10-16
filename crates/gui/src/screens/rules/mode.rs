@@ -1,91 +1,59 @@
-//! Выбор режима: всё, белый список, чёрный список, только правила.
+//! Последняя строка списка: куда идёт всё, что не подошло ни под одну группу.
 //!
-//! Режим решает судьбу трафика, о котором правила молчат, поэтому стоит первым и
-//! во всю ширину. Показывается подпись, в настройки уезжает значение
-//! ([`crate::i18n::MODE_VALUES`]).
+//! Стоит под группами, а не над ними: проверяется последней, и порядок на экране
+//! совпадает с порядком проверки.
 
-use iced::Element;
-use uikit::widgets::Select;
+use iced::{Alignment, Element};
+use penguin_config::schema::routing::TunnelMode;
+use uikit::layout::{Flex, Sizable, gap, px};
+use uikit::tokens::ink;
+use uikit::widgets::ButtonVariant;
 
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
+use crate::screens::table::{BUTTON_HEIGHT, ROW_PADDING, glyphs};
+use crate::ui;
 
-/// Режим в выпадающем списке; обёртка нужна, чтобы список показал подпись, а не `allowlist`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Choice(pub &'static str);
-
-impl Choice {
-    /// Все режимы в порядке показа.
-    pub fn all() -> Vec<Self> {
-        crate::i18n::MODE_VALUES.map(Self).to_vec()
-    }
-}
-
-impl std::fmt::Display for Choice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(crate::i18n::mode_label(self.0))
-    }
-}
-
-/// Собирает верх вкладки: список режима во всю ширину.
+/// Собирает строку «Всё остальное» с выбором из трёх.
 pub fn view(state: &State) -> Element<'_, Message> {
-    let current = state.config.routing.mode.as_str();
+    let palette = &state.palette;
+    let strings = crate::i18n::s();
+    let current = state.config.routing.mode;
 
-    Select::new(Choice::all(), Some(Choice(current)), |choice: Choice| {
-        Message::SplitTunnel(SplitTunnelMessage::ModeSelected(choice.0.to_owned()))
-    })
-    .view()
+    let mut row = Flex::row()
+        .push_auto(glyphs(strings.rest, palette.text))
+        .push_auto(glyphs(
+            strings.rest_hint,
+            ink::level(palette, ink::TERTIARY),
+        ))
+        .push(ui::spring());
+
+    for mode in TunnelMode::ALL {
+        let variant = if mode == current {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Secondary
+        };
+        row = row.push_auto(
+            ui::button(variant, crate::i18n::mode_label(mode))
+                .h(px(BUTTON_HEIGHT))
+                .on_press(Message::SplitTunnel(SplitTunnelMessage::ModeSelected(mode))),
+        );
+    }
+
+    iced::widget::container(row.gap(gap::SM).align(Alignment::Center).build())
+        .padding(ROW_PADDING)
+        .into()
 }
 
 #[cfg(test)]
 mod tests {
-    use penguin_config::schema::routing::TunnelMode;
-
     use super::*;
-
-    #[test]
-    fn every_mode_is_shown_by_its_label() {
-        for choice in Choice::all() {
-            assert_eq!(choice.to_string(), crate::i18n::mode_label(choice.0));
-            assert_ne!(choice.to_string(), choice.0);
-        }
-    }
-
-    #[test]
-    fn every_mode_of_the_router_is_offered() {
-        let offered: Vec<&str> = Choice::all().into_iter().map(|choice| choice.0).collect();
-        for mode in [
-            TunnelMode::Full,
-            TunnelMode::Allowlist,
-            TunnelMode::Blocklist,
-            TunnelMode::Off,
-        ] {
-            assert!(
-                offered.contains(&mode.as_str()),
-                "режим `{mode:?}` не предлагается"
-            );
-        }
-    }
-
-    #[test]
-    fn the_select_fills_the_width() {
-        let state = State::default();
-        assert_eq!(
-            view(&state).as_widget().size().width,
-            iced::Length::Fill,
-            "список режима не во всю ширину"
-        );
-    }
 
     #[test]
     fn renders_in_every_mode() {
         let mut state = State::default();
-        for mode in [
-            TunnelMode::Full,
-            TunnelMode::Allowlist,
-            TunnelMode::Blocklist,
-            TunnelMode::Off,
-        ] {
+        for mode in TunnelMode::ALL {
             state.config.routing.mode = mode;
             let _ = view(&state);
         }

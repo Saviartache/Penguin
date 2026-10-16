@@ -4,6 +4,7 @@
 
 pub mod v1;
 pub mod v2;
+pub mod v3;
 
 use crate::error::{ConfigError, ConfigResult};
 use crate::schema::{RootConfig, SCHEMA_VERSION};
@@ -21,6 +22,7 @@ pub fn migrate(mut config: RootConfig) -> ConfigResult<RootConfig> {
         config = match config.version {
             0 => v1::from_v0(config),
             1 => v2::from_v1(config),
+            2 => v3::from_v2(config),
             other => {
                 return Err(ConfigError::invalid(
                     "version",

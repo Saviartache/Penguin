@@ -1,5 +1,6 @@
 //! Сообщения верхнего уровня; каждый экран приносит своё вложенное.
 
+use penguin_config::schema::routing::TunnelMode;
 use penguin_ipc::schema::{Event, Response};
 
 use crate::forms::rule::Action as DraftAction;
@@ -157,12 +158,14 @@ pub enum ServersMessage {
 /// Раздельное тоннелирование.
 #[derive(Debug, Clone)]
 pub enum SplitTunnelMessage {
-    /// Сменить режим.
-    ModeSelected(String),
+    /// Выбрано, куда идёт всё остальное.
+    ModeSelected(TunnelMode),
     /// Изменён поиск по списку правил.
     SearchChanged(String),
     /// Правило включено или выключено.
     RuleToggled(usize, bool),
+    /// Правило переставлено: откуда, куда.
+    RuleMoved(usize, usize),
     /// Правило удалено.
     RuleRemoved(usize),
     /// Открыть окно проверки.
@@ -175,8 +178,8 @@ pub enum SplitTunnelMessage {
     ProbeProcessChanged(String),
     /// Запущена проверка; ответ приходит как [`IpcMessage::Response`].
     ProbeRequested,
-    /// Открыть окно нового правила.
-    EditorOpened,
+    /// Открыть окно группы: новой или правила с этим номером.
+    EditorOpened(Option<usize>),
     /// Закрыть окно, ничего не добавив.
     EditorClosed,
     /// Изменён поиск по списку приложений.
@@ -189,12 +192,14 @@ pub enum SplitTunnelMessage {
     AppPicked(Result<Option<String>, String>),
     /// Изменено имя нового правила.
     DraftNameChanged(String),
-    /// Изменена строка адресов нового правила.
-    DraftAddressesChanged(String),
-    /// Выбрано действие нового правила.
+    /// Изменена строка адресов группы.
+    DraftHostsChanged(String),
+    /// Изменена строка портов группы.
+    DraftPortsChanged(String),
+    /// Выбрано действие группы.
     DraftActionSelected(DraftAction),
-    /// Новое правило добавлено в список.
-    RuleAdded,
+    /// Группа добавлена в список или заменила прежнюю.
+    DraftSaved,
     /// Сохранить правила.
     Save,
 }

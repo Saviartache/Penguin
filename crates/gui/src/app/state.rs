@@ -389,7 +389,7 @@ mod tests {
             rate: Throughput::default(),
             connections: 0,
             rules: 0,
-            mode: "full".to_owned(),
+            mode: "tunnel".to_owned(),
             rtt: None,
         });
 

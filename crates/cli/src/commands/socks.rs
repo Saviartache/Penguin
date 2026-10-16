@@ -54,7 +54,7 @@ pub async fn run(config: &RootConfig, args: &SocksArgs, kind: Kind) -> Result<()
     let active = OutboundId::from(profile.id.clone());
     let router = if args.no_rules {
         println!("Правила выключены: весь трафик идёт в тоннель.");
-        Arc::new(Router::passthrough(TunnelMode::Full, active.clone()))
+        Arc::new(Router::passthrough(TunnelMode::Tunnel, active.clone()))
     } else {
         Arc::new(
             Router::new(&config.routing, active.clone(), &CompileContext::default())

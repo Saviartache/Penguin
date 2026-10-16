@@ -176,7 +176,7 @@ mod tests {
             rate: Throughput::default(),
             connections: 0,
             rules: 3,
-            mode: "full".to_owned(),
+            mode: "tunnel".to_owned(),
             rtt: Some(Rtt::from_millis(42)),
         };
         let response = Response::Status(Box::new(status.clone()));

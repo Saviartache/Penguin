@@ -1,15 +1,17 @@
-//! Модальное окно нового правила: имя, действие, адреса и список приложений.
+//! Модальное окно группы: имя, что забирает, куда отправляет.
 //!
-//! Адреса, домены и порты — одной строкой, разбор по виду. Приложения приходят от
-//! службы (у окна нет прав узнать путь чужого процесса), но это только запущенное,
-//! поэтому есть выбор файла; выбранное встаёт в список первой строкой.
+//! Разделы идут сверху вниз и читаются фразой: «приложения, и сайты, и порты —
+//! туда-то»; пустой раздел — «любые». Адреса и порты — строками, разбор по виду.
+//! Приложения приходят от службы (у окна нет прав узнать путь чужого процесса),
+//! но это только запущенное, поэтому есть выбор файла; выбранное встаёт в список
+//! первой строкой.
 
 use iced::Element;
 use iced::theme::Palette;
 use penguin_ipc::schema::AppInfo;
 use uikit::layout::{Flex, gap, grow};
 use uikit::tokens::type_scale;
-use uikit::widgets::{ButtonVariant, Checkbox, Modal, Select, TextInput};
+use uikit::widgets::{ButtonVariant, Checkbox, Modal, TextInput};
 
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
@@ -20,64 +22,115 @@ use crate::ui;
 const WIDTH: f32 = 620.0;
 
 /// Высота списка приложений: фиксированная (растянутое схлопнулось бы в ноль),
-/// помещается в наименьшее окно.
-const LIST_HEIGHT: f32 = 180.0;
+/// вместе с остальными разделами помещается в наименьшее окно.
+const LIST_HEIGHT: f32 = 140.0;
 
 /// Наибольшая длина пути в строке списка в знаках.
 const PATH_WIDTH: usize = 52;
 
-/// Собирает модальное окно нового правила.
+/// Собирает модальное окно группы.
 pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
+    let strings = crate::i18n::s();
+    let palette = &state.palette;
+
+    let addresses = Flex::row()
+        .push_sized(
+            section(
+                palette,
+                strings.hosts_section,
+                TextInput::new(strings.hosts_hint, &draft.hosts)
+                    .on_input(|value| {
+                        Message::SplitTunnel(SplitTunnelMessage::DraftHostsChanged(value))
+                    })
+                    .build(),
+            ),
+            grow(3),
+        )
+        .push_sized(
+            section(
+                palette,
+                strings.ports_section,
+                TextInput::new(strings.ports_hint, &draft.ports)
+                    .on_input(|value| {
+                        Message::SplitTunnel(SplitTunnelMessage::DraftPortsChanged(value))
+                    })
+                    .build(),
+            ),
+            grow(1),
+        )
+        .gap(gap::SM)
+        .build();
+
     let form = Flex::col()
         .push_auto(
-            Flex::row()
-                .push_sized(
-                    TextInput::new(crate::i18n::s().rule_name, &draft.name)
-                        .on_input(|value| {
-                            Message::SplitTunnel(SplitTunnelMessage::DraftNameChanged(value))
-                        })
-                        .build(),
-                    grow(3),
-                )
-                .push_sized(
-                    Select::new(Action::ALL, Some(draft.action), |action| {
-                        Message::SplitTunnel(SplitTunnelMessage::DraftActionSelected(action))
-                    })
-                    .view(),
-                    grow(2),
-                )
-                .gap(gap::SM)
-                .align(iced::Alignment::Center)
+            TextInput::new(strings.rule_name, &draft.name)
+                .on_input(|value| Message::SplitTunnel(SplitTunnelMessage::DraftNameChanged(value)))
                 .build(),
         )
-        .push_auto(
-            TextInput::new(crate::i18n::s().addresses_hint, &draft.addresses)
-                .on_input(|value| {
-                    Message::SplitTunnel(SplitTunnelMessage::DraftAddressesChanged(value))
-                })
-                .build(),
-        )
-        .push_auto(apps(state, draft))
+        .push_auto(section(palette, strings.apps_section, apps(state, draft)))
+        .push_auto(addresses)
+        .push_auto(section(palette, strings.action, actions(draft.action)))
         .push_auto(problem(state, draft))
         .gap(gap::MD)
         .build();
 
+    let (title, answer) = match draft.index {
+        Some(_) => (strings.edit_rule, strings.save),
+        None => (strings.new_rule, strings.add_rule),
+    };
+
     // `Esc` и нажатие мимо панели — «Отмена».
     let mut modal = Modal::new(form)
-        .title(crate::i18n::s().new_rule)
+        .title(title)
         .max_width(WIDTH)
         .on_close(Message::SplitTunnel(SplitTunnelMessage::EditorClosed))
         .on_backdrop(Message::SplitTunnel(SplitTunnelMessage::EditorClosed));
 
-    // Без условий правило совпало бы со всем подряд — ответа нет.
+    // Без условий группа совпала бы со всем подряд — ответа нет.
     if !draft.is_empty() {
-        modal = modal.action(
-            crate::i18n::s().add_rule,
-            Message::SplitTunnel(SplitTunnelMessage::RuleAdded),
-        );
+        modal = modal.action(answer, Message::SplitTunnel(SplitTunnelMessage::DraftSaved));
     }
 
     modal.build().into()
+}
+
+/// Подпись раздела над его полем; у разделов условия — напоминание, что пусто
+/// значит «любые».
+fn section<'a>(
+    palette: &Palette,
+    title: &'a str,
+    body: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let strings = crate::i18n::s();
+    let label = if title == strings.action {
+        title.to_owned()
+    } else {
+        format!("{title} · {}", strings.empty_means_any)
+    };
+
+    Flex::col()
+        .push_auto(ui::faint(palette, label, type_scale::MICRO))
+        .push_auto(body)
+        .gap(gap::XS)
+        .build()
+}
+
+/// Куда отправить: три кнопки, выбранная — акцентом.
+fn actions<'a>(current: Action) -> Element<'a, Message> {
+    let mut row = Flex::row();
+    for action in Action::ALL {
+        let variant = if action == current {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Secondary
+        };
+        row = row.push_auto(
+            ui::button(variant, action.label()).on_press(Message::SplitTunnel(
+                SplitTunnelMessage::DraftActionSelected(action),
+            )),
+        );
+    }
+    row.gap(gap::SM).build()
 }
 
 /// Список приложений с отметками и кнопкой выбора файла.
@@ -325,7 +378,7 @@ mod tests {
     #[test]
     fn unrecognised_input_is_shown() {
         let draft = Draft {
-            addresses: "example.com ???".to_owned(),
+            hosts: "example.com ???".to_owned(),
             ..Draft::default()
         };
         assert_eq!(draft.unknown(), ["???"]);

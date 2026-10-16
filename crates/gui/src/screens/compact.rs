@@ -124,7 +124,7 @@ fn config(state: &State) -> Vec<Line> {
         pair(strings.latency, latency),
         pair(
             strings.mode,
-            crate::i18n::mode_label(state.config.routing.mode.as_str()).to_owned(),
+            crate::i18n::mode_label(state.config.routing.mode).to_owned(),
         ),
         pair(strings.rules, state.config.routing.rules.len().to_string()),
     ]

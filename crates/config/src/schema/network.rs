@@ -19,9 +19,9 @@ pub struct NetworkConfig {
     /// Разрешить обмен с локальной сетью мимо тоннеля.
     pub allow_lan: bool,
     /// Забирать маршрут по умолчанию; выключено — в тоннель идёт только трафик
-    /// локального прокси (в отличие от [`TunnelMode::Off`]).
+    /// локального прокси (в отличие от [`TunnelMode::Direct`]).
     ///
-    /// [`TunnelMode::Off`]: crate::schema::routing::TunnelMode::Off
+    /// [`TunnelMode::Direct`]: crate::schema::routing::TunnelMode::Direct
     pub capture_default_route: bool,
 }
 

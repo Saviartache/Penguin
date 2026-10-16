@@ -21,7 +21,7 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            mode: TunnelMode::Full,
+            mode: TunnelMode::Tunnel,
             rules: Vec::new(),
             resolve_process: true,
             sniff: true,
@@ -29,36 +29,58 @@ impl Default for RoutingConfig {
     }
 }
 
-/// Умолчание для соединений, не подошедших ни под одно правило.
+/// Что делать с соединением, не подошедшим ни под одно правило («всё остальное»).
 ///
-/// Правила действуют всегда и сильнее режима.
+/// Правила действуют всегда и сильнее режима. Прежние имена схемы 2 читаются:
+/// `full` и `blocklist` вели в тоннель, `allowlist` и `off` — напрямую.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelMode {
-    /// Весь трафик в тоннель, кроме описанного правилами.
+    /// В тоннель через текущий сервер.
     #[default]
-    Full,
-    /// В тоннель — только то, что описано правилами.
-    Allowlist,
-    /// Как `full`, отличается только подсказками в интерфейсе.
-    Blocklist,
-    /// Тоннель выключен, правила разбираются.
-    Off,
+    #[serde(alias = "full", alias = "blocklist")]
+    Tunnel,
+    /// Мимо тоннеля.
+    #[serde(alias = "allowlist", alias = "off")]
+    Direct,
+    /// Оборвать.
+    Block,
 }
 
 impl TunnelMode {
-    /// Умолчание — тоннель.
-    pub const fn defaults_to_tunnel(self) -> bool {
-        matches!(self, Self::Full | Self::Blocklist)
-    }
+    /// Все режимы в порядке показа.
+    pub const ALL: [Self; 3] = [Self::Tunnel, Self::Direct, Self::Block];
 
-    /// Имя для интерфейса.
+    /// Имя в файле и в канале управления.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Full => "full",
-            Self::Allowlist => "allowlist",
-            Self::Blocklist => "blocklist",
-            Self::Off => "off",
+            Self::Tunnel => "tunnel",
+            Self::Direct => "direct",
+            Self::Block => "block",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(name: &str) -> TunnelMode {
+        serde_json::from_value(serde_json::json!(name)).expect("режим разбирается")
+    }
+
+    #[test]
+    fn schema_2_names_keep_their_meaning() {
+        assert_eq!(read("full"), TunnelMode::Tunnel);
+        assert_eq!(read("blocklist"), TunnelMode::Tunnel);
+        assert_eq!(read("allowlist"), TunnelMode::Direct);
+        assert_eq!(read("off"), TunnelMode::Direct);
+    }
+
+    #[test]
+    fn every_mode_is_written_by_its_name() {
+        for mode in TunnelMode::ALL {
+            assert_eq!(read(mode.as_str()), mode);
         }
     }
 }

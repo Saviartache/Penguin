@@ -20,7 +20,7 @@ use self::routing::RoutingConfig;
 /// Версия схемы, которую понимает эта сборка.
 ///
 /// Растёт только при несовместимом изменении; новое поле с умолчанием не считается.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Всё содержимое файла настроек.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

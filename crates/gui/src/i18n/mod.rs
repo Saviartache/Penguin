@@ -9,6 +9,7 @@ pub mod ru;
 use std::sync::OnceLock;
 
 use penguin_config::schema::app::Language;
+use penguin_config::schema::routing::TunnelMode;
 
 /// Все подписи окна.
 #[derive(Debug, Clone, Copy)]
@@ -269,10 +270,12 @@ pub struct Strings {
     pub vmess_zero_warning: &'static str,
 
     // --- правила ---
-    /// Режим тоннелирования.
+    /// Куда идёт всё остальное — полем сводки.
     pub mode: &'static str,
-    /// Подписи режимов в порядке [`MODE_VALUES`].
-    pub modes: [&'static str; 4],
+    /// Последняя строка списка: всё, что не подошло ни под одну группу.
+    pub rest: &'static str,
+    /// Что значит последняя строка.
+    pub rest_hint: &'static str,
     /// Правил нет.
     pub no_rules: &'static str,
     /// Заголовок столбца с именем правила.
@@ -297,12 +300,24 @@ pub struct Strings {
     pub process: &'static str,
     /// Имя правила.
     pub rule_name: &'static str,
+    /// Раздел приложений в окне группы.
+    pub apps_section: &'static str,
+    /// Раздел сайтов и адресов.
+    pub hosts_section: &'static str,
     /// Что можно вписать в строку адресов.
-    pub addresses_hint: &'static str,
+    pub hosts_hint: &'static str,
+    /// Раздел портов.
+    pub ports_section: &'static str,
+    /// Что можно вписать в строку портов.
+    pub ports_hint: &'static str,
+    /// Пустой раздел не сужает группу.
+    pub empty_means_any: &'static str,
     /// Добавить правило.
     pub add_rule: &'static str,
     /// Новое правило.
     pub new_rule: &'static str,
+    /// Заголовок окна правки группы.
+    pub edit_rule: &'static str,
     /// Не удалось опознать.
     pub not_recognised: &'static str,
     /// Имя правила, которое не назвали.
@@ -367,10 +382,6 @@ pub struct Strings {
     pub tray_quit: &'static str,
 }
 
-/// Значения режимов в порядке показа; лежат в настройках, не переводятся
-/// (подписи — [`Strings::modes`]).
-pub const MODE_VALUES: [&str; 4] = ["full", "allowlist", "blocklist", "off"];
-
 static LANGUAGE: OnceLock<Language> = OnceLock::new();
 
 /// Запоминает язык; второй вызов ничего не делает.
@@ -386,14 +397,13 @@ pub fn s() -> &'static Strings {
     }
 }
 
-/// Подпись режима по его значению в файле настроек.
-pub fn mode_label(mode: &str) -> &'static str {
-    mode_index(mode).map_or("", |index| s().modes[index])
-}
-
-/// Место режима в [`MODE_VALUES`].
-fn mode_index(mode: &str) -> Option<usize> {
-    MODE_VALUES.iter().position(|known| *known == mode)
+/// Подпись режима: те же слова, что у действий групп.
+pub fn mode_label(mode: TunnelMode) -> &'static str {
+    match mode {
+        TunnelMode::Tunnel => s().action_tunnel,
+        TunnelMode::Direct => s().action_direct,
+        TunnelMode::Block => s().action_block,
+    }
 }
 
 #[cfg(test)]
@@ -402,24 +412,6 @@ mod tests {
 
     /// Все языки; `Language` себя не перечисляет.
     const TABLES: [(&str, &Strings); 2] = [("ru", &ru::STRINGS), ("en", &en::STRINGS)];
-
-    #[test]
-    fn every_mode_has_a_label() {
-        for mode in MODE_VALUES {
-            assert!(!mode_label(mode).is_empty(), "нет подписи для `{mode}`");
-        }
-        assert_eq!(mode_label("нет такого"), "");
-    }
-
-    #[test]
-    fn mode_values_match_the_config() {
-        for mode in MODE_VALUES {
-            assert!(
-                crate::app::update::rules::parse_mode(mode).is_some(),
-                "режим `{mode}` не разбирается"
-            );
-        }
-    }
 
     #[test]
     fn no_label_is_empty_in_any_language() {
@@ -522,6 +514,8 @@ mod tests {
                 table.need_password,
                 table.bad_server,
                 table.mode,
+                table.rest,
+                table.rest_hint,
                 table.no_rules,
                 table.rule,
                 table.condition,
@@ -534,9 +528,15 @@ mod tests {
                 table.destination,
                 table.process,
                 table.rule_name,
-                table.addresses_hint,
+                table.apps_section,
+                table.hosts_section,
+                table.hosts_hint,
+                table.ports_section,
+                table.ports_hint,
+                table.empty_means_any,
                 table.add_rule,
                 table.new_rule,
+                table.edit_rule,
                 table.not_recognised,
                 table.unnamed_rule,
                 table.app_search,
@@ -564,7 +564,7 @@ mod tests {
                 table.tray_quit,
             ];
 
-            for label in all.into_iter().chain(table.screens).chain(table.modes) {
+            for label in all.into_iter().chain(table.screens) {
                 assert!(!label.trim().is_empty(), "пустая подпись в языке `{name}`");
             }
         }
@@ -590,13 +590,14 @@ mod tests {
     }
 
     #[test]
-    fn modes_are_told_apart() {
+    fn actions_are_told_apart() {
         for (name, table) in TABLES {
-            let unique: std::collections::HashSet<&str> = table.modes.into_iter().collect();
+            let labels = [table.action_tunnel, table.action_direct, table.action_block];
+            let unique: std::collections::HashSet<&str> = labels.into_iter().collect();
             assert_eq!(
                 unique.len(),
-                table.modes.len(),
-                "совпадающие режимы в языке `{name}`"
+                labels.len(),
+                "совпадающие действия в языке `{name}`"
             );
         }
     }

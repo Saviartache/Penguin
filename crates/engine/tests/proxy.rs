@@ -60,13 +60,13 @@ async fn echo_server() -> SocketAddr {
     addr
 }
 
-/// Поднимает SOCKS5, который всё отправляет напрямую (`TunnelMode::Off`).
+/// Поднимает SOCKS5, который всё отправляет напрямую (`TunnelMode::Direct`).
 async fn socks_proxy() -> (SocketAddr, CancellationToken) {
     let dialer = Arc::new(SystemDialer::new(Arc::new(SystemResolver)));
     let outbounds = Arc::new(OutboundPool::new(dialer));
 
     let routing = RoutingConfig {
-        mode: TunnelMode::Off,
+        mode: TunnelMode::Direct,
         ..RoutingConfig::default()
     };
     let router = Arc::new(

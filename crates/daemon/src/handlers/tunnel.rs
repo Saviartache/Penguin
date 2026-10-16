@@ -68,7 +68,7 @@ mod tests {
         let Response::Status(status) = status(&engine()) else {
             panic!("не тот ответ")
         };
-        assert_eq!(status.mode, "full");
+        assert_eq!(status.mode, "tunnel");
         assert_eq!(status.rules, 0);
     }
 

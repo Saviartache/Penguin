@@ -298,7 +298,7 @@ mod tests {
                 rate: Default::default(),
                 connections: 3,
                 rules: 0,
-                mode: "full".to_owned(),
+                mode: "tunnel".to_owned(),
                 rtt: None,
             })),
         );

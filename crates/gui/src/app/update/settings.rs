@@ -98,8 +98,7 @@ mod tests {
     #[test]
     fn a_toggle_does_not_save_rules_the_user_is_still_editing() {
         let mut app = app();
-        app.state_mut().config.routing.mode =
-            penguin_config::schema::routing::TunnelMode::Allowlist;
+        app.state_mut().config.routing.mode = penguin_config::schema::routing::TunnelMode::Direct;
         app.state_mut().dirty = true;
 
         let _ = handle(&mut app, SettingsMessage::AllowLan(false));
