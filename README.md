@@ -54,9 +54,6 @@ Pingwin (свой, поверх HTTP/3, с сервером в этом же д�
 Juicity, AnyTLS, VLESS, VMess, Trojan, Shadowsocks, NaiveProxy, MASQUE,
 TrustTunnel, SOCKS5.
 
-HTTP/1.1 к серверу не ходит ни один протокол: где перенос — HTTP, это HTTP/3,
-а где HTTP/3 не бывает — HTTP/2.
-
 Что умеет и чего не умеет каждый — в документе его крейта в
 [`protocols/`](protocols).
 
