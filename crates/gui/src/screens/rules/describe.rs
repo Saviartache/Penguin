@@ -20,7 +20,8 @@ pub fn describe_action(action: &RuleAction) -> String {
 /// Описывает условие словами; в таблице важно узнать правило, не разобрать целиком.
 pub fn describe_condition(condition: &Condition) -> String {
     match condition {
-        Condition::All { all } => join(all, " и "),
+        // Не « и »: оно уже есть в «домены и поддомены».
+        Condition::All { all } => join(all, ", "),
         Condition::Any { any } => join(any, " или "),
         Condition::Not { not } => format!("не {}", describe_condition(not)),
         Condition::Leaf(leaf) => describe_leaf(leaf),
@@ -35,46 +36,58 @@ fn join(conditions: &[Condition], separator: &str) -> String {
         .join(separator)
 }
 
-/// Список значений, обрезанный до читаемой длины.
-fn short(values: &[String]) -> String {
-    const SHOWN: usize = 3;
-
-    if values.len() <= SHOWN {
-        return values.join(", ");
+/// Все значения условия строками — для поиска: описание их только считает.
+pub fn condition_values(condition: &Condition) -> Vec<String> {
+    match condition {
+        Condition::All { all: list } | Condition::Any { any: list } => {
+            list.iter().flat_map(condition_values).collect()
+        }
+        Condition::Not { not } => condition_values(not),
+        Condition::Leaf(leaf) => leaf_values(leaf),
     }
-    format!(
-        "{}, ещё {}",
-        values[..SHOWN].join(", "),
-        values.len() - SHOWN
-    )
 }
 
-fn short_ports(values: &[u16]) -> String {
-    short(&values.iter().map(u16::to_string).collect::<Vec<_>>())
+fn leaf_values(leaf: &Leaf) -> Vec<String> {
+    match leaf {
+        Leaf::ProcessPath(values)
+        | Leaf::ProcessName(values)
+        | Leaf::ProcessPathGlob(values)
+        | Leaf::Domain(values)
+        | Leaf::DomainSuffix(values)
+        | Leaf::DomainKeyword(values)
+        | Leaf::DomainRegex(values)
+        | Leaf::DestIp(values)
+        | Leaf::GeoIp(values)
+        | Leaf::GeoSite(values)
+        | Leaf::Network(values)
+        | Leaf::IpVersion(values) => values.clone(),
+        Leaf::DestPort(values) => values.iter().map(u16::to_string).collect(),
+        Leaf::DestPortRange(values) => values
+            .iter()
+            .map(|(from, to)| format!("{from}-{to}"))
+            .collect(),
+    }
 }
 
+/// Пути, домены и адреса — числом: в строке таблицы их всё равно не прочесть.
 fn describe_leaf(leaf: &Leaf) -> String {
     match leaf {
-        Leaf::ProcessPath(values) => format!("путь: {}", short(values)),
-        Leaf::ProcessName(values) => format!("приложение: {}", short(values)),
-        Leaf::ProcessPathGlob(values) => format!("путь по маске: {}", short(values)),
-        Leaf::Domain(values) => format!("домен: {}", short(values)),
-        Leaf::DomainSuffix(values) => format!("домен и поддомены: {}", short(values)),
-        Leaf::DomainKeyword(values) => format!("домен содержит: {}", short(values)),
-        Leaf::DomainRegex(values) => format!("домен по выражению: {}", short(values)),
-        Leaf::DestIp(values) => format!("адрес: {}", short(values)),
-        Leaf::DestPort(values) => format!("порт: {}", short_ports(values)),
-        Leaf::DestPortRange(values) => {
-            let ranges: Vec<String> = values
-                .iter()
-                .map(|(from, to)| format!("{from}-{to}"))
-                .collect();
-            format!("порты: {}", short(&ranges))
+        Leaf::ProcessPath(values) | Leaf::ProcessName(values) => {
+            format!("приложения: {}", values.len())
         }
-        Leaf::GeoIp(values) => format!("страна: {}", short(values)),
-        Leaf::GeoSite(values) => format!("набор доменов: {}", short(values)),
-        Leaf::Network(values) => format!("трафик: {}", short(values)),
-        Leaf::IpVersion(values) => format!("версия IP: {}", short(values)),
+        Leaf::ProcessPathGlob(values) => format!("маски путей: {}", values.len()),
+        Leaf::Domain(values) => format!("домены: {}", values.len()),
+        Leaf::DomainSuffix(values) => format!("домены и поддомены: {}", values.len()),
+        Leaf::DomainKeyword(values) => format!("слова в домене: {}", values.len()),
+        Leaf::DomainRegex(values) => format!("выражения для домена: {}", values.len()),
+        Leaf::DestIp(values) => format!("адреса: {}", values.len()),
+        Leaf::DestPort(values) => format!("порты: {}", values.len()),
+        Leaf::DestPortRange(values) => format!("диапазоны портов: {}", values.len()),
+        Leaf::GeoIp(values) => format!("страны: {}", values.len()),
+        Leaf::GeoSite(values) => format!("наборы доменов: {}", values.len()),
+        // Слово короче числа.
+        Leaf::Network(values) => format!("трафик: {}", values.join(", ")),
+        Leaf::IpVersion(values) => format!("версия IP: {}", values.join(", ")),
     }
 }
 
@@ -99,7 +112,7 @@ mod tests {
         }))
         .expect("правило разбирается");
 
-        assert_eq!(describe_condition(&rule.when), "приложение: steam.exe");
+        assert_eq!(describe_condition(&rule.when), "приложения: 1");
         assert_eq!(
             describe_action(&rule.action),
             crate::i18n::s().action_direct
@@ -107,23 +120,19 @@ mod tests {
     }
 
     #[test]
-    fn describes_a_simple_leaf() {
-        assert_eq!(
-            describe_condition(&condition(json!({ "process_name": ["steam.exe"] }))),
-            "приложение: steam.exe"
-        );
-    }
-
-    #[test]
-    fn shortens_long_lists() {
+    fn values_are_counted_not_listed() {
         let apps: Vec<String> = (0..20).map(|index| format!("app{index}.exe")).collect();
         let described = describe_condition(&condition(json!({ "process_name": apps })));
 
-        assert!(
-            described.contains("ещё 17"),
-            "список не обрезан: {described}"
+        assert_eq!(described, "приложения: 20");
+    }
+
+    #[test]
+    fn traffic_kind_is_named() {
+        assert_eq!(
+            describe_condition(&condition(json!({ "network": ["tcp"] }))),
+            "трафик: tcp"
         );
-        assert!(described.len() < 80, "строка всё ещё длинная: {described}");
     }
 
     #[test]
@@ -134,9 +143,7 @@ mod tests {
                 { "domain_suffix": ["steamcontent.com"] }
             ]
         })));
-        assert!(described.contains(" и "));
-        assert!(described.contains("steam.exe"));
-        assert!(described.contains("steamcontent.com"));
+        assert_eq!(described, "приложения: 1, домены и поддомены: 1");
     }
 
     #[test]

@@ -11,7 +11,8 @@ use penguin_core::stats::{Throughput, Traffic};
 use penguin_ipc::schema::{AppInfo, Explanation, LogLevel, StatusReport};
 
 use crate::app::message::Screen;
-use crate::forms::rule::Draft as RuleDraft;
+use crate::forms::flow::{Flow, FlowRule};
+use crate::forms::rule::{Draft as RuleDraft, Section as RuleSection};
 use crate::forms::server::Draft as ServerDraft;
 
 /// Строк журнала в окне; полный журнал лежит у демона.
@@ -43,6 +44,8 @@ pub struct State {
     pub dirty: bool,
     /// Экран раздельного тоннелирования.
     pub split_tunnel: SplitTunnelState,
+    /// Экран журнала.
+    pub logs: LogsState,
     /// Экран серверов.
     pub servers: ServersState,
     /// Печатающая заставка.
@@ -60,6 +63,7 @@ impl Default for State {
             saved: RootConfig::default(),
             dirty: false,
             split_tunnel: SplitTunnelState::default(),
+            logs: LogsState::default(),
             servers: ServersState::default(),
             boot: Boot::idle(),
         }
@@ -127,6 +131,9 @@ pub struct Connection {
     pub log: VecDeque<LogLine>,
     /// Журнал строками для консоли кита: она берёт их взаймы.
     pub lines: Vec<String>,
+    /// Сколько строк пришло за всё время: журнал ограничен, длина расти
+    /// перестаёт, а консоли нужно знать, сколько записей новых.
+    pub appended: u64,
 }
 
 impl Connection {
@@ -178,6 +185,16 @@ impl Connection {
 
     /// Добавляет строку в журнал.
     pub fn push_log(&mut self, level: LogLevel, message: String) {
+        self.push_line(level, message, None);
+    }
+
+    /// Добавляет решение по соединению: строку и то, из чего она собрана.
+    pub fn push_flow(&mut self, flow: Flow) {
+        self.push_line(LogLevel::Info, flow.line(), Some(flow));
+    }
+
+    fn push_line(&mut self, level: LogLevel, message: String, flow: Option<Flow>) {
+        self.appended += 1;
         if self.log.len() == LOG_CAPACITY {
             self.log.pop_front();
             self.lines.remove(0);
@@ -188,7 +205,11 @@ impl Connection {
             Some(label) => format!("{label} {message}"),
             None => message.clone(),
         });
-        self.log.push_back(LogLine { level, message });
+        self.log.push_back(LogLine {
+            level,
+            message,
+            flow,
+        });
     }
 
     /// Окно само возится со службой (ставит, запускает, гасит).
@@ -232,6 +253,19 @@ pub struct LogLine {
     pub level: LogLevel,
     /// Текст.
     pub message: String,
+    /// Соединение, если строка — решение по нему.
+    pub flow: Option<Flow>,
+}
+
+/// Экран журнала.
+#[derive(Debug, Default)]
+pub struct LogsState {
+    /// Что скопировано — показывается плашкой, пока не сменится номер.
+    pub copied: Option<(u64, String)>,
+    /// Номер последнего копирования: гасит плашку только своё ожидание.
+    pub copies: u64,
+    /// Окно «Правило для соединения»; `None` — закрыто.
+    pub rule: Option<FlowRule>,
 }
 
 /// Экран раздельного тоннелирования.
@@ -253,10 +287,16 @@ pub struct SplitTunnelState {
     pub running_apps: Vec<AppInfo>,
     /// Поиск по списку приложений.
     pub app_search: String,
+    /// Открытый раздел окна группы.
+    pub section: RuleSection,
+    /// Поле адресов и портов: поиск по списку и новое значение.
+    pub entry: String,
     /// Открыто системное окно выбора файла (чужое, второе открывать нельзя).
     pub picking: bool,
     /// Почему оно не открылось; показывается в окне правила.
     pub pick_error: Option<String>,
+    /// Итог последнего импорта или экспорта; показывается над таблицей.
+    pub import_report: Option<String>,
 }
 
 /// Экран серверов.

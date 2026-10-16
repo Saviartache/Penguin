@@ -14,6 +14,13 @@ pub(super) const PLIST_PATH: &str = "/Library/LaunchDaemons/com.penguin.vpn.plis
 pub(super) const HELPER_DIR: &str = "/Library/PrivilegedHelperTools/Penguin";
 pub(super) const HELPER_PATH: &str = "/Library/PrivilegedHelperTools/Penguin/penguin";
 
+/// Каталог запроса запуска во владении пользователя окна: запрос не требует прав.
+#[cfg(target_os = "macos")]
+pub(super) const START_DIR: &str = "/Library/Application Support/Penguin";
+/// Пока файл есть, launchd держит задание (`KeepAlive.PathState`); служба убирает его перед
+/// штатным выходом.
+pub(super) const START_REQUEST: &str = "/Library/Application Support/Penguin/start";
+
 /// Описание задания; путь фиксирован, экранировать нечего.
 pub(super) const PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -24,7 +31,10 @@ pub(super) const PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <array><string>/Library/PrivilegedHelperTools/Penguin/penguin</string><string>--service</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
-  <dict><key>SuccessfulExit</key><false/></dict>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+    <key>PathState</key><dict><key>/Library/Application Support/Penguin/start</key><true/></dict>
+  </dict>
   <key>ExitTimeOut</key><integer>10</integer>
   <key>StandardErrorPath</key><string>/var/log/penguin-service.log</string>
 </dict>
@@ -101,6 +111,13 @@ mod tests {
         assert!(PLIST.contains("<key>RunAtLoad</key><true/>"));
         assert!(PLIST.contains("<key>SuccessfulExit</key><false/>"));
         assert!(PLIST.contains("<key>StandardErrorPath</key>"));
+    }
+
+    #[test]
+    fn the_start_request_keeps_the_job_alive() {
+        assert!(PLIST.contains(&format!(
+            "<key>PathState</key><dict><key>{START_REQUEST}</key><true/></dict>"
+        )));
     }
 
     #[test]

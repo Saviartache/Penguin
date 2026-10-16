@@ -3,6 +3,8 @@
 //! Всё, что здесь меняется в системе, надо уметь отменить, в том числе по аварийному пути;
 //! неудавшаяся отмена — громкая [`error::PlatformError::RollbackFailed`].
 
+#[cfg(windows)]
+pub mod appearance;
 pub mod autostart;
 pub mod bind;
 pub mod build;
@@ -19,6 +21,7 @@ pub mod leftovers;
 pub mod privilege;
 pub mod route;
 pub mod service;
+pub mod sockets;
 
 pub use build::stamp as build_stamp;
 pub use dns_settings::DnsOverride as DnsOverrideHandle;

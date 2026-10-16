@@ -28,16 +28,6 @@ pub struct Parsed {
     pub unknown: Vec<String>,
 }
 
-impl Parsed {
-    /// Есть ли хоть одно понятое значение.
-    pub fn is_empty(&self) -> bool {
-        self.networks.is_empty()
-            && self.domains.is_empty()
-            && self.ports.is_empty()
-            && self.ranges.is_empty()
-    }
-}
-
 /// Определяет вид; адрес проверяется раньше домена (`1.2.3.4` проходит под оба).
 pub fn classify(value: &str) -> Option<Kind> {
     let value = value.trim();
@@ -57,16 +47,33 @@ pub fn classify(value: &str) -> Option<Kind> {
     None
 }
 
+/// Значения строки; разделители любые: списки вставляют откуда придётся.
+pub fn tokens(raw: &str) -> impl Iterator<Item = &str> {
+    raw.split([',', ';', ' ', '\t', '\n', '\r'])
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+/// Отделяет порт от адреса: `host:443`, `[2001:db8::1]:443`. Голый IPv6 портом
+/// не считается — двоеточия в нём свои.
+pub fn split_port(token: &str) -> Option<(&str, &str)> {
+    let (host, port) = match token.strip_prefix('[') {
+        Some(rest) => {
+            let (host, tail) = rest.split_once(']')?;
+            (host, tail.strip_prefix(':')?)
+        }
+        None => token
+            .rsplit_once(':')
+            .filter(|(host, _)| !host.contains(':'))?,
+    };
+    (classify(port) == Some(Kind::Port) && !port.contains('-')).then_some((host, port))
+}
+
 /// Разбирает строку; разделители любые: списки вставляют откуда придётся.
 pub fn parse(raw: &str) -> Parsed {
     let mut parsed = Parsed::default();
 
-    for token in raw.split([',', ';', ' ', '\t', '\n', '\r']) {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-
+    for token in tokens(raw) {
         match classify(token) {
             Some(Kind::Network) => parsed.networks.push(token.to_owned()),
             Some(Kind::Domain) => parsed.domains.push(token.to_owned()),
@@ -176,8 +183,24 @@ mod tests {
     }
 
     #[test]
+    fn a_port_is_split_off_an_address() {
+        assert_eq!(
+            split_port("192.168.1.0:30000"),
+            Some(("192.168.1.0", "30000"))
+        );
+        assert_eq!(split_port("google.com:443"), Some(("google.com", "443")));
+        assert_eq!(
+            split_port("[2001:db8::1]:443"),
+            Some(("2001:db8::1", "443"))
+        );
+        assert_eq!(split_port("2001:db8::1"), None);
+        assert_eq!(split_port("google.com"), None);
+        assert_eq!(split_port("google.com:http"), None);
+    }
+
+    #[test]
     fn an_empty_parse_is_empty() {
-        assert!(parse("").is_empty());
-        assert!(!parse("443").is_empty());
+        assert_eq!(parse(""), Parsed::default());
+        assert_eq!(parse("443").ports, [443]);
     }
 }

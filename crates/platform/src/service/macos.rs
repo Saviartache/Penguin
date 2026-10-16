@@ -83,10 +83,10 @@ pub fn registered_executable() -> PlatformResult<Option<PathBuf>> {
     }
 }
 
-/// Та ли сборка зарегистрирована, что задаёт вопрос.
+/// Та ли сборка зарегистрирована, что задаёт вопрос; прежнее описание тоже повод переставить.
 pub(super) fn runs_current_build() -> bool {
-    let registered = registered_executable().ok().flatten();
-    stage::runs_current_build(registered.as_deref(), HELPER_PATH)
+    std::fs::read_to_string(PLIST_PATH).is_ok_and(|text| text == PLIST)
+        && stage::runs_current_build(Some(Path::new(HELPER_PATH)), HELPER_PATH)
 }
 
 /// Загружает задание, пережидая отказы launchd.

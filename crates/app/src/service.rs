@@ -17,7 +17,7 @@ pub(crate) fn run(
     } else {
         false
     };
-    dispatch(command, access_changed)
+    dispatch(command, access_changed, controller_uid)
 }
 
 pub(crate) fn prepares_service(command: &ServiceCommand) -> bool {
@@ -30,25 +30,45 @@ pub(crate) fn prepares_service(command: &ServiceCommand) -> bool {
     )
 }
 
-fn dispatch(command: &ServiceCommand, access_changed: bool) -> Result<()> {
+fn dispatch(
+    command: &ServiceCommand,
+    access_changed: bool,
+    controller_uid: Option<u32>,
+) -> Result<()> {
     match command {
-        ServiceCommand::Ensure => ensure(access_changed),
-        ServiceCommand::Install => penguin_daemon::install(),
+        ServiceCommand::Ensure => ensure(access_changed, controller_uid),
+        ServiceCommand::Install => {
+            penguin_daemon::install()?;
+            allow_user_start(controller_uid)
+        }
         ServiceCommand::Uninstall => penguin_daemon::uninstall(),
-        ServiceCommand::Restart => restart(),
-        ServiceCommand::Start => start(access_changed),
+        ServiceCommand::Restart => {
+            allow_user_start(controller_uid)?;
+            restart()
+        }
+        ServiceCommand::Start => {
+            allow_user_start(controller_uid)?;
+            start(access_changed)
+        }
         ServiceCommand::Stop => service::stop().context("could not stop service"),
         ServiceCommand::Status => penguin_daemon::status(),
     }
 }
 
-fn ensure(access_changed: bool) -> Result<()> {
+/// The desktop user starts the service later without a password prompt.
+fn allow_user_start(controller_uid: Option<u32>) -> Result<()> {
+    service::user_start::allow(controller_uid)
+        .context("could not allow the desktop user to start the service")
+}
+
+fn ensure(access_changed: bool, controller_uid: Option<u32>) -> Result<()> {
     let status = service::status().context("could not query service state")?;
     // Repair by rewriting, never remove first: a half-done reinstall leaves no service.
     let registered = status != ServiceStatus::NotInstalled && service::registered_verbatim();
     if !registered {
         penguin_daemon::install()?;
     }
+    allow_user_start(controller_uid)?;
     if status == ServiceStatus::Running {
         // New registration or controller needs a restart; else give it time to initialize.
         if !registered || access_changed || penguin_daemon::wait_until_ready().is_err() {

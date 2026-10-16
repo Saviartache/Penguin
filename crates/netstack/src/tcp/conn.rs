@@ -12,6 +12,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
@@ -32,6 +33,8 @@ pub struct TcpConnection {
     pending: Bytes,
     /// Будит цикл стека, когда у соединения появилась работа.
     wake: Option<Arc<Notify>>,
+    /// Оборвать сбросом (`RST`), а не закрыть (`FIN`).
+    aborted: Arc<AtomicBool>,
     source: SocketAddr,
     destination: SocketAddr,
 }
@@ -42,6 +45,8 @@ pub struct ConnectionEnds {
     pub to_engine: mpsc::Sender<Bytes>,
     /// Откуда цикл забирает данные для приложения.
     pub from_engine: mpsc::Receiver<Bytes>,
+    /// Движок оборвал соединение: стороне сокета уходит `RST`.
+    pub aborted: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for TcpConnection {
@@ -58,12 +63,14 @@ impl TcpConnection {
     pub fn new(source: SocketAddr, destination: SocketAddr) -> (Self, ConnectionEnds) {
         let (to_engine, incoming) = mpsc::channel(QUEUE_DEPTH);
         let (to_app, from_engine) = mpsc::channel(QUEUE_DEPTH);
+        let aborted = Arc::new(AtomicBool::new(false));
 
         let connection = Self {
             incoming,
             outgoing: PollSender::new(to_app),
             pending: Bytes::new(),
             wake: None,
+            aborted: Arc::clone(&aborted),
             source,
             destination,
         };
@@ -72,8 +79,16 @@ impl TcpConnection {
             ConnectionEnds {
                 to_engine,
                 from_engine,
+                aborted,
             },
         )
+    }
+
+    /// Обрывает соединение сбросом: приложение сразу видит обрыв и открывает новое, а не
+    /// принимает недописанный ответ за целый.
+    pub fn abort(self) {
+        self.aborted.store(true, Ordering::Release);
+        // Цикл будит `Drop`.
     }
 
     /// Подключает пробуждение цикла стека.
@@ -267,6 +282,16 @@ mod tests {
         drop(ends);
 
         assert!(connection.write_all(b"x").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn abort_is_visible_to_the_loop() {
+        let (source, destination) = addresses();
+        let (connection, ends) = TcpConnection::new(source, destination);
+        assert!(!ends.aborted.load(Ordering::Acquire));
+
+        connection.abort();
+        assert!(ends.aborted.load(Ordering::Acquire));
     }
 
     #[test]

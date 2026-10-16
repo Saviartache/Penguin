@@ -1,6 +1,7 @@
 //! Разбор сообщений по областям; работа — в файлах рядом.
 
 pub mod connection;
+pub mod logs;
 pub mod profiles;
 pub mod rules;
 pub mod settings;
@@ -34,6 +35,7 @@ pub fn handle(app: &mut App, message: Message) -> Task<Message> {
         Message::Home(home) => connection::handle_home(app, home),
         Message::Servers(servers) => profiles::handle(app, servers),
         Message::SplitTunnel(split) => rules::handle(app, split),
+        Message::Logs(logs) => logs::handle(app, logs),
         Message::Settings(settings) => settings::handle(app, settings),
     }
 }
@@ -83,9 +85,9 @@ fn close(app: &mut App) -> Task<Message> {
 
 /// Что окно делает после открытия: сначала служба, потом вопросы к ней.
 ///
-/// Права нужны один раз: служба ставится с автозапуском.
+/// Права нужны один раз: служба ставится с разрешением запускать её без них.
 pub fn bootstrap() -> Task<Message> {
-    Task::perform(connection::ensure_at_startup(), |ready| {
+    Task::perform(connection::bring_up_service(), |ready| {
         Message::Home(HomeMessage::ServiceChecked(ready))
     })
 }

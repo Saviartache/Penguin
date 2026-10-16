@@ -1,7 +1,10 @@
 //! Модальное окно группы: имя, что забирает, куда отправляет.
 //!
-//! Разделы идут сверху вниз и читаются фразой: «приложения, и сайты, и порты —
-//! туда-то»; пустой раздел — «любые». Адреса и порты — строками, разбор по виду.
+//! Что забирает — три раздела вкладками: «приложения, и сайты, и порты»; на
+//! вкладке — сколько в разделе значений, пустой раздел — «любые». Вкладки, а
+//! не три списка подряд: в группе бывают сотни доменов, и строкой они не
+//! влезают, а тремя списками — не влезает окно.
+//!
 //! Приложения приходят от службы (у окна нет прав узнать путь чужого процесса),
 //! но это только запущенное, поэтому есть выбор файла; выбранное встаёт в список
 //! первой строкой.
@@ -9,13 +12,14 @@
 use iced::Element;
 use iced::theme::Palette;
 use penguin_ipc::schema::AppInfo;
-use uikit::layout::{Flex, gap, grow};
+use uikit::layout::{Flex, gap};
 use uikit::tokens::type_scale;
-use uikit::widgets::{ButtonVariant, Checkbox, Modal, TextInput};
+use uikit::widgets::{Button, ButtonVariant, Checkbox, Modal, TextInput, modal};
 
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
-use crate::forms::rule::{Action, Draft};
+use crate::forms::rule::{Action, Draft, Section};
+use crate::screens::rules::values;
 use crate::ui;
 
 /// Ширина окна — как у окна профиля.
@@ -32,32 +36,16 @@ const PATH_WIDTH: usize = 52;
 pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     let strings = crate::i18n::s();
     let palette = &state.palette;
+    let open = state.split_tunnel.section;
 
-    let addresses = Flex::row()
-        .push_sized(
-            section(
-                palette,
-                strings.hosts_section,
-                TextInput::new(strings.hosts_hint, &draft.hosts)
-                    .on_input(|value| {
-                        Message::SplitTunnel(SplitTunnelMessage::DraftHostsChanged(value))
-                    })
-                    .build(),
-            ),
-            grow(3),
-        )
-        .push_sized(
-            section(
-                palette,
-                strings.ports_section,
-                TextInput::new(strings.ports_hint, &draft.ports)
-                    .on_input(|value| {
-                        Message::SplitTunnel(SplitTunnelMessage::DraftPortsChanged(value))
-                    })
-                    .build(),
-            ),
-            grow(1),
-        )
+    let body = match open {
+        Section::Apps => apps(state, draft),
+        Section::Hosts | Section::Ports => values::view(state, draft, open, LIST_HEIGHT),
+    };
+    let catches = Flex::col()
+        .push_auto(tabs(draft, open))
+        .push_auto(ui::faint(palette, strings.sections_hint, type_scale::MICRO))
+        .push_auto(body)
         .gap(gap::SM)
         .build();
 
@@ -67,59 +55,80 @@ pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
                 .on_input(|value| Message::SplitTunnel(SplitTunnelMessage::DraftNameChanged(value)))
                 .build(),
         )
-        .push_auto(section(palette, strings.apps_section, apps(state, draft)))
-        .push_auto(addresses)
-        .push_auto(section(palette, strings.action, actions(draft.action)))
-        .push_auto(problem(state, draft))
+        .push_auto(catches)
+        .push_auto(section(palette, strings.action, actions(draft)))
+        .push_auto(problem(state))
         .gap(gap::MD)
         .build();
 
-    let (title, answer) = match draft.index {
-        Some(_) => (strings.edit_rule, strings.save),
-        None => (strings.new_rule, strings.add_rule),
+    let title = match draft.index {
+        Some(_) => strings.edit_rule,
+        None => strings.new_rule,
     };
 
     // `Esc` и нажатие мимо панели — «Отмена».
-    let mut modal = Modal::new(form)
+    Modal::new(form)
         .title(title)
         .max_width(WIDTH)
         .on_close(Message::SplitTunnel(SplitTunnelMessage::EditorClosed))
-        .on_backdrop(Message::SplitTunnel(SplitTunnelMessage::EditorClosed));
-
-    // Без условий группа совпала бы со всем подряд — ответа нет.
-    if !draft.is_empty() {
-        modal = modal.action(answer, Message::SplitTunnel(SplitTunnelMessage::DraftSaved));
-    }
-
-    modal.build().into()
+        .on_backdrop(Message::SplitTunnel(SplitTunnelMessage::EditorClosed))
+        .build()
+        .into()
 }
 
-/// Подпись раздела над его полем; у разделов условия — напоминание, что пусто
-/// значит «любые».
+/// Подпись раздела над его полем.
 fn section<'a>(
     palette: &Palette,
     title: &'a str,
     body: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let strings = crate::i18n::s();
-    let label = if title == strings.action {
-        title.to_owned()
-    } else {
-        format!("{title} · {}", strings.empty_means_any)
-    };
-
     Flex::col()
-        .push_auto(ui::faint(palette, label, type_scale::MICRO))
+        .push_auto(ui::faint(palette, title, type_scale::MICRO))
         .push_auto(body)
         .gap(gap::XS)
         .build()
 }
 
-/// Куда отправить: три кнопки, выбранная — акцентом.
-fn actions<'a>(current: Action) -> Element<'a, Message> {
+/// Вкладки разделов: открытый — акцентом, на каждой — сколько в нём значений.
+fn tabs<'a>(draft: &Draft, open: Section) -> Element<'a, Message> {
+    let mut row = Flex::row();
+    for section in Section::ALL {
+        let variant = if section == open {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Secondary
+        };
+        // Подпись собирается здесь же, а `ui::button` берёт её взаймы.
+        let label = iced::widget::text(tab_label(draft, section)).size(type_scale::BODY);
+        row = row.push_auto(Button::new(label).variant(variant).hug().on_press(
+            Message::SplitTunnel(SplitTunnelMessage::DraftSectionSelected(section)),
+        ));
+    }
+    row.gap(gap::SM).build()
+}
+
+/// Подпись вкладки: имя раздела и число значений, пустой — «любые».
+pub fn tab_label(draft: &Draft, section: Section) -> String {
+    let strings = crate::i18n::s();
+    let name = match section {
+        Section::Apps => strings.apps_section,
+        Section::Hosts => strings.hosts_section,
+        Section::Ports => strings.ports_section,
+    };
+    match draft.values(section).len() {
+        0 => format!("{name} · {}", strings.empty_means_any),
+        count => format!("{name} · {count}"),
+    }
+}
+
+/// Куда отправить: три кнопки, выбранная — акцентом; справа ответ окна.
+///
+/// Ответ не в подвале `Modal`: появляясь, подвал не влезал в окно и сминал
+/// форму. Здесь он стоит всегда, и высота формы от выбора не меняется.
+fn actions<'a>(draft: &Draft) -> Element<'a, Message> {
     let mut row = Flex::row();
     for action in Action::ALL {
-        let variant = if action == current {
+        let variant = if action == draft.action {
             ButtonVariant::Primary
         } else {
             ButtonVariant::Secondary
@@ -130,7 +139,23 @@ fn actions<'a>(current: Action) -> Element<'a, Message> {
             )),
         );
     }
-    row.gap(gap::SM).build()
+
+    let strings = crate::i18n::s();
+    let label = match draft.index {
+        Some(_) => strings.save,
+        None => strings.add_rule,
+    };
+    // Без условий группа совпала бы со всем подряд — ответа нет.
+    let mut answer = ui::button(ButtonVariant::Primary, label);
+    if !draft.is_empty() {
+        answer = answer.on_press(Message::SplitTunnel(SplitTunnelMessage::DraftSaved));
+    }
+
+    row.push(ui::spring())
+        .push_auto(modal::line(">"))
+        .push_auto(answer)
+        .gap(gap::SM)
+        .build()
 }
 
 /// Список приложений с отметками и кнопкой выбора файла.
@@ -204,34 +229,12 @@ fn row<'a>(palette: &Palette, app: &AppInfo, checked: bool) -> Element<'a, Messa
         .build()
 }
 
-/// Строка под формой: причина сразу, не по нажатию. Непонятое молча выбрасывать
-/// нельзя, неоткрывшееся окно выбора иначе делает кнопку «сломанной».
-fn problem<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
-    let palette = &state.palette;
-    let mut lines: Vec<Element<'a, Message>> = Vec::new();
-
-    if let Some(reason) = state.split_tunnel.pick_error.as_ref() {
-        lines.push(ui::muted(palette, reason, type_scale::MICRO));
+/// Строка под формой: неоткрывшееся окно выбора иначе делает кнопку «сломанной».
+fn problem(state: &State) -> Element<'_, Message> {
+    match state.split_tunnel.pick_error.as_ref() {
+        Some(reason) => ui::muted(&state.palette, reason, type_scale::MICRO),
+        None => ui::spring(),
     }
-
-    let unknown = draft.unknown();
-    if !unknown.is_empty() {
-        lines.push(ui::muted(
-            palette,
-            format!(
-                "{}: {}",
-                crate::i18n::s().not_recognised,
-                unknown.join(", ")
-            ),
-            type_scale::MICRO,
-        ));
-    }
-
-    if lines.is_empty() {
-        return ui::spring();
-    }
-
-    Flex::col().extend(lines).gap(gap::XS).build()
 }
 
 /// Отмеченные приложения, которых нет среди запущенных: стоят первыми и снимаются
@@ -372,16 +375,6 @@ mod tests {
             ..Draft::default()
         };
         assert!(draft.is_empty());
-        let _ = view(&State::default(), &draft);
-    }
-
-    #[test]
-    fn unrecognised_input_is_shown() {
-        let draft = Draft {
-            hosts: "example.com ???".to_owned(),
-            ..Draft::default()
-        };
-        assert_eq!(draft.unknown(), ["???"]);
         let _ = view(&State::default(), &draft);
     }
 

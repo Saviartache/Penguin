@@ -21,6 +21,7 @@ pub mod pipeline;
 pub mod sniff;
 pub mod state;
 pub mod supervisor;
+pub mod takeover;
 pub mod tunnel;
 
 pub use direct::{DirectOutbound, SystemDialer};

@@ -16,6 +16,8 @@
 //! ```
 
 pub mod copy;
+pub mod live;
+pub mod revocable;
 pub mod tcp;
 pub mod udp;
 
@@ -39,6 +41,8 @@ use crate::events::{Event, EventBus};
 use crate::metrics::counters::Metrics;
 use crate::outbounds::OutboundPool;
 use crate::pipeline::copy::Metered;
+use crate::pipeline::live::LiveFlows;
+use crate::pipeline::revocable::{RevocableDatagram, RevocableStream};
 
 /// Сборка клиента: маршрутизатор, направления, учёт.
 pub struct Pipeline {
@@ -46,6 +50,8 @@ pub struct Pipeline {
     outbounds: Arc<OutboundPool>,
     processes: Arc<dyn FlowOwnerResolver>,
     metrics: Arc<Metrics>,
+    /// Живые соединения: после смены правил обрываются те, чьё решение изменилось.
+    flows: Arc<LiveFlows>,
     /// Искать ли владельца соединения (системный вызов на каждое).
     resolve_process: bool,
     /// Шина решений; в проверках её нет.
@@ -74,9 +80,16 @@ impl Pipeline {
             outbounds,
             processes,
             metrics,
+            flows: LiveFlows::new(),
             resolve_process: true,
             events: None,
         }
+    }
+
+    /// Общий с движком реестр живых соединений.
+    pub fn with_flows(mut self, flows: Arc<LiveFlows>) -> Self {
+        self.flows = flows;
+        self
     }
 
     /// Куда сообщать о решениях по соединениям.
@@ -134,6 +147,7 @@ impl Pipeline {
     /// Сообщает о решении одной строкой — в журнал и в окно.
     fn announce(&self, request: &InboundRequest, flow: &FlowContext, verdict: &Verdict) {
         let process = flow.process.as_ref().map(|owner| owner.name.to_string());
+        let process_path = flow.process.as_ref().map(|owner| owner.path.to_string());
 
         tracing::debug!(
             target = %request.target,
@@ -147,6 +161,7 @@ impl Pipeline {
             events.emit(Event::decision(
                 request.target.to_string(),
                 process,
+                process_path,
                 verdict.decision.to_string(),
                 Self::rule_of(&verdict.reason),
             ));
@@ -190,11 +205,9 @@ impl InboundHandler for Pipeline {
 
         let stream = outbound.connect_tcp(&request.target).await?;
         let id = Self::outbound_id(&verdict.decision);
-        Ok(Box::new(Metered::new(
-            stream,
-            Arc::clone(&self.metrics),
-            id,
-        )))
+        let metered = Metered::new(stream, Arc::clone(&self.metrics), id);
+        let lease = self.flows.register(flow, verdict.decision);
+        Ok(Box::new(RevocableStream::new(metered, lease)))
     }
 
     async fn open_udp(
@@ -213,15 +226,17 @@ impl InboundHandler for Pipeline {
         };
 
         // Иначе датаграммы (и DNS) терялись бы молча.
-        if !outbound.capabilities().udp {
+        let channel = if outbound.capabilities().udp {
+            outbound.bind_udp().await?
+        } else {
             tracing::warn!(
                 outbound = %outbound.id(),
                 "направление не поддерживает UDP — датаграммы пойдут напрямую"
             );
-            return self.outbounds.direct().bind_udp().await;
-        }
-
-        outbound.bind_udp().await
+            self.outbounds.direct().bind_udp().await?
+        };
+        let lease = self.flows.register(flow, verdict.decision);
+        Ok(Box::new(RevocableDatagram::new(channel, lease)))
     }
 }
 
@@ -306,6 +321,7 @@ mod tests {
             outbounds: Arc::clone(&pipeline.outbounds),
             processes: Arc::new(NoResolver),
             metrics: Metrics::new(),
+            flows: LiveFlows::new(),
             resolve_process: false,
             events: None,
         };

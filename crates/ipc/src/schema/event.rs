@@ -41,6 +41,9 @@ pub enum Event {
         /// Какое приложение.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         process: Option<String>,
+        /// Полный путь к приложению; старая служба его не присылает.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process_path: Option<String>,
         /// Что решено.
         decision: String,
         /// Сработавшее правило.
@@ -89,6 +92,7 @@ mod tests {
             Event::Decision {
                 target: "example.com:443".to_owned(),
                 process: Some("chrome.exe".to_owned()),
+                process_path: Some("c:/chrome/chrome.exe".to_owned()),
                 decision: "напрямую".to_owned(),
                 rule: Some("games".to_owned()),
             },
@@ -110,6 +114,7 @@ mod tests {
             event,
             Event::Decision {
                 process: None,
+                process_path: None,
                 rule: None,
                 ..
             }

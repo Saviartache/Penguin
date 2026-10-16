@@ -46,6 +46,8 @@ pub enum Event {
         target: String,
         /// Какое приложение.
         process: Option<String>,
+        /// Полный путь к нему: по нему правило узнаёт приложение.
+        process_path: Option<String>,
         /// Что решено.
         decision: String,
         /// Сработавшее правило, если оно было.
@@ -78,12 +80,14 @@ impl Event {
     pub fn decision(
         target: impl Into<String>,
         process: Option<String>,
+        process_path: Option<String>,
         decision: impl Into<String>,
         rule: Option<RuleId>,
     ) -> Self {
         Self::Decision {
             target: target.into(),
             process,
+            process_path,
             decision: decision.into(),
             rule: rule.map(|id| id.to_string()),
         }
@@ -187,6 +191,7 @@ mod tests {
         let event = Event::decision(
             "example.com:443",
             Some("chrome.exe".to_owned()),
+            Some("c:/chrome/chrome.exe".to_owned()),
             "напрямую",
             Some(RuleId::new("r1")),
         );

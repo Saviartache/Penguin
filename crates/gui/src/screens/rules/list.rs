@@ -13,29 +13,31 @@ use iced::widget::button;
 use iced::{Alignment, Element, Length};
 use penguin_config::schema::rule::RuleConfig;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
-use uikit::tokens::ink;
+use uikit::tokens::{ink, type_scale};
 use uikit::widgets::ButtonVariant;
 
 use crate::app::TAB_GAP;
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
 use crate::forms::rule;
-use crate::screens::rules::describe::{describe_action, describe_condition};
+use crate::screens::rules::describe::{condition_values, describe_action, describe_condition};
 use crate::screens::rules::mode;
 use crate::screens::table::{
     self, BUTTON_HEIGHT, CELL, ROW_GAP, ROW_PADDING, cell, glyphs, lpad, pad,
 };
 use crate::ui;
 
-/// Ширина столбца имени в знаках; длинное режется, а не двигает условие.
-const NAME_WIDTH: usize = 20;
+/// Ширина столбца имени в знаках: имя и есть то, по чему группу узнают.
+/// Длинное режется, а не двигает условие. Условие — резиновое: забирает всё
+/// место между именем и действием.
+const NAME_WIDTH: usize = 26;
 
-/// Ширина столбца условия — самого широкого; уже, чем у серверов: справа кнопки
-/// порядка.
-const CONDITION_WIDTH: usize = 36;
+/// Ширина столбца действия: «через тоннель» и «заблокировать» целиком.
+const ACTION_WIDTH: usize = 14;
 
-/// Ширина столбца действия: «в тоннель -> office» не должно ломать таблицу.
-const ACTION_WIDTH: usize = 20;
+/// Зазор между столбцами в знаках: в один знак соседние столбцы читаются
+/// одной фразой.
+const COLUMN_GAP: f32 = 2.0;
 
 /// Ширина переключателя `[ВЫКЛ]` в точках.
 const TOGGLE_WIDTH: f32 = 56.0;
@@ -52,8 +54,8 @@ const UP: &str = "↑";
 /// Ниже.
 const DOWN: &str = "↓";
 
-/// Удалить.
-const REMOVE: &str = "✕";
+/// Удалить; `✕` в ZedMono нет, запасной шрифт шире ячейки.
+const REMOVE: &str = "×";
 
 /// Собирает вкладку целиком.
 pub fn view(state: &State) -> Element<'_, Message> {
@@ -79,8 +81,30 @@ fn toolbar(state: &State) -> Element<'_, Message> {
             ui::button(ButtonVariant::Secondary, crate::i18n::s().probe_rule)
                 .h(px(BUTTON_HEIGHT))
                 .on_press(Message::SplitTunnel(SplitTunnelMessage::ProbeOpened)),
-        )
-        .push(ui::spring());
+        );
+
+    // Пока системное окно открыто, второе такое же не нужно.
+    for (label, message) in [
+        (
+            crate::i18n::s().import_rules,
+            SplitTunnelMessage::ImportRequested,
+        ),
+        (
+            crate::i18n::s().export_rules,
+            SplitTunnelMessage::ExportRequested,
+        ),
+    ] {
+        let mut button = ui::button(ButtonVariant::Secondary, label).h(px(BUTTON_HEIGHT));
+        if !state.split_tunnel.picking {
+            button = button.on_press(Message::SplitTunnel(message));
+        }
+        row = row.push_auto(button);
+    }
+
+    if let Some(report) = state.split_tunnel.import_report.as_deref() {
+        row = row.push_auto(ui::muted(&state.palette, report, type_scale::MICRO));
+    }
+    row = row.push(ui::spring());
 
     if state.dirty {
         row = row.push_auto(
@@ -106,7 +130,6 @@ fn panel(state: &State) -> Element<'_, Message> {
             .w(Size::FILL)
             .h(Size::FILL)
             .push(rows(state))
-            .push_auto(table::divider(&state.palette))
             .push_auto(mode::view(state))
             .gap(gap::XS)
             .build(),
@@ -121,7 +144,7 @@ fn head(state: &State) -> Element<'_, Message> {
 
     let titles = columns(
         glyphs(pad(strings.rule, NAME_WIDTH), dim),
-        glyphs(pad(strings.condition, CONDITION_WIDTH), dim),
+        glyphs(strings.condition, dim),
         None,
         glyphs(lpad(strings.action, ACTION_WIDTH), dim),
     );
@@ -176,8 +199,11 @@ fn found(rule: &RuleConfig, query: &str) -> bool {
     }
     let condition = describe_condition(&rule.when);
     let action = describe_action(&rule.action);
+    let values = condition_values(&rule.when);
 
-    table::matches(query, &[&rule.name, &rule.id, &condition, &action])
+    let mut fields = vec![rule.name.as_str(), &rule.id, &condition, &action];
+    fields.extend(values.iter().map(String::as_str));
+    table::matches(query, &fields)
 }
 
 /// Строка группы: щелчок открывает правку, справа — вкл/выкл, порядок, удаление.
@@ -216,10 +242,7 @@ fn row<'a>(
 
     let cells = columns(
         glyphs(cell(name, NAME_WIDTH), name_ink),
-        glyphs(
-            cell(&describe_condition(&rule.when), CONDITION_WIDTH),
-            condition_ink,
-        ),
+        glyphs(describe_condition(&rule.when), condition_ink),
         off,
         glyphs(
             lpad(&table::clip(&action, ACTION_WIDTH), ACTION_WIDTH),
@@ -284,19 +307,20 @@ fn columns<'a, Message: 'a>(
     off: Option<Element<'a, Message>>,
     action: Element<'a, Message>,
 ) -> Element<'a, Message> {
-    let mut line = Flex::row()
-        .w(Size::FILL)
-        .push_auto(name)
-        .push_auto(condition);
+    // Условие забирает всё свободное место; не влезшее срезается краем, а не
+    // наезжает на действие.
+    let condition = iced::widget::container(condition)
+        .width(Length::Fill)
+        .clip(true);
+    let mut line = Flex::row().w(Size::FILL).push_auto(name).push(condition);
 
-    // «Выкл» стоит до распорки, иначе действие съезжает на таких строках.
+    // «Выкл» — перед действием: столбцы слева от него не сдвигаются.
     if let Some(off) = off {
         line = line.push_auto(off);
     }
 
-    line.push(ui::spring())
-        .push_auto(action)
-        .gap(CELL)
+    line.push_auto(action)
+        .gap(CELL * COLUMN_GAP)
         .align(Alignment::Center)
         .build()
 }
@@ -371,13 +395,13 @@ mod tests {
         let dim = Color::WHITE;
         let head: Element<'_, Message> = columns(
             glyphs(pad("ПРАВИЛО", NAME_WIDTH), dim),
-            glyphs(pad("УСЛОВИЕ", CONDITION_WIDTH), dim),
+            glyphs("УСЛОВИЕ", dim),
             None,
             glyphs(lpad("ДЕЙСТВИЕ", ACTION_WIDTH), dim),
         );
         let row: Element<'_, Message> = columns(
             glyphs(pad("Игры мимо", NAME_WIDTH), dim),
-            glyphs(pad("приложение: steam.exe", CONDITION_WIDTH), dim),
+            glyphs("приложения: 1, домены и поддомены: 39", dim),
             None,
             glyphs(lpad("напрямую", ACTION_WIDTH), dim),
         );

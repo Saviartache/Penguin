@@ -1,9 +1,10 @@
 //! Сообщения верхнего уровня; каждый экран приносит своё вложенное.
 
+use penguin_config::import::Imported;
 use penguin_config::schema::routing::TunnelMode;
 use penguin_ipc::schema::{Event, Response};
 
-use crate::forms::rule::Action as DraftAction;
+use crate::forms::rule::{Action as DraftAction, Section as DraftSection};
 
 /// Что произошло в интерфейсе.
 #[derive(Debug, Clone)]
@@ -26,8 +27,33 @@ pub enum Message {
     Servers(ServersMessage),
     /// Раздельное тоннелирование.
     SplitTunnel(SplitTunnelMessage),
+    /// Журнал.
+    Logs(LogsMessage),
     /// Настройки.
     Settings(SettingsMessage),
+}
+
+/// Журнал: копирование строки и правило по соединению.
+#[derive(Debug, Clone)]
+pub enum LogsMessage {
+    /// Нажата запись: номер и кнопка мыши.
+    LinePressed(usize, iced::mouse::Button),
+    /// Плашка «скопировано» отстояла своё; номер — чьё ожидание кончилось.
+    CopiedShown(u64),
+    /// Ловить адрес.
+    CatchHost(bool),
+    /// Ширина адреса — номер варианта.
+    WidthSelected(usize),
+    /// Ловить приложение.
+    CatchApp(bool),
+    /// Действие новой группы.
+    ActionSelected(DraftAction),
+    /// Куда вписать: группа или `None` — новая.
+    TargetSelected(Option<usize>),
+    /// Добавить и сохранить.
+    RuleSaved,
+    /// Закрыть окно.
+    RuleClosed,
 }
 
 /// Экраны раскрытой панели; главный экран — окно в покое, не вкладка.
@@ -105,9 +131,7 @@ pub enum IpcMessage {
 pub enum HomeMessage {
     /// Нажата кнопка подключения.
     ToggleConnection,
-    /// Служба поднята по нажатию «Подключить» — дальше подключаться.
-    ServiceReady(ServiceOutcome),
-    /// Служба проверена при открытии окна — только чтобы было у кого спросить.
+    /// Служба проверена или поднята (при открытии окна или кнопкой «Запустить службу»).
     ServiceChecked(ServiceOutcome),
 }
 
@@ -192,14 +216,26 @@ pub enum SplitTunnelMessage {
     AppPicked(Result<Option<String>, String>),
     /// Изменено имя нового правила.
     DraftNameChanged(String),
-    /// Изменена строка адресов группы.
-    DraftHostsChanged(String),
-    /// Изменена строка портов группы.
-    DraftPortsChanged(String),
+    /// Открыт раздел группы.
+    DraftSectionSelected(DraftSection),
+    /// Изменено поле адресов и портов: и поиск по списку, и новое значение.
+    DraftEntryChanged(String),
+    /// Enter или «Добавить»: понятое из поля уходит в разделы.
+    DraftEntrySubmitted,
+    /// Убрать адрес или порт.
+    DraftValueRemoved(String),
     /// Выбрано действие группы.
     DraftActionSelected(DraftAction),
     /// Группа добавлена в список или заменила прежнюю.
     DraftSaved,
+    /// Показать окно выбора списка правил.
+    ImportRequested,
+    /// Разобранный список; `Ok(None)` — окно закрыто без выбора.
+    Imported(Result<Option<Imported>, String>),
+    /// Показать окно сохранения списка правил.
+    ExportRequested,
+    /// Итог выгрузки строкой для человека; `Ok(None)` — окно закрыто без выбора.
+    Exported(Result<Option<String>, String>),
     /// Сохранить правила.
     Save,
 }

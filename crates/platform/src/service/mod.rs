@@ -19,6 +19,7 @@ mod launchd;
 mod stage;
 #[cfg(any(target_os = "linux", test))]
 mod systemd;
+pub mod user_start;
 
 use std::path::Path;
 

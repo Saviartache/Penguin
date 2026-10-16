@@ -10,6 +10,14 @@ use super::table::Entry;
 
 /// Перекладывает данные в обе стороны за один оборот цикла.
 pub fn pump_data(socket: &mut tcp::Socket<'_>, entry: &mut Entry) {
+    if entry
+        .ends
+        .aborted
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        socket.abort();
+        return;
+    }
     from_socket(socket, entry);
     to_socket(socket, entry);
 }

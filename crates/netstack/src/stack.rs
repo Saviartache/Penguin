@@ -309,6 +309,8 @@ fn pump_sockets(
 
     for (handle, entry) in connections.iter_mut() {
         let socket = sockets.get_mut::<tcp::Socket>(handle);
+        // Закрытый здесь же (сброс движком) живёт до опроса: `RST` уходит из сокета.
+        let was_open = socket.is_open();
 
         if entry.pending.is_some()
             && socket.may_send()
@@ -331,7 +333,7 @@ fn pump_sockets(
 
         pump_data(socket, entry);
 
-        if !socket.is_open() {
+        if !was_open {
             dead.push(handle);
         }
     }
@@ -530,6 +532,52 @@ mod tests {
             harness.inner.device.take_tx().is_some(),
             "стек не ответил на SYN — пакет отброшен, тоннель молчит"
         );
+    }
+
+    #[test]
+    fn a_connection_opened_before_the_tunnel_is_reset_on_its_next_packet() {
+        // Так переходят в тоннель старые соединения там, где ОС не умеет сбросить их сама (macOS).
+        use smoltcp::wire::{Ipv4Packet, TcpControl, TcpPacket, TcpSeqNumber};
+
+        let mut harness = Harness::new(StackConfig::default());
+        harness.feed(&segment(
+            "192.168.1.10:51000".parse().expect("адрес"),
+            "93.184.216.34:443".parse().expect("адрес"),
+            TcpControl::None,
+            TcpSeqNumber(1000),
+            Some(TcpSeqNumber(5000)),
+        ));
+
+        let packet = harness.inner.device.take_tx().expect("стек промолчал");
+        let ip = Ipv4Packet::new_checked(&packet[..]).expect("IPv4");
+        let tcp = TcpPacket::new_checked(ip.payload()).expect("TCP");
+        assert!(tcp.rst(), "старое соединение не сброшено");
+        assert_eq!(
+            tcp.seq_number(),
+            TcpSeqNumber(5000),
+            "сброс вне окна ОС не примет"
+        );
+    }
+
+    #[test]
+    fn an_aborted_connection_answers_the_application_with_a_reset() {
+        use smoltcp::wire::{Ipv4Packet, TcpPacket};
+
+        let mut harness = Harness::new(StackConfig::default());
+        let connection = harness.establish(
+            "198.18.0.7:51000".parse().expect("адрес"),
+            "93.184.216.34:443".parse().expect("адрес"),
+        );
+        while harness.inner.device.take_tx().is_some() {}
+
+        connection.abort();
+        harness.pump();
+        harness.poll();
+
+        let packet = harness.inner.device.take_tx().expect("стек промолчал");
+        let ip = Ipv4Packet::new_checked(&packet[..]).expect("IPv4");
+        let tcp = TcpPacket::new_checked(ip.payload()).expect("TCP");
+        assert!(tcp.rst(), "приложение получило не сброс");
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ pub mod editor;
 pub mod list;
 pub mod mode;
 pub mod probe;
+pub mod values;
 
 use iced::Element;
 

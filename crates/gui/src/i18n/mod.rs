@@ -64,6 +64,8 @@ pub struct Strings {
     pub service_stopping: &'static str,
 
     // --- действия ---
+    /// Запустить службу, которая не отвечает.
+    pub start_service: &'static str,
     /// Включить тоннель.
     pub connect: &'static str,
     /// Выключить тоннель.
@@ -312,19 +314,27 @@ pub struct Strings {
     pub ports_hint: &'static str,
     /// Пустой раздел не сужает группу.
     pub empty_means_any: &'static str,
+    /// Разделы группы значат «и».
+    pub sections_hint: &'static str,
+    /// Пометка `=домен` в списке адресов.
+    pub host_exact: &'static str,
+    /// Пометка `*слово*` в списке адресов.
+    pub host_keyword: &'static str,
+    /// В разделе адресов или портов пусто.
+    pub values_empty: &'static str,
+    /// Набранного в разделе нет.
+    pub values_not_found: &'static str,
     /// Добавить правило.
     pub add_rule: &'static str,
     /// Новое правило.
     pub new_rule: &'static str,
     /// Заголовок окна правки группы.
     pub edit_rule: &'static str,
-    /// Не удалось опознать.
-    pub not_recognised: &'static str,
     /// Имя правила, которое не назвали.
     pub unnamed_rule: &'static str,
     /// Действие «мимо тоннеля».
     pub action_direct: &'static str,
-    /// Действие «в тоннель».
+    /// Действие «через тоннель».
     pub action_tunnel: &'static str,
     /// Действие «оборвать».
     pub action_block: &'static str,
@@ -342,6 +352,54 @@ pub struct Strings {
     pub programs: &'static str,
     /// Окно выбора файла не открылось.
     pub pick_failed: &'static str,
+    /// Кнопка импорта списка правил.
+    pub import_rules: &'static str,
+    /// Заголовок окна выбора списка правил.
+    pub import_title: &'static str,
+    /// Как назван вид файлов со списками правил.
+    pub rule_lists: &'static str,
+    /// Файл списка не прочитался.
+    pub import_failed: &'static str,
+    /// В списке нет ничего, что набор выразит.
+    pub import_empty: &'static str,
+    /// Сколько групп добавлено.
+    pub imported_groups: &'static str,
+    /// Сколько строк пропущено.
+    pub skipped_lines: &'static str,
+    /// Кнопка выгрузки списка правил.
+    pub export_rules: &'static str,
+    /// Заголовок окна сохранения списка правил.
+    pub export_title: &'static str,
+    /// Файл списка не записался.
+    pub export_failed: &'static str,
+    /// Сколько групп выгружено.
+    pub exported_groups: &'static str,
+    /// Сколько групп Surge выразил не целиком.
+    pub skipped_groups: &'static str,
+    /// Плашка журнала: что делают кнопки мыши.
+    pub log_hint: &'static str,
+    /// Плашка после копирования.
+    pub copied: &'static str,
+    /// Плашка отмотанного журнала: вернуться к новым строкам.
+    pub to_tail: &'static str,
+    /// Заголовок окна правила по соединению.
+    pub flow_rule: &'static str,
+    /// Перед нынешним решением.
+    pub decided_now: &'static str,
+    /// Ловить адрес.
+    pub catch_address: &'static str,
+    /// Ловить приложение.
+    pub catch_app: &'static str,
+    /// Путь приложения служба не прислала.
+    pub path_unknown: &'static str,
+    /// Раздел «в какую группу».
+    pub into_group: &'static str,
+    /// Пункт новой группы.
+    pub new_group: &'static str,
+    /// Кнопка окна правила.
+    pub add: &'static str,
+    /// Строка журнала после добавления.
+    pub added_to_group: &'static str,
 
     // --- журнал ---
     /// Метка ошибки.
@@ -534,10 +592,14 @@ mod tests {
                 table.ports_section,
                 table.ports_hint,
                 table.empty_means_any,
+                table.sections_hint,
+                table.host_exact,
+                table.host_keyword,
+                table.values_empty,
+                table.values_not_found,
                 table.add_rule,
                 table.new_rule,
                 table.edit_rule,
-                table.not_recognised,
                 table.unnamed_rule,
                 table.app_search,
                 table.no_apps,
@@ -546,6 +608,30 @@ mod tests {
                 table.pick_app_title,
                 table.programs,
                 table.pick_failed,
+                table.import_rules,
+                table.import_title,
+                table.rule_lists,
+                table.import_failed,
+                table.import_empty,
+                table.imported_groups,
+                table.skipped_lines,
+                table.export_rules,
+                table.export_title,
+                table.export_failed,
+                table.exported_groups,
+                table.skipped_groups,
+                table.log_hint,
+                table.copied,
+                table.to_tail,
+                table.flow_rule,
+                table.decided_now,
+                table.catch_address,
+                table.catch_app,
+                table.path_unknown,
+                table.into_group,
+                table.new_group,
+                table.add,
+                table.added_to_group,
                 table.level_error,
                 table.level_warning,
                 table.on,

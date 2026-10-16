@@ -86,7 +86,8 @@ pub fn panel<'a, M: 'a>(
         Flex::col()
             .w(Size::FILL)
             .h(Size::FILL)
-            .push_auto(head)
+            // Колонка полосы, как у строк в `scroll`: иначе столбцы шапки съезжают.
+            .push_auto(container(head).padding(scrollbar::safe(0.0)))
             .push_auto(divider(palette))
             .push(body)
             .push_auto(glyphs(hint.to_owned(), ink::level(palette, ink::TERTIARY)))

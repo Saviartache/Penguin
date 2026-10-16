@@ -14,6 +14,11 @@ const LABEL: &str = "com.penguin.gui";
 /// Имя файла описания.
 const FILE: &str = "com.penguin.gui.plist";
 
+/// `CFBundleIdentifier` связки из `scripts/package.sh`: по нему система
+/// называет агента в «Объектах входа» именем и значком программы, а не
+/// именем исполняемого файла.
+const BUNDLE_ID: &str = "Saviartache.Penguin";
+
 /// Записывает описание агента и загружает его.
 pub(super) fn write(executable: &Path) -> PlatformResult<()> {
     let path = entry_path()?;
@@ -91,9 +96,28 @@ fn agent(executable: &Path) -> String {
          \x20 </array>\n\
          \x20 <key>RunAtLoad</key>\n\
          \x20 <true/>\n\
+         {}\
          </dict>\n\
          </plist>\n",
-        arguments(executable)
+        arguments(executable),
+        association(executable),
+    )
+}
+
+/// Привязка агента к связке — только если программа запущена из неё: у
+/// сборки из `target/` связки нет, и привязывать не к чему.
+fn association(executable: &Path) -> String {
+    let in_bundle = executable
+        .ancestors()
+        .any(|dir| dir.extension().is_some_and(|extension| extension == "app"));
+    if !in_bundle {
+        return String::new();
+    }
+    format!(
+        "\x20 <key>AssociatedBundleIdentifiers</key>\n\
+         \x20 <array>\n\
+         \x20   <string>{BUNDLE_ID}</string>\n\
+         \x20 </array>\n"
     )
 }
 
@@ -127,6 +151,24 @@ mod tests {
         ));
         assert!(text.contains("<key>RunAtLoad</key>"), "{text}");
         assert!(text.contains("<true/>"), "{text}");
+    }
+
+    #[test]
+    fn the_system_names_the_agent_after_the_bundle() {
+        let bundled = agent(Path::new(
+            "/Applications/Penguin.app/Contents/MacOS/penguin",
+        ));
+        assert!(
+            bundled.contains("<key>AssociatedBundleIdentifiers</key>"),
+            "{bundled}"
+        );
+        assert!(
+            bundled.contains(&format!("<string>{BUNDLE_ID}</string>")),
+            "{bundled}"
+        );
+
+        let bare = agent(Path::new("/usr/local/bin/penguin"));
+        assert!(!bare.contains("AssociatedBundleIdentifiers"), "{bare}");
     }
 
     #[test]

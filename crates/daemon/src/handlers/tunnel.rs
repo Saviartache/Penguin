@@ -49,6 +49,12 @@ pub async fn disconnect(engine: &Arc<Engine>) -> Response {
 /// Сначала тоннель, потом отмена: ответ окну уходит после снятия TUN и маршрутов.
 pub async fn shutdown(engine: &Arc<Engine>, cancel: &CancellationToken) -> Response {
     let response = disconnect(engine).await;
+    // Иначе launchd сразу поднимет службу снова; запрос — забота службы, а не отладочного запуска.
+    if penguin_platform::is_elevated()
+        && let Err(err) = penguin_platform::service::user_start::withdraw()
+    {
+        tracing::warn!(%err, "запрос запуска службы не снят");
+    }
     cancel.cancel();
     response
 }

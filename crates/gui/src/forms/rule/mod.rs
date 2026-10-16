@@ -3,5 +3,5 @@
 mod draft;
 mod load;
 
-pub use draft::{Action, Draft, unique_id};
+pub use draft::{Action, Draft, HostKind, Section, host_kind, unique_id};
 pub use load::load;

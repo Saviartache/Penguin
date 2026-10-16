@@ -4,6 +4,8 @@
 //! щелчок перезаписывал бы файл и пересобирал набор.
 
 use iced::Task;
+use penguin_config::export::{Exported, to_surge};
+use penguin_config::import::{Imported, parse_surge};
 use penguin_config::schema::rule::RuleConfig;
 use penguin_ipc::schema::Request;
 
@@ -11,6 +13,9 @@ use crate::app::App;
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::update::{request, save_rules};
 use crate::forms::rule;
+
+/// Имя файла, предлагаемое окном сохранения.
+const EXPORT_FILE_NAME: &str = "penguin-rules.conf";
 
 /// Разбирает экран правил.
 pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
@@ -87,15 +92,27 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             }
             Task::none()
         }
-        SplitTunnelMessage::DraftHostsChanged(value) => {
-            if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
-                draft.hosts = value;
+        SplitTunnelMessage::DraftSectionSelected(section) => {
+            let split = &mut app.state_mut().split_tunnel;
+            split.section = section;
+            split.entry.clear();
+            Task::none()
+        }
+        SplitTunnelMessage::DraftEntryChanged(value) => {
+            app.state_mut().split_tunnel.entry = value;
+            Task::none()
+        }
+        SplitTunnelMessage::DraftEntrySubmitted => {
+            let split = &mut app.state_mut().split_tunnel;
+            if let Some(draft) = split.editor.as_mut() {
+                // Непонятое остаётся в поле: его поправят, а не наберут заново.
+                split.entry = draft.add(&split.entry);
             }
             Task::none()
         }
-        SplitTunnelMessage::DraftPortsChanged(value) => {
+        SplitTunnelMessage::DraftValueRemoved(value) => {
             if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
-                draft.ports = value;
+                draft.remove(&value);
             }
             Task::none()
         }
@@ -106,7 +123,21 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             Task::none()
         }
         SplitTunnelMessage::DraftSaved => save_draft(app),
-        SplitTunnelMessage::Save => save_rules(app),
+        SplitTunnelMessage::ImportRequested => import(app),
+        SplitTunnelMessage::Imported(result) => imported(app, result),
+        SplitTunnelMessage::ExportRequested => export(app),
+        SplitTunnelMessage::Exported(result) => {
+            app.state_mut().split_tunnel.picking = false;
+            // Закрыл окно без выбора — не ошибка.
+            if let Ok(Some(report)) | Err(report) = result {
+                app.state_mut().split_tunnel.import_report = Some(report);
+            }
+            Task::none()
+        }
+        SplitTunnelMessage::Save => {
+            app.state_mut().split_tunnel.import_report = None;
+            save_rules(app)
+        }
     }
 }
 
@@ -139,9 +170,17 @@ fn open_editor(app: &mut App, index: Option<usize>) -> Task<Message> {
         return Task::none();
     };
 
+    // Открывается то, что в группе есть: правят обычно его.
+    let section = rule::Section::ALL
+        .into_iter()
+        .find(|section| !draft.values(*section).is_empty())
+        .unwrap_or_default();
+
     let split = &mut app.state_mut().split_tunnel;
     split.editor = Some(draft);
+    split.section = section;
     split.app_search.clear();
+    split.entry.clear();
     split.pick_error = None;
     request_processes()
 }
@@ -180,20 +219,28 @@ fn picked_file(app: &mut App, picked: Result<Option<String>, String>) -> Task<Me
     Task::none()
 }
 
-/// Новая группа встаёт в конец, правленая — на своё место с прежними
-/// идентификатором, включённостью и приоритетом.
+/// Ставит группу из окна правки в набор; сохраняет только «Сохранить».
 fn save_draft(app: &mut App) -> Task<Message> {
-    let state = app.state();
-    let Some(draft) = state.split_tunnel.editor.as_ref() else {
+    let Some(draft) = app.state().split_tunnel.editor.clone() else {
         return Task::none();
     };
-    let rules = &state.config.routing.rules;
+    if store_draft(app, &draft) {
+        // Окно закрывается сразу, иначе черновик выглядит ещё не сохранённым.
+        app.state_mut().split_tunnel.editor = None;
+    }
+    Task::none()
+}
+
+/// Ставит группу в набор: новую — в конец, правленую — на своё место с прежними
+/// идентификатором, включённостью и приоритетом. `false` — условий нет, а
+/// такое правило совпало бы со всем подряд.
+pub fn store_draft(app: &mut App, draft: &rule::Draft) -> bool {
+    let rules = &app.state().config.routing.rules;
     let previous = draft.index.and_then(|index| rules.get(index));
     let id = previous.map_or_else(|| rule::unique_id(rules), |found| found.id.clone());
 
-    // Без условий правило совпало бы со всем подряд.
     let Some(mut built) = draft.build(id) else {
-        return Task::none();
+        return false;
     };
     if let Some(previous) = previous {
         built.enabled = previous.enabled;
@@ -206,10 +253,96 @@ fn save_draft(app: &mut App) -> Task<Message> {
         Some(index) => rules[index] = built,
         None => rules.push(built),
     }
-    // Окно закрывается сразу, иначе черновик выглядит ещё не сохранённым.
-    app.state_mut().split_tunnel.editor = None;
     app.state_mut().dirty = true;
+    true
+}
+
+/// Показывает окно выбора списка; окно выбора одно на экран.
+fn import(app: &mut App) -> Task<Message> {
+    let split = &mut app.state_mut().split_tunnel;
+    if split.picking {
+        return Task::none();
+    }
+    split.picking = true;
+    split.import_report = None;
+
+    Task::perform(read_rule_list(), |read| {
+        Message::SplitTunnel(SplitTunnelMessage::Imported(read))
+    })
+}
+
+fn imported(app: &mut App, read: Result<Option<Imported>, String>) -> Task<Message> {
+    app.state_mut().split_tunnel.picking = false;
+    let report = match read {
+        // Закрыл окно без выбора — не ошибка.
+        Ok(None) => return Task::none(),
+        Ok(Some(list)) => apply_import(app, list),
+        Err(reason) => reason,
+    };
+    app.state_mut().split_tunnel.import_report = Some(report);
     Task::none()
+}
+
+/// Дописывает группы в конец набора и берёт «всё остальное» из `FINAL`; итог —
+/// строкой для человека. Сохраняет, как и правка, только «Сохранить».
+fn apply_import(app: &mut App, list: Imported) -> String {
+    let strings = crate::i18n::s();
+    if list.rules.is_empty() && list.mode.is_none() {
+        return strings.import_empty.to_owned();
+    }
+
+    let added = list.rules.len();
+    let routing = &mut app.state_mut().config.routing;
+    for mut imported in list.rules {
+        imported.id = rule::unique_id(&routing.rules);
+        if imported.name.is_empty() {
+            strings.unnamed_rule.clone_into(&mut imported.name);
+        }
+        routing.rules.push(imported);
+    }
+    if let Some(mode) = list.mode {
+        routing.mode = mode;
+    }
+    app.state_mut().dirty = true;
+
+    let mut report = format!("{}: {added}", strings.imported_groups);
+    if !list.skipped.is_empty() {
+        report.push_str(&format!(
+            " · {}: {}",
+            strings.skipped_lines,
+            list.skipped.len()
+        ));
+    }
+    report
+}
+
+/// Выгружает набор, как он виден в окне, вместе с несохранёнными правками.
+fn export(app: &mut App) -> Task<Message> {
+    let split = &mut app.state_mut().split_tunnel;
+    if split.picking {
+        return Task::none();
+    }
+    split.picking = true;
+    split.import_report = None;
+
+    let routing = &app.state().config.routing;
+    let exported = to_surge(&routing.rules, routing.mode);
+    Task::perform(write_rule_list(exported), |written| {
+        Message::SplitTunnel(SplitTunnelMessage::Exported(written))
+    })
+}
+
+fn export_report(exported: &Exported) -> String {
+    let strings = crate::i18n::s();
+    let mut report = format!("{}: {}", strings.exported_groups, exported.written);
+    if !exported.skipped.is_empty() {
+        report.push_str(&format!(
+            " · {}: {}",
+            strings.skipped_groups,
+            exported.skipped.len()
+        ));
+    }
+    report
 }
 
 /// Меняет местами два правила; приоритет остаётся за местом, иначе перестановка
@@ -248,6 +381,47 @@ async fn pick_program() -> Result<Option<String>, String> {
         Ok(Err(err)) => Err(failure(err)),
         Err(err) => Err(failure(err)),
     }
+}
+
+/// Спрашивает файл и читает его в отдельном потоке: окно держит поток, чтение — тоже.
+async fn read_rule_list() -> Result<Option<Imported>, String> {
+    let title = crate::i18n::s().import_title;
+    let filter = crate::i18n::s().rule_lists;
+    let unreadable = crate::i18n::s().import_failed;
+
+    let read = tokio::task::spawn_blocking(move || {
+        let Some(path) =
+            penguin_platform::dialog::pick_rule_list(title, filter).map_err(failure)?
+        else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(&path).map_err(|err| format!("{unreadable}: {err}"))?;
+        Ok(Some(parse_surge(&text)))
+    })
+    .await;
+
+    read.unwrap_or_else(|err| Err(failure(err)))
+}
+
+/// Спрашивает, куда сохранить, и пишет файл в отдельном потоке, как и чтение.
+async fn write_rule_list(exported: Exported) -> Result<Option<String>, String> {
+    let title = crate::i18n::s().export_title;
+    let filter = crate::i18n::s().rule_lists;
+    let unwritable = crate::i18n::s().export_failed;
+    let report = export_report(&exported);
+
+    let written = tokio::task::spawn_blocking(move || {
+        let Some(path) = penguin_platform::dialog::save_rule_list(title, filter, EXPORT_FILE_NAME)
+            .map_err(failure)?
+        else {
+            return Ok(None);
+        };
+        std::fs::write(&path, exported.text).map_err(|err| format!("{unwritable}: {err}"))?;
+        Ok(Some(report))
+    })
+    .await;
+
+    written.unwrap_or_else(|err| Err(failure(err)))
 }
 
 fn failure(reason: impl std::fmt::Display) -> String {
@@ -316,6 +490,93 @@ mod tests {
     }
 
     #[test]
+    fn an_imported_list_joins_the_end_of_the_set() {
+        let mut app = app_with_rules(json!([
+            { "id": "rule-1", "when": { "dest_port": [443] }, "action": "direct" }
+        ]));
+        let list = parse_surge(
+            "[Rule]\nDOMAIN-SUFFIX,a.example,DIRECT\n# Почта\nDOMAIN,b.example,PROXY\n\
+             USER-AGENT,Line*,PROXY\nFINAL,REJECT",
+        );
+        let _ = handle(&mut app, SplitTunnelMessage::Imported(Ok(Some(list))));
+
+        let state = app.state();
+        let ids: Vec<&str> = state
+            .config
+            .routing
+            .rules
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, ["rule-1", "rule-2", "rule-3"]);
+        assert_eq!(
+            state.config.routing.rules[1].name,
+            crate::i18n::s().unnamed_rule
+        );
+        assert_eq!(state.config.routing.rules[2].name, "Почта");
+        assert_eq!(state.config.routing.mode, TunnelMode::Block);
+        assert!(state.dirty);
+        let report = state
+            .split_tunnel
+            .import_report
+            .as_deref()
+            .unwrap_or_default();
+        assert!(report.contains(": 2") && report.contains(": 1"), "{report}");
+    }
+
+    #[test]
+    fn an_empty_list_changes_nothing() {
+        let mut app = app_with_rules(json!([]));
+        let list = parse_surge("[Rule]\nIP-ASN,1,DIRECT");
+        let _ = handle(&mut app, SplitTunnelMessage::Imported(Ok(Some(list))));
+
+        assert!(app.state().config.routing.rules.is_empty());
+        assert!(!app.state().dirty);
+        assert_eq!(
+            app.state().split_tunnel.import_report.as_deref(),
+            Some(crate::i18n::s().import_empty)
+        );
+    }
+
+    #[test]
+    fn the_export_report_names_partial_groups() {
+        let rules = serde_json::from_value::<Vec<RuleConfig>>(json!([
+            { "id": "r1", "when": { "domain": ["a.example"] }, "action": "direct" },
+            { "id": "r2", "when": { "geo_ip": ["RU"] }, "action": "direct" }
+        ]))
+        .expect("правила разбираются");
+        let report = export_report(&to_surge(&rules, TunnelMode::Tunnel));
+        let strings = crate::i18n::s();
+        assert_eq!(
+            report,
+            format!(
+                "{}: 1 · {}: 1",
+                strings.exported_groups, strings.skipped_groups
+            )
+        );
+    }
+
+    #[test]
+    fn a_closed_save_dialog_is_not_a_failure() {
+        let mut app = app_with_rules(json!([]));
+        app.state_mut().split_tunnel.picking = true;
+        let _ = handle(&mut app, SplitTunnelMessage::Exported(Ok(None)));
+
+        assert!(!app.state().split_tunnel.picking);
+        assert!(app.state().split_tunnel.import_report.is_none());
+    }
+
+    #[test]
+    fn a_closed_dialog_is_not_a_failure() {
+        let mut app = app_with_rules(json!([]));
+        app.state_mut().split_tunnel.picking = true;
+        let _ = handle(&mut app, SplitTunnelMessage::Imported(Ok(None)));
+
+        assert!(!app.state().split_tunnel.picking);
+        assert!(app.state().split_tunnel.import_report.is_none());
+    }
+
+    #[test]
     fn moving_a_rule_changes_the_order_of_checking() {
         let mut app = app_with_rules(json!([
             { "id": "r1", "priority": -100, "when": { "dest_port": [443] }, "action": "direct" },
@@ -345,9 +606,24 @@ mod tests {
             { "id": "keep", "enabled": false, "when": { "domain_suffix": ["a.com"] }, "action": "block" }
         ]));
         let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(Some(1)));
+        assert_eq!(
+            app.state().split_tunnel.section,
+            rule::Section::Hosts,
+            "окно открылось на том, что в группе есть"
+        );
         let _ = handle(
             &mut app,
-            SplitTunnelMessage::DraftHostsChanged("b.com".to_owned()),
+            SplitTunnelMessage::DraftValueRemoved("a.com".to_owned()),
+        );
+        let _ = handle(
+            &mut app,
+            SplitTunnelMessage::DraftEntryChanged("b.com ???".to_owned()),
+        );
+        let _ = handle(&mut app, SplitTunnelMessage::DraftEntrySubmitted);
+        assert_eq!(
+            app.state().split_tunnel.entry,
+            "???",
+            "непонятое осталось в поле"
         );
         let _ = handle(&mut app, SplitTunnelMessage::DraftSaved);
 
@@ -430,8 +706,9 @@ mod tests {
         let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
         let _ = handle(
             &mut app,
-            SplitTunnelMessage::DraftHostsChanged("example.com".to_owned()),
+            SplitTunnelMessage::DraftEntryChanged("example.com".to_owned()),
         );
+        let _ = handle(&mut app, SplitTunnelMessage::DraftEntrySubmitted);
         let _ = handle(&mut app, SplitTunnelMessage::DraftSaved);
 
         let ids: Vec<&str> = app

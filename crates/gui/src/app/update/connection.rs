@@ -1,11 +1,14 @@
 //! Подключение, отключение, смена профиля.
 
 use iced::Task;
+use penguin_core::id::ProfileId;
+use penguin_core::state::TunnelState;
 use penguin_ipc::schema::{Event, LogLevel, Request, Response};
 
 use crate::app::App;
 use crate::app::message::{HomeMessage, IpcMessage, Message, ServiceOutcome};
 use crate::app::update::request;
+use crate::forms::flow::Flow;
 
 /// Сколько ждать, пока служба опустит тоннель и остановится.
 const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -41,7 +44,11 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
 
     match response {
         Response::Ok | Response::Pong { .. } => {}
-        Response::Status(status) => state.connection.apply_status(&status),
+        Response::Status(status) => {
+            let was = state.connection.tunnel.clone();
+            state.connection.apply_status(&status);
+            return probe_if_connected(&was, &status.state);
+        }
         Response::Config(config) => {
             state.config = *config;
             state.saved = state.config.clone();
@@ -53,10 +60,9 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
         Response::Processes { apps } => state.split_tunnel.running_apps = apps,
         Response::Probes { results } => {
             state.servers.probing = false;
-            state.servers.latencies = results
-                .into_iter()
-                .map(|row| (row.profile, row.rtt_millis))
-                .collect();
+            for row in results {
+                merge_latency(&mut state.servers.latencies, row.profile, row.rtt_millis);
+            }
         }
         // В журнал, не в модальное окно: половина ошибок приходит фоном.
         Response::Error { message, .. } => state.connection.push_log(LogLevel::Error, message),
@@ -69,8 +75,10 @@ fn handle_event(app: &mut App, event: Event) -> Task<Message> {
 
     match event {
         Event::State { state: tunnel } => {
+            let probe = probe_if_connected(&connection.tunnel, &tunnel);
             connection.set_tunnel(tunnel);
             connection.online = true;
+            return probe;
         }
         Event::Throughput {
             rate,
@@ -81,35 +89,49 @@ fn handle_event(app: &mut App, event: Event) -> Task<Message> {
         Event::Decision {
             target,
             process,
+            process_path,
             decision,
             rule,
-        } => {
-            // Правило дописывается, только если сработало: «умолчание» — шум.
-            let who = process.unwrap_or_else(|| "?".to_owned());
-            let line = match rule {
-                Some(rule) => format!("{who} → {target} · {decision} ({rule})"),
-                None => format!("{who} → {target} · {decision}"),
-            };
-            connection.push_log(LogLevel::Info, line);
-        }
+        } => connection.push_flow(Flow {
+            target,
+            process,
+            process_path,
+            decision,
+            rule,
+        }),
         Event::RulesReloaded { .. } => return request(Request::GetConfig),
     }
     Task::none()
+}
+
+/// Меряет задержку до сервера, к которому тоннель только что поднялся.
+fn probe_if_connected(was: &TunnelState, now: &TunnelState) -> Task<Message> {
+    just_connected(was, now).map_or_else(Task::none, |profile| {
+        request(Request::Probe {
+            profile: Some(profile.clone()),
+        })
+    })
+}
+
+fn just_connected<'a>(was: &TunnelState, now: &'a TunnelState) -> Option<&'a ProfileId> {
+    match now {
+        TunnelState::Connected { profile, .. } if !was.is_active() => Some(profile),
+        _ => None,
+    }
+}
+
+/// Проверка одного профиля не стирает задержки остальных.
+fn merge_latency(latencies: &mut Vec<(String, Option<u32>)>, profile: String, rtt: Option<u32>) {
+    match latencies.iter_mut().find(|(id, _)| *id == profile) {
+        Some(row) => row.1 = rtt,
+        None => latencies.push((profile, rtt)),
+    }
 }
 
 /// Разбирает главный экран.
 pub fn handle_home(app: &mut App, message: HomeMessage) -> Task<Message> {
     match message {
         HomeMessage::ToggleConnection => toggle_connection(app),
-        HomeMessage::ServiceReady(ServiceOutcome::Ready) => {
-            app.state_mut().connection.starting = false;
-            request(Request::Connect { profile: None })
-        }
-        HomeMessage::ServiceReady(outcome) => {
-            app.state_mut().connection.starting = false;
-            complain(app, &outcome);
-            Task::none()
-        }
         HomeMessage::ServiceChecked(outcome) => {
             app.state_mut().connection.starting = false;
             complain(app, &outcome);
@@ -124,12 +146,12 @@ fn toggle_connection(app: &mut App) -> Task<Message> {
     if connection.is_busy_with_service() {
         return Task::none();
     }
-    // Службы нет — ставим её сами.
+    // Службы нет — кнопка означает «Запустить службу».
     if !connection.online {
         connection.starting = true;
         connection.push_log(LogLevel::Info, crate::i18n::s().service_starting.to_owned());
-        return Task::perform(ensure_service(), |ready| {
-            Message::Home(HomeMessage::ServiceReady(ready))
+        return Task::perform(bring_up_service(), |ready| {
+            Message::Home(HomeMessage::ServiceChecked(ready))
         });
     }
 
@@ -166,18 +188,22 @@ pub async fn shutdown_service() {
     .await;
 }
 
-/// Проверяет службу при открытии окна и поднимает, если она молчит.
+/// Проверяет службу и поднимает, если она молчит.
 ///
-/// Права просит только когда нужно: окно UAC при каждом запуске приучает
-/// нажимать «Да», не читая.
-pub async fn ensure_at_startup() -> ServiceOutcome {
+/// Права просит только когда без них нельзя: службы нет, она чужой сборки или
+/// разрешения запускать её без пароля ещё нет. Окно UAC при каждом запуске
+/// приучает нажимать «Да», не читая.
+pub async fn bring_up_service() -> ServiceOutcome {
     // Отвечать может служба от другой сборки.
     let ours = tokio::task::spawn_blocking(penguin_platform::service::matches_current_executable)
         .await
         .unwrap_or(false);
+    if !ours {
+        return elevated_service(&["service", "ensure"]).await;
+    }
 
     // Спрашивается ответ, а не соединение: зависший демон соединение принимает.
-    if ours && let Some(running) = penguin_ipc::client::greet_service().await {
+    if let Some(running) = penguin_ipc::client::greet_service().await {
         if !penguin_platform::build::is_stale(&running, &penguin_platform::build_stamp()) {
             return ServiceOutcome::Ready;
         }
@@ -185,11 +211,15 @@ pub async fn ensure_at_startup() -> ServiceOutcome {
         return elevated_service(&["service", "restart"]).await;
     }
 
-    elevated_service(&["service", "ensure"]).await
-}
-
-async fn ensure_service() -> ServiceOutcome {
-    elevated_service(&["service", "ensure"]).await
+    match tokio::task::spawn_blocking(penguin_platform::service::user_start::request).await {
+        Ok(Ok(())) => wait_for_service().await,
+        Ok(Err(err)) if err.needs_privileges() => {
+            tracing::info!("разрешения запускать службу нет — права спрашиваются один раз");
+            elevated_service(&["service", "ensure"]).await
+        }
+        Ok(Err(err)) => ServiceOutcome::Failed(err.to_string()),
+        Err(err) => ServiceOutcome::Failed(err.to_string()),
+    }
 }
 
 /// Выполняет команду службы с правами и ждёт ответа службы.
@@ -219,8 +249,11 @@ async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome 
         Ok(Err(err)) => return ServiceOutcome::Failed(err.to_string()),
         Err(err) => return ServiceOutcome::Failed(err.to_string()),
     }
+    wait_for_service().await
+}
 
-    // Канал открывается не мгновенно; ждём ответа, а не соединения.
+/// Ждёт ответа службы: канал открывается не мгновенно, а принятое соединение — ещё не ответ.
+async fn wait_for_service() -> ServiceOutcome {
     let deadline = tokio::time::Instant::now() + SERVICE_WAIT;
     while tokio::time::Instant::now() < deadline {
         if penguin_ipc::client::answers_service().await {
@@ -406,5 +439,39 @@ mod tests {
             },
         );
         assert!(!app.state().servers.probing);
+    }
+
+    #[test]
+    fn only_the_moment_of_connecting_is_probed() {
+        let home = ProfileId::new("home");
+        let connected = TunnelState::Connected {
+            profile: home.clone(),
+            uptime_secs: 0,
+        };
+        let connecting = TunnelState::Connecting {
+            profile: home.clone(),
+        };
+
+        assert_eq!(just_connected(&connecting, &connected), Some(&home));
+        assert_eq!(just_connected(&connected, &connected), None);
+        assert_eq!(
+            just_connected(&TunnelState::Disconnected, &connecting),
+            None
+        );
+    }
+
+    #[test]
+    fn probing_one_profile_keeps_the_others() {
+        let mut latencies = vec![("home".to_owned(), Some(42)), ("work".to_owned(), None)];
+        merge_latency(&mut latencies, "work".to_owned(), Some(7));
+        merge_latency(&mut latencies, "new".to_owned(), Some(1));
+        assert_eq!(
+            latencies,
+            vec![
+                ("home".to_owned(), Some(42)),
+                ("work".to_owned(), Some(7)),
+                ("new".to_owned(), Some(1)),
+            ]
+        );
     }
 }

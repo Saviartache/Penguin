@@ -66,7 +66,7 @@ pub fn run(hidden: bool) -> iced::Result {
     .run()
 }
 
-/// Иконка окна и лотка; `None`, если не разобралась, — окно открывается и так.
+/// Иконка окна; `None`, если не разобралась, — окно открывается и так.
 pub(crate) fn window_icon() -> Option<iced::window::Icon> {
     iced::window::icon::from_file_data(include_bytes!("../../../assets/icon.ico"), None).ok()
 }

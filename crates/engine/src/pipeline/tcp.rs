@@ -7,7 +7,7 @@ use penguin_core::address::{Address, SocketAddress};
 use penguin_core::network::Network;
 use penguin_dns::FakeIpMap;
 use penguin_inbound::inbound::{InboundHandler, InboundRequest};
-use penguin_netstack::TcpListener;
+use penguin_netstack::{TcpConnection, TcpListener};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
@@ -55,17 +55,14 @@ pub async fn pump(
 }
 
 /// Ведёт одно соединение.
-async fn serve<S>(
-    mut connection: S,
+async fn serve(
+    mut connection: TcpConnection,
     source: std::net::SocketAddr,
     destination: std::net::SocketAddr,
     pipeline: Arc<Pipeline>,
     fake_ip: Option<Arc<FakeIpMap>>,
     sniff_enabled: bool,
-) -> std::io::Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send,
-{
+) -> std::io::Result<()> {
     let mut target = SocketAddress::from(destination);
     if let (Some(map), std::net::IpAddr::V4(v4)) = (&fake_ip, destination.ip())
         && let Some(domain) = map.domain_for(v4)
@@ -93,9 +90,17 @@ where
 
     remote.write_all(&prefix).await?;
 
-    let (uploaded, downloaded) = relay(connection, remote).await;
-    tracing::debug!(%target, uploaded, downloaded, "соединение закрыто");
-    Ok(())
+    match relay(&mut connection, remote).await {
+        Ok((uploaded, downloaded)) => {
+            tracing::debug!(%target, uploaded, downloaded, "соединение закрыто");
+            Ok(())
+        }
+        // Обрыв — сбросом: `FIN` выдал бы недописанный ответ за целый.
+        Err(err) => {
+            connection.abort();
+            Err(err)
+        }
+    }
 }
 
 /// Читает первые байты для опознания имени; молчание — идём без имени.
@@ -113,14 +118,12 @@ async fn read_prefix<S: AsyncRead + Unpin>(connection: &mut S) -> Vec<u8> {
 
 /// Перекачивает данные в обе стороны до закрытия обеих; полузакрытие не
 /// обрывает хвост ответа.
-pub async fn relay<A, B>(mut app: A, mut remote: B) -> (u64, u64)
+pub async fn relay<A, B>(mut app: A, mut remote: B) -> std::io::Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin + Send,
     B: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    tokio::io::copy_bidirectional_with_sizes(&mut app, &mut remote, COPY_BUFFER, COPY_BUFFER)
-        .await
-        .unwrap_or_default()
+    tokio::io::copy_bidirectional_with_sizes(&mut app, &mut remote, COPY_BUFFER, COPY_BUFFER).await
 }
 
 /// Буфер на одно направление.
@@ -159,7 +162,10 @@ mod tests {
         app_peer.read_to_end(&mut back).await.expect("прочитано");
         assert_eq!(back, "ответ".as_bytes());
 
-        let (up, down) = relaying.await.expect("задача завершилась");
+        let (up, down) = relaying
+            .await
+            .expect("задача завершилась")
+            .expect("без ошибок");
         assert_eq!(up, "запрос".len() as u64);
         assert_eq!(down, "ответ".len() as u64);
     }
@@ -187,7 +193,10 @@ mod tests {
         app_peer.read_to_end(&mut answer).await.expect("прочитано");
         assert_eq!(answer.len(), long_answer.len());
 
-        relaying.await.expect("задача завершилась");
+        relaying
+            .await
+            .expect("задача завершилась")
+            .expect("без ошибок");
     }
 
     #[tokio::test]

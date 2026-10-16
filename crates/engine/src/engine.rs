@@ -24,6 +24,7 @@ use crate::metrics::counters::Metrics;
 use crate::metrics::history::History;
 use crate::outbounds::OutboundPool;
 use crate::pipeline::Pipeline;
+use crate::pipeline::live::LiveFlows;
 use crate::state::StateMachine;
 use crate::tunnel::TunnelSession;
 
@@ -40,6 +41,8 @@ pub struct Engine {
     dialer: Arc<SystemDialer>,
     processes: Arc<dyn FlowOwnerResolver>,
     metrics: Arc<Metrics>,
+    /// Живые соединения всех конвейеров: их пересматривает смена правил.
+    flows: Arc<LiveFlows>,
     state: Arc<StateMachine>,
     events: EventBus,
     /// Поднятый тоннель; `Mutex` разводит подключение и отключение.
@@ -89,6 +92,7 @@ impl Engine {
             dialer,
             processes,
             metrics: Metrics::new(),
+            flows: LiveFlows::new(),
             state: Arc::new(StateMachine::new(events.clone())),
             events,
             session: Mutex::new(None),
@@ -136,7 +140,8 @@ impl Engine {
                 Arc::clone(&self.metrics),
             )
             .with_process_lookup(config.routing.resolve_process)
-            .with_events(self.events.clone()),
+            .with_events(self.events.clone())
+            .with_flows(Arc::clone(&self.flows)),
         )
     }
 
@@ -250,11 +255,22 @@ impl Engine {
         result
     }
 
-    /// Заменяет настройки на лету, не перезапуская тоннель.
+    /// Заменяет настройки на лету, не перезапуская тоннель; соединения, которые новые
+    /// правила ведут иначе, обрываются — приложения тут же откроют их заново.
     pub fn reload(&self, config: RootConfig) -> EngineResult<()> {
         self.router
             .replace_rules(&config.routing, &CompileContext::default())
             .map_err(EngineError::Router)?;
+
+        let revoked = self
+            .flows
+            .revise(|flow| self.router.evaluate(flow).decision);
+        if revoked > 0 {
+            self.events.emit(Event::log(
+                LogLevel::Info,
+                format!("соединений под изменёнными правилами пересоздаётся: {revoked}"),
+            ));
+        }
 
         let count = self.router.rule_count();
         self.config.store(Arc::new(config));
@@ -354,6 +370,38 @@ mod tests {
 
         engine.reload(config).expect("правила применяются");
         assert_eq!(engine.router().rule_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn reload_drops_only_the_connections_the_new_rules_route_elsewhere() {
+        use penguin_core::network::Network;
+        use penguin_router::context::FlowContext;
+
+        let engine = Engine::new(config_with_profiles(&["home"])).expect("собирается");
+        let open = |target: &str| {
+            let flow = FlowContext::to_target(
+                Network::Tcp,
+                "198.18.0.7:50000".parse().expect("адрес"),
+                target.parse().expect("адрес"),
+            );
+            let decision = engine.router().evaluate(&flow).decision;
+            engine.flows.register(flow, decision)
+        };
+        let lan = open("10.1.2.3:443");
+        let internet = open("1.1.1.1:443");
+
+        let mut config = config_with_profiles(&["home"]);
+        config.routing.rules = serde_json::from_value(json!([
+            { "id": "лан", "when": { "dest_ip": ["10.0.0.0/8"] }, "action": "block" }
+        ]))
+        .expect("правила разбираются");
+        engine.reload(config).expect("правила применяются");
+
+        assert!(lan.revoked().is_cancelled(), "правило его касается");
+        assert!(
+            !internet.revoked().is_cancelled(),
+            "правило его не касается"
+        );
     }
 
     #[tokio::test]

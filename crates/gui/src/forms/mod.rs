@@ -6,6 +6,7 @@
 
 pub mod addresses;
 pub mod check;
+pub mod flow;
 pub mod link;
 pub mod protocol;
 pub mod rule;

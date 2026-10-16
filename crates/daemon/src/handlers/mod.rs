@@ -152,11 +152,13 @@ fn translate(event: penguin_engine::Event) -> Option<Event> {
         Inner::Decision {
             target,
             process,
+            process_path,
             decision,
             rule,
         } => Event::Decision {
             target,
             process,
+            process_path,
             decision,
             rule,
         },

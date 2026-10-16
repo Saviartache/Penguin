@@ -6,7 +6,7 @@ use crate::command;
 use crate::error::{PlatformError, PlatformResult};
 
 /// Показывает окно и ждёт ответа; вид файлов не отбирается (у программ в Linux нет расширения).
-pub(super) fn pick_program(title: &str, _filter: &str) -> PlatformResult<Option<PathBuf>> {
+pub(super) fn pick(title: &str, _filter: &str) -> PlatformResult<Option<PathBuf>> {
     if command::exists("zenity") {
         let titled = format!("--title={title}");
         return ask("zenity", &["--file-selection", titled.as_str()]);
@@ -17,6 +17,30 @@ pub(super) fn pick_program(title: &str, _filter: &str) -> PlatformResult<Option<
 
     Err(PlatformError::Dialog(
         "окно выбора файла показывать нечем: нет ни `zenity`, ни `kdialog`".to_owned(),
+    ))
+}
+
+/// Спрашивает, куда сохранить файл с именем `name` по умолчанию.
+pub(super) fn save(title: &str, name: &str) -> PlatformResult<Option<PathBuf>> {
+    if command::exists("zenity") {
+        let titled = format!("--title={title}");
+        let named = format!("--filename={name}");
+        return ask(
+            "zenity",
+            &[
+                "--file-selection",
+                "--save",
+                titled.as_str(),
+                named.as_str(),
+            ],
+        );
+    }
+    if command::exists("kdialog") {
+        return ask("kdialog", &["--title", title, "--getsavefilename", name]);
+    }
+
+    Err(PlatformError::Dialog(
+        "окно сохранения файла показывать нечем: нет ни `zenity`, ни `kdialog`".to_owned(),
     ))
 }
 
@@ -58,7 +82,7 @@ mod tests {
         if command::exists("zenity") || command::exists("kdialog") {
             return;
         }
-        let err = pick_program("Выберите программу", "Программы").expect_err("нечем показать");
+        let err = pick("Выберите программу", "Программы").expect_err("нечем показать");
         assert!(err.to_string().contains("zenity"), "{err}");
     }
 }

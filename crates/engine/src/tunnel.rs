@@ -3,7 +3,7 @@
 //! Откат идёт в обратном порядке и до конца даже после ошибки:
 //!
 //! ```text
-//!   запуск:   kill switch ─► адаптер ─► маршруты ─► DNS ─► стек
+//!   запуск:   kill switch ─► адаптер ─► маршруты ─► DNS ─► стек ─► сброс старых соединений
 //!   останов:  стек ─► DNS ─► маршруты ─► адаптер ─► kill switch
 //! ```
 
@@ -190,6 +190,11 @@ impl TunnelSession {
         let stack_config = penguin_netstack::StackConfig::from_tun(&tun_config);
         let handles = penguin_netstack::spawn(device, stack_config, self.cancel.clone());
         self.spawn_stack_pumps(handles, config);
+
+        // После стека: сброшенные приложения переподключаются уже в него.
+        if config.network.capture_default_route {
+            tokio::spawn(crate::takeover::take_over(servers));
+        }
 
         Ok(())
     }

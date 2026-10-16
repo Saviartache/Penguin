@@ -22,6 +22,11 @@ pub fn form_row<'a, Message: 'a>(
     label: &'a str,
     control: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
+    // Ячейка ростом с поле ввода: флажок ниже поля, и без неё шаг строк
+    // формы у него короче — он прилипает к полю над собой.
+    let control = container(control)
+        .width(Length::Fill)
+        .center_y(Length::Fixed(uikit::control::CONTROL_HEIGHT));
     Flex::row()
         .push_sized(text(label).size(type_scale::LEAD), grow(2))
         .push_sized(control, grow(3))

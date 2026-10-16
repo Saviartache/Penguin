@@ -14,7 +14,7 @@ use uikit::widgets::Button;
 use crate::app::message::{HomeMessage, Message};
 use crate::app::state::State;
 use crate::console::{self, Line, Reveal};
-use crate::screens::tunnel::{Tone, describe, describe_button};
+use crate::screens::tunnel::{Tone, describe, describe_button, describe_service_button};
 
 /// Высота кнопки: единственное действие окна не должно быть легко промахнуть.
 const BUTTON_HEIGHT: f32 = 40.0;
@@ -170,7 +170,12 @@ fn pair(label: &str, value: String) -> Line {
 }
 
 fn button(state: &State) -> Element<'_, Message> {
-    let (label, variant) = describe_button(&state.connection.tunnel);
+    let connection = &state.connection;
+    let (label, variant) = if connection.online {
+        describe_button(&connection.tunnel)
+    } else {
+        describe_service_button(connection.starting)
+    };
 
     Button::new(text(label).size(type_scale::LEAD))
         .variant(variant)

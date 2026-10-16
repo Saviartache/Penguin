@@ -5,10 +5,9 @@ use std::path::{Path, PathBuf};
 use super::{ServiceStatus, stage, systemd};
 use crate::command;
 use crate::error::{PlatformError, PlatformResult};
-use systemd::{HELPER_DIR, HELPER_PATH};
+use systemd::{HELPER_DIR, HELPER_PATH, UNIT};
 
-const SYSTEMCTL: &str = "systemctl";
-const UNIT: &str = "penguin.service";
+pub(super) const SYSTEMCTL: &str = "systemctl";
 const UNIT_PATH: &str = "/etc/systemd/system/penguin.service";
 
 /// Кладёт копию программы, регистрирует и включает службу, не запуская; повторный вызов

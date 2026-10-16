@@ -1,4 +1,4 @@
-//! Windows: `IFileOpenDialog` (современное окно с боковой панелью и поиском; через COM).
+//! Windows: `IFileOpenDialog` и `IFileSaveDialog` (современное окно с боковой панелью и поиском; через COM).
 
 #![allow(unsafe_code, reason = "окно выбора файла доступно только через COM")]
 
@@ -12,22 +12,34 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
     FILEOPENDIALOGOPTIONS, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR,
-    FOS_PATHMUSTEXIST, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
+    FOS_OVERWRITEPROMPT, FOS_PATHMUSTEXIST, FileOpenDialog, FileSaveDialog, IFileDialog,
+    IFileOpenDialog, IFileSaveDialog, SIGDN_FILESYSPATH,
 };
 use windows::core::{HRESULT, HSTRING, PCWSTR};
 
 use crate::error::{PlatformError, PlatformResult};
 
-/// Маска исполняемых файлов.
-const MASK: &str = "*.exe";
+use super::Kind;
+
+/// Маска файлов по виду.
+fn mask(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Program => "*.exe",
+        Kind::RuleList => "*.conf;*.list;*.txt",
+    }
+}
 
 /// Только объекты с путём на диске, существующие; текущий каталог программы не двигать.
 const OPTIONS: FILEOPENDIALOGOPTIONS = FILEOPENDIALOGOPTIONS(
     FOS_FORCEFILESYSTEM.0 | FOS_FILEMUSTEXIST.0 | FOS_PATHMUSTEXIST.0 | FOS_NOCHANGEDIR.0,
 );
 
-/// Показывает окно и ждёт ответа.
-pub(super) fn pick_program(title: &str, filter: &str) -> PlatformResult<Option<PathBuf>> {
+/// Путь на диске; о замене существующего файла спросить; текущий каталог программы не двигать.
+const SAVE_OPTIONS: FILEOPENDIALOGOPTIONS =
+    FILEOPENDIALOGOPTIONS(FOS_FORCEFILESYSTEM.0 | FOS_OVERWRITEPROMPT.0 | FOS_NOCHANGEDIR.0);
+
+/// Показывает окно выбора и ждёт ответа.
+pub(super) fn pick(kind: Kind, title: &str, filter: &str) -> PlatformResult<Option<PathBuf>> {
     // Объявлен первым — гаснет последним, после объектов COM.
     let _apartment = Apartment::enter();
 
@@ -36,8 +48,39 @@ pub(super) fn pick_program(title: &str, filter: &str) -> PlatformResult<Option<P
         unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
             .map_err(|err| PlatformError::Dialog(format!("окно выбора не создалось: {err}")))?;
 
-    let name = HSTRING::from(display_name(filter));
-    let mask = HSTRING::from(MASK);
+    show(&dialog, kind, title, filter, OPTIONS, None)
+}
+
+/// Показывает окно сохранения с именем `name` и ждёт ответа.
+pub(super) fn save(title: &str, filter: &str, name: &str) -> PlatformResult<Option<PathBuf>> {
+    let _apartment = Apartment::enter();
+
+    // SAFETY: COM поднят на этом потоке.
+    let dialog: IFileSaveDialog =
+        unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER) }
+            .map_err(|err| PlatformError::Dialog(format!("окно выбора не создалось: {err}")))?;
+
+    show(
+        &dialog,
+        Kind::RuleList,
+        title,
+        filter,
+        SAVE_OPTIONS,
+        Some(name),
+    )
+}
+
+/// Настраивает окно, показывает и читает путь ответа.
+fn show(
+    dialog: &IFileDialog,
+    kind: Kind,
+    title: &str,
+    filter: &str,
+    options: FILEOPENDIALOGOPTIONS,
+    file_name: Option<&str>,
+) -> PlatformResult<Option<PathBuf>> {
+    let name = HSTRING::from(display_name(filter, mask(kind)));
+    let mask = HSTRING::from(mask(kind));
     let types = [COMDLG_FILTERSPEC {
         pszName: PCWSTR(name.as_ptr()),
         pszSpec: PCWSTR(mask.as_ptr()),
@@ -47,7 +90,10 @@ pub(super) fn pick_program(title: &str, filter: &str) -> PlatformResult<Option<P
     (|| unsafe {
         dialog.SetTitle(&HSTRING::from(title))?;
         dialog.SetFileTypes(&types)?;
-        dialog.SetOptions(OPTIONS)
+        if let Some(file_name) = file_name {
+            dialog.SetFileName(&HSTRING::from(file_name))?;
+        }
+        dialog.SetOptions(options)
     })()
     .map_err(|err| PlatformError::Dialog(format!("окно выбора не настроилось: {err}")))?;
 
@@ -83,8 +129,8 @@ pub(super) fn pick_program(title: &str, filter: &str) -> PlatformResult<Option<P
 }
 
 /// Подпись вида файлов; маска дописывается здесь (на других системах у программ расширения нет).
-fn display_name(filter: &str) -> String {
-    format!("{filter} ({MASK})")
+fn display_name(filter: &str, mask: &str) -> String {
+    format!("{filter} ({mask})")
 }
 
 /// COM, поднятый на этом потоке и гасимый здесь же: поток из пула достаётся другой работе.
@@ -119,7 +165,10 @@ mod tests {
 
     #[test]
     fn the_file_kind_carries_its_mask() {
-        assert_eq!(display_name("Программы"), "Программы (*.exe)");
+        assert_eq!(
+            display_name("Программы", mask(Kind::Program)),
+            "Программы (*.exe)"
+        );
     }
 
     #[test]

@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use super::ServiceStatus;
 use crate::error::{PlatformError, PlatformResult};
 
+/// Имя юнита; его же называет правило polkit.
+pub(super) const UNIT: &str = "penguin.service";
+
 /// Постоянный каталог копии во владении `root` (FHS 3.0, §4.5): юнит с путём в каталог сборки
 /// systemd примет, а при следующей загрузке откажет.
 pub(super) const HELPER_DIR: &str = "/usr/local/lib/penguin";

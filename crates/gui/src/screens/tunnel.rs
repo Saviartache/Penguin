@@ -64,6 +64,15 @@ pub fn describe_button(tunnel: &TunnelState) -> (&'static str, ButtonVariant) {
     }
 }
 
+/// Подпись и вид кнопки, пока служба не отвечает: подключаться не к кому, её надо запустить.
+pub fn describe_service_button(starting: bool) -> (&'static str, ButtonVariant) {
+    if starting {
+        (crate::i18n::s().service_starting, ButtonVariant::Neutral)
+    } else {
+        (crate::i18n::s().start_service, ButtonVariant::Primary)
+    }
+}
+
 /// Время работы: `1:30` или `1:01:01`.
 pub fn format_uptime(seconds: u64) -> String {
     let hours = seconds / 3600;
@@ -128,6 +137,15 @@ mod tests {
             reason: "не вышло".to_owned(),
         });
         assert_eq!(label, crate::i18n::s().connect);
+    }
+
+    #[test]
+    fn without_the_service_the_button_starts_it() {
+        assert_eq!(
+            describe_service_button(false),
+            (crate::i18n::s().start_service, ButtonVariant::Primary)
+        );
+        assert_eq!(describe_service_button(true).1, ButtonVariant::Neutral);
     }
 
     #[test]
