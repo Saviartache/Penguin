@@ -143,10 +143,14 @@ builder() {
     esac
 }
 
-# `penguin.icns` из `assets/icon.png`.
+# `penguin.icns` из `assets/icon-macos.png`.
 #
 # У macOS иконка связки — файл в `Resources`, а не ресурс внутри двоичного
 # файла, как на Windows. Отсюда и место: не `build.rs`, а раскладка поставки.
+#
+# Картинка своя, не `icon.png`: с macOS 26 система сама обрезает иконку по
+# скруглённому квадрату, а всё с прозрачными полями сажает на серую подложку.
+# Поэтому здесь квадрат без полей и без прозрачности.
 icns() {
     local out="$1" iconset size
 
@@ -156,9 +160,9 @@ icns() {
     # Набор размеров задан Apple. Чего в нём нет, то система дорисовывает сама
     # и хуже, чем `sips`.
     for size in 16 32 128 256 512; do
-        sips -z "$size" "$size" assets/icon.png \
+        sips -z "$size" "$size" assets/icon-macos.png \
             --out "$iconset/icon_${size}x${size}.png" > /dev/null 2>&1 || return 1
-        sips -z "$((size * 2))" "$((size * 2))" assets/icon.png \
+        sips -z "$((size * 2))" "$((size * 2))" assets/icon-macos.png \
             --out "$iconset/icon_${size}x${size}@2x.png" > /dev/null 2>&1 || return 1
     done
 
