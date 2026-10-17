@@ -140,6 +140,15 @@ mod tests {
     }
 
     #[test]
+    fn an_ipv6_server_is_let_through_bare() {
+        let text = ruleset(&FirewallRules {
+            allow_addresses: vec!["2001:db8::1".parse().expect("адрес")],
+            ..FirewallRules::default()
+        });
+        assert!(text.contains("pass out quick to 2001:db8::1\n"), "{text}");
+    }
+
+    #[test]
     fn loopback_is_always_allowed() {
         let text = ruleset(&FirewallRules::default());
         assert!(text.contains("pass out quick on lo0 all"), "{text}");

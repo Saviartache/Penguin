@@ -3,7 +3,7 @@
 use penguin_core::base64;
 
 use crate::forms::check;
-use crate::forms::link::Link;
+use crate::forms::link::{self, Link};
 use crate::forms::protocol::carrier::{self, TRANSPORTS};
 use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 
@@ -80,7 +80,7 @@ fn from_link(link: &Link) -> Result<Vec<(&'static str, String)>, String> {
     let port = text_field(&json, "port").unwrap_or_else(|| DEFAULT_PORT.to_string());
 
     let mut values = vec![
-        ("server", format!("{}:{port}", host.trim())),
+        ("server", link::join_host_port(host, &port)),
         ("id", id.to_owned()),
     ];
 
@@ -129,7 +129,6 @@ fn text_field(json: &serde_json::Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forms::link;
     use crate::forms::protocol::testing::{Values, value};
 
     fn link_for(json: &serde_json::Value) -> String {
@@ -155,6 +154,15 @@ mod tests {
             Some("b831381d-6324-4d53-ad4f-8cda48b30811")
         );
         assert_eq!(value(&values, "security"), Some("none"));
+    }
+
+    #[test]
+    fn an_ipv6_address_is_put_in_brackets() {
+        for add in ["2001:db8::1", "[2001:db8::1]"] {
+            let json = serde_json::json!({ "add": add, "port": "8443", "id": "id" });
+            let values = parse(&json);
+            assert_eq!(value(&values, "server"), Some("[2001:db8::1]:8443"));
+        }
     }
 
     #[test]

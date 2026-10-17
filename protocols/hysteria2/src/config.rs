@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use penguin_core::address::Address;
-use penguin_core::endpoint::{PortSpec, ServerEndpoint};
+use penguin_core::endpoint::ServerEndpoint;
 pub use penguin_transport::tls::TlsConfig;
 use serde::{Deserialize, Serialize};
 
@@ -71,17 +71,8 @@ impl Hysteria2Config {
     /// Разбирает адрес сервера.
     pub fn endpoint(&self) -> Hysteria2Result<ServerEndpoint> {
         let raw = self.server.trim();
-        let (host, ports) = split_host_ports(raw)
-            .ok_or_else(|| Hysteria2Error::config(format!("не разбирается адрес `{raw}`")))?;
-
-        let host: Address = host
-            .parse()
-            .map_err(|e| Hysteria2Error::config(format!("адрес сервера `{host}`: {e}")))?;
-        let ports: PortSpec = ports
-            .parse()
-            .map_err(|e| Hysteria2Error::config(format!("порт сервера `{ports}`: {e}")))?;
-
-        Ok(ServerEndpoint::new(host, ports))
+        raw.parse()
+            .map_err(|e| Hysteria2Error::config(format!("адрес сервера `{raw}`: {e}")))
     }
 
     /// Имя, которое подставляется в TLS.
@@ -146,15 +137,6 @@ impl std::fmt::Debug for Hysteria2Config {
             .field("fast_open", &self.fast_open)
             .finish()
     }
-}
-
-/// Разделяет `host:ports`, не путаясь в двоеточиях IPv6.
-fn split_host_ports(raw: &str) -> Option<(&str, &str)> {
-    if let Some(rest) = raw.strip_prefix('[') {
-        let (host, tail) = rest.split_once(']')?;
-        return Some((host, tail.strip_prefix(':')?));
-    }
-    raw.rsplit_once(':')
 }
 
 /// Обфускация.
@@ -260,6 +242,8 @@ impl Default for QuicConfig {
 
 #[cfg(test)]
 mod tests {
+    use penguin_core::endpoint::PortSpec;
+
     use super::*;
 
     fn config(server: &str) -> Hysteria2Config {
@@ -297,6 +281,22 @@ mod tests {
         let endpoint = config("[2001:db8::1]:443").endpoint().expect("разбирается");
         assert!(endpoint.host.as_ip().is_some_and(|ip| ip.is_ipv6()));
         assert_eq!(endpoint.ports, PortSpec::Single(443));
+    }
+
+    #[test]
+    fn parses_ipv6_server_with_port_range() {
+        let endpoint = config("[::1]:443,20000-30000")
+            .endpoint()
+            .expect("разбирается");
+        assert!(endpoint.ports.is_hopping());
+        assert_eq!(endpoint.to_string(), "[::1]:443,20000-30000");
+    }
+
+    #[test]
+    fn a_bare_ipv6_server_is_refused() {
+        assert!(config("2001:db8::1").endpoint().is_err());
+        assert!(config("2001:db8::1:443").endpoint().is_err());
+        assert!(config("fe80::1%en0").endpoint().is_err());
     }
 
     #[test]

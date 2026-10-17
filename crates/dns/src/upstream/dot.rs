@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use penguin_core::address::SocketAddress;
 use penguin_proto::dialer::Dialer;
 use rustls::pki_types::ServerName;
 use rustls_platform_verifier::BuilderVerifierExt;
@@ -45,10 +46,10 @@ impl std::fmt::Debug for DotUpstream {
 impl DotUpstream {
     /// Создаёт апстрим: `address` числовой (разрешать его некому), `server_name` проверяется в сертификате.
     pub fn new(address: impl Into<String>, server_name: impl Into<String>) -> DnsResult<Self> {
-        let mut address = address.into();
-        if !address.contains(':') {
-            address = format!("{address}:{DOT_PORT}");
-        }
+        let address: String = address.into();
+        let address = SocketAddress::parse_or_port(address.trim(), DOT_PORT)
+            .map_err(|e| DnsError::Config(format!("адрес DoT `{address}`: {e}")))?
+            .to_wire();
 
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let config = rustls::ClientConfig::builder_with_provider(provider)
@@ -137,6 +138,29 @@ mod tests {
     fn keeps_an_explicit_port() {
         let upstream = DotUpstream::new("1.1.1.1:8853", "cloudflare-dns.com").expect("собирается");
         assert!(upstream.address.ends_with(":8853"));
+    }
+
+    #[test]
+    fn ipv6_is_bracketed_before_the_port() {
+        for (raw, wire) in [
+            ("2606:4700:4700::1111", "tls://[2606:4700:4700::1111]:853#"),
+            (
+                "[2606:4700:4700::1111]",
+                "tls://[2606:4700:4700::1111]:853#",
+            ),
+            (
+                "[2606:4700:4700::1111]:8853",
+                "tls://[2606:4700:4700::1111]:8853#",
+            ),
+        ] {
+            let upstream = DotUpstream::new(raw, "").expect("собирается");
+            assert_eq!(upstream.describe(), wire);
+        }
+    }
+
+    #[test]
+    fn a_zone_is_refused() {
+        assert!(DotUpstream::new("fe80::1%en0", "example.com").is_err());
     }
 
     #[test]

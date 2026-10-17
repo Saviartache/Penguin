@@ -80,6 +80,12 @@ impl RouteGuard {
     /// зациклились бы через TUN. Длинный префикс узла побеждает любой другой маршрут.
     pub fn pin_outside(&self, addresses: &[IpAddr], outside: &DefaultRoute) -> PlatformResult<()> {
         for address in addresses {
+            // Тоннель забирает только IPv4 (`default_halves`): адрес другого семейства
+            // в тоннель не попадёт, а шлюз IPv4 для него негоден.
+            if address.is_ipv4() != outside.gateway.is_ipv4() {
+                tracing::debug!(%address, "адрес другого семейства — маршрут наружу не нужен");
+                continue;
+            }
             let route = Route::via_gateway(
                 IpNet::from(*address),
                 outside.gateway,
@@ -259,6 +265,22 @@ mod tests {
                 "маршрут до сервера проигрывает {half}"
             );
         }
+    }
+
+    #[test]
+    fn an_ipv6_server_is_not_pinned_through_an_ipv4_gateway() {
+        let outside = DefaultRoute {
+            interface_index: 4,
+            address: "192.168.0.10".parse().expect("адрес"),
+            gateway: "192.168.0.1".parse().expect("шлюз"),
+            metric: 0,
+        };
+        let guard = RouteGuard::new();
+        let server: IpAddr = "2001:db8::1".parse().expect("адрес");
+
+        // Ничего не ставится и не падает: таблица маршрутов остаётся нетронутой.
+        guard.pin_outside(&[server], &outside).expect("пропущен");
+        assert!(guard.is_empty());
     }
 
     #[test]

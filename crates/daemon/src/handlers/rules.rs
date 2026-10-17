@@ -20,7 +20,12 @@ pub fn explain(
     udp: bool,
 ) -> Response {
     let Ok(target) = destination.parse::<SocketAddress>() else {
-        return Response::error(format!("не разбирается адрес `{destination}`"), true);
+        return Response::error(
+            format!(
+                "не разбирается адрес `{destination}`: нужен вид example.com:443 или [2001:db8::1]:443"
+            ),
+            true,
+        );
     };
 
     let network = if udp { Network::Udp } else { Network::Tcp };
@@ -89,6 +94,24 @@ mod tests {
     fn bad_address_is_reported() {
         let engine = engine_with_rules(json!([]));
         assert!(explain(&engine, "без-порта", None, false).is_error());
+    }
+
+    #[test]
+    fn ipv6_destination_needs_brackets_and_matches_a_v6_rule() {
+        let engine = engine_with_rules(json!([
+            { "id": "v6", "name": "Документация", "when": { "dest_ip": ["2001:db8::/32"] }, "action": "block" }
+        ]));
+
+        let Response::Explanation(explanation) = explain(&engine, "[2001:db8::1]:443", None, false)
+        else {
+            panic!("не тот ответ");
+        };
+        assert_eq!(explanation.decision, "block");
+
+        let Response::Error { message, .. } = explain(&engine, "2001:db8::1", None, false) else {
+            panic!("голый IPv6 без порта не разбирается");
+        };
+        assert!(message.contains("[2001:db8::1]:443"));
     }
 
     #[test]

@@ -100,11 +100,21 @@ impl FromStr for Address {
             return Ok(Self::Ip(ip));
         }
         let domain = normalize_domain(s);
-        if domain.is_empty() {
+        // Двоеточие и скобки в имени — недописанный IPv6; `%` — зона (`fe80::1%en0`), её не поддерживаем.
+        if domain.is_empty() || domain.contains([':', '[', ']', '%']) {
             return Err(CoreError::InvalidAddress(s.to_owned()));
         }
         Ok(Self::Domain(domain))
     }
+}
+
+/// Делит `host:port`; IPv6 обязан быть в скобках, иначе порт не отделить.
+pub(crate) fn split_host_port(raw: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = raw.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']')?;
+        return Some((host, tail.strip_prefix(':')?));
+    }
+    raw.rsplit_once(':').filter(|(host, _)| !host.contains(':'))
 }
 
 impl FromStr for SocketAddress {
@@ -114,16 +124,20 @@ impl FromStr for SocketAddress {
         let s = s.trim();
         let invalid = || CoreError::InvalidAddress(s.to_owned());
 
-        let (host_part, port_part) = if let Some(rest) = s.strip_prefix('[') {
-            let (host, tail) = rest.split_once(']').ok_or_else(invalid)?;
-            (host, tail.strip_prefix(':').ok_or_else(invalid)?)
-        } else {
-            s.rsplit_once(':').ok_or_else(invalid)?
-        };
-
+        let (host_part, port_part) = split_host_port(s).ok_or_else(invalid)?;
         let port: u16 = port_part.parse().map_err(|_| invalid())?;
         let host: Address = host_part.parse()?;
         Ok(Self::new(host, port))
+    }
+}
+
+impl SocketAddress {
+    /// Как `parse`, но без порта берётся `default_port`: `example.com`, `2001:db8::1`, `[2001:db8::1]`.
+    pub fn parse_or_port(s: &str, default_port: u16) -> CoreResult<Self> {
+        s.parse().or_else(|_| {
+            let host: Address = s.parse()?;
+            Ok(Self::new(host, default_port))
+        })
     }
 }
 
@@ -223,6 +237,44 @@ mod tests {
             let parsed: SocketAddress = raw.parse().expect("разбирается");
             assert_eq!(parsed.to_wire(), raw);
         }
+    }
+
+    #[test]
+    fn bare_v6_with_port_is_refused() {
+        assert!("2001:db8::1:443".parse::<SocketAddress>().is_err());
+        assert!("2001:db8::1".parse::<SocketAddress>().is_err());
+        assert!("[2001:db8::1]".parse::<SocketAddress>().is_err());
+        assert!("[2001:db8::1]443".parse::<SocketAddress>().is_err());
+    }
+
+    #[test]
+    fn a_zone_is_refused_not_taken_for_a_name() {
+        assert!("fe80::1%en0".parse::<Address>().is_err());
+        assert!("[fe80::1%en0]:443".parse::<SocketAddress>().is_err());
+    }
+
+    #[test]
+    fn a_broken_v6_is_not_a_domain() {
+        assert!("[2001:db8".parse::<Address>().is_err());
+        assert!("2001:db8:".parse::<Address>().is_err());
+        assert!("[not-an-ip]".parse::<Address>().is_err());
+    }
+
+    #[test]
+    fn default_port_goes_to_every_form_of_host() {
+        for (raw, wire) in [
+            ("example.com", "example.com:443"),
+            ("1.2.3.4", "1.2.3.4:443"),
+            ("2001:db8::1", "[2001:db8::1]:443"),
+            ("[2001:db8::1]", "[2001:db8::1]:443"),
+            ("[2001:db8::1]:8443", "[2001:db8::1]:8443"),
+            ("example.com:80", "example.com:80"),
+        ] {
+            let parsed = SocketAddress::parse_or_port(raw, 443).expect("разбирается");
+            assert_eq!(parsed.to_wire(), wire);
+        }
+        assert!(SocketAddress::parse_or_port("example.com:абв", 443).is_err());
+        assert!(SocketAddress::parse_or_port("fe80::1%en0", 443).is_err());
     }
 
     #[test]

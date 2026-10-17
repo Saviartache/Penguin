@@ -75,11 +75,7 @@ impl Link {
             .clone()
             .unwrap_or_else(|| default_port.to_string());
 
-        if self.host.contains(':') {
-            format!("[{}]:{port}", self.host)
-        } else {
-            format!("{}:{port}", self.host)
-        }
+        join_host_port(&self.host, &port)
     }
 
     /// Пара `uuid:пароль` (TUIC, Juicity): первое двоеточие отделяет UUID,
@@ -106,6 +102,16 @@ impl Link {
             .map(str::trim)
             .map(percent_decode)
             .unwrap_or_default()
+    }
+}
+
+/// Собирает `host:port`; IPv6 берётся в скобки, если их ещё нет.
+pub fn join_host_port(host: &str, port: &str) -> String {
+    let host = host.trim();
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 
@@ -153,18 +159,29 @@ fn split_once(raw: &str, separator: char) -> (&str, Option<&str>) {
 
 /// Делит `host:port`, не путаясь в двоеточиях IPv6 (`[::1]:443`).
 fn split_host_port(raw: &str) -> Result<(&str, Option<String>), String> {
+    let bad_host = || crate::i18n::s().link_bad_host.to_owned();
+
     if let Some(rest) = raw.strip_prefix('[') {
-        let (host, tail) = rest
-            .split_once(']')
-            .ok_or_else(|| crate::i18n::s().link_bad_host.to_owned())?;
-        let port = tail
-            .trim()
-            .strip_prefix(':')
-            .map(|port| port.trim().to_owned());
-        return Ok((host, port));
+        let (host, tail) = rest.split_once(']').ok_or_else(bad_host)?;
+        // Зона (`fe80::1%en0`) не поддерживается.
+        if host.contains('%') {
+            return Err(bad_host());
+        }
+        let tail = tail.trim();
+        if tail.is_empty() {
+            return Ok((host, None));
+        }
+        let port = tail.strip_prefix(':').ok_or_else(bad_host)?;
+        return Ok((host, Some(port.trim().to_owned())));
+    }
+
+    // Голый IPv6 без порта.
+    if raw.parse::<std::net::Ipv6Addr>().is_ok() {
+        return Ok((raw, None));
     }
 
     match raw.rsplit_once(':') {
+        Some((host, _)) if host.contains(':') => Err(bad_host()),
         Some((host, port)) => Ok((host, Some(port.trim().to_owned()))),
         // Порт подставит протокол: у каждого свой.
         None => Ok((raw, None)),
@@ -327,6 +344,29 @@ mod tests {
         let draft = parse("hy2://pass@[2001:db8::1]:443").expect("разбирается");
         assert_eq!(draft.text("server"), "[2001:db8::1]:443");
         draft.to_profile().expect("профиль собирается");
+    }
+
+    #[test]
+    fn an_ipv6_host_without_a_port_gets_the_default_one() {
+        for raw in ["hy2://pass@[2001:db8::1]", "hy2://pass@2001:db8::1"] {
+            let draft = parse(raw).expect("разбирается");
+            assert_eq!(draft.text("server"), "[2001:db8::1]:443");
+        }
+    }
+
+    #[test]
+    fn an_ipv6_host_keeps_a_port_range() {
+        let draft = parse("hy2://pass@[::1]:443,20000-30000").expect("разбирается");
+        assert_eq!(draft.text("server"), "[::1]:443,20000-30000");
+    }
+
+    #[test]
+    fn a_zone_or_a_bare_ipv6_with_a_port_is_refused() {
+        assert!(parse("hy2://pass@[fe80::1%25en0]:443").is_err());
+        assert!(parse("hy2://pass@[fe80::1%en0]:443").is_err());
+        // Допустимый IPv6 целиком — адрес без порта, а недопустимый порт не отщепляется.
+        assert!(parse("hy2://pass@2001:db8::1::443").is_err());
+        assert!(parse("hy2://pass@[2001:db8::1]443").is_err());
     }
 
     #[test]

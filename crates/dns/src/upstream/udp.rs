@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use penguin_core::address::SocketAddress;
 use penguin_proto::dialer::Dialer;
 use tokio::net::UdpSocket;
 
@@ -48,15 +49,14 @@ impl UdpUpstream {
     /// Разбирает адрес из настроек; порт по умолчанию 53.
     pub fn parse(address: &str) -> DnsResult<Self> {
         let address = address.trim();
-        let with_port = if address.contains(':') {
-            address.to_owned()
-        } else {
-            format!("{address}:53")
-        };
-
-        let server: SocketAddr = with_port
-            .parse()
-            .map_err(|_| DnsError::Config(format!("не разбирается адрес DNS `{address}`")))?;
+        let server = SocketAddress::parse_or_port(address, 53)
+            .ok()
+            .and_then(|target| target.as_socket_addr())
+            .ok_or_else(|| {
+                DnsError::Config(format!(
+                    "адрес DNS `{address}` нужен числовой: 1.1.1.1:53 или [2606:4700:4700::1111]:53"
+                ))
+            })?;
         Ok(Self::new(server))
     }
 
@@ -116,6 +116,23 @@ mod tests {
     fn handles_ipv6() {
         let upstream = UdpUpstream::parse("[2001:4860:4860::8888]:53").expect("разбирается");
         assert!(upstream.server().is_ipv6());
+    }
+
+    #[test]
+    fn ipv6_gets_the_default_port_with_or_without_brackets() {
+        for raw in ["2606:4700:4700::1111", "[2606:4700:4700::1111]"] {
+            let upstream = UdpUpstream::parse(raw).expect("разбирается");
+            assert!(upstream.server().is_ipv6());
+            assert_eq!(upstream.server().port(), 53);
+        }
+        let upstream = UdpUpstream::parse("[2606:4700:4700::1111]:5353").expect("разбирается");
+        assert_eq!(upstream.describe(), "udp://[2606:4700:4700::1111]:5353");
+    }
+
+    #[test]
+    fn a_zone_and_a_name_are_refused() {
+        assert!(UdpUpstream::parse("fe80::1%en0").is_err());
+        assert!(UdpUpstream::parse("dns.example.com").is_err());
     }
 
     #[test]

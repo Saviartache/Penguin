@@ -98,9 +98,11 @@ fn explain_flow(
     udp: bool,
     format: Format,
 ) -> Result<()> {
-    let target: SocketAddress = destination
-        .parse()
-        .with_context(|| format!("не разбирается адрес `{destination}`"))?;
+    let target: SocketAddress = destination.parse().with_context(|| {
+        format!(
+            "не разбирается адрес `{destination}`: нужен вид example.com:443 или [2001:db8::1]:443"
+        )
+    })?;
 
     let network = if udp { Network::Udp } else { Network::Tcp };
     let mut flow = FlowContext::to_target(
