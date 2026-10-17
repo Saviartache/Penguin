@@ -212,6 +212,20 @@ pub static STRINGS: Strings = Strings {
     dns_hijack: "Перехватывать запросы имён у системы",
     verbose_log: "Писать подробный журнал службы",
 
+    updates: "ОБНОВЛЕНИЯ",
+    check_updates: "Проверять обновления при запуске",
+    version: "Версия",
+    update_available: "доступна",
+    update_latest: "последняя",
+    update_checking: "проверяю...",
+    update_installing: "устанавливаю...",
+    update_restarting: "установлено, перезапуск...",
+    update_failed: "не вышло:",
+    update_check: "Проверить",
+    update_install: "Обновить",
+    update_label: "Обновление",
+    update_in_settings: "в настройках",
+
     tray_show: "Показать окно",
     tray_quit: "Выход",
 };

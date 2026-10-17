@@ -18,6 +18,17 @@ pub enum Command {
     Rules(RulesCommand),
     /// Проверка окружения: настройки, профили, права.
     Doctor,
+    /// Обновление с GitHub.
+    Update(UpdateCommand),
+}
+
+/// Команды обновления.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UpdateCommand {
+    /// Спросить GitHub, есть ли выпуск новее.
+    Check,
+    /// Скачать выпуск, сверить SHA-256 и заменить исполняемый файл.
+    Install,
 }
 
 /// Параметры локального прокси.
@@ -70,7 +81,7 @@ pub enum RulesCommand {
 }
 
 /// Имена команд этого модуля.
-pub const NAMES: [&str; 5] = ["socks", "http", "profiles", "rules", "doctor"];
+pub const NAMES: [&str; 6] = ["socks", "http", "profiles", "rules", "doctor", "update"];
 
 /// Разбирает команду; первым идёт её имя, общие флаги уже убраны.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed<Command>, ArgsError> {
@@ -84,8 +95,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed<Command>, 
         "profiles" => profiles(lx).map(|p| p.map(Command::Profiles)),
         "rules" => rules(lx).map(|p| p.map(Command::Rules)),
         "doctor" => leaf(lx, help::DOCTOR, Command::Doctor),
+        "update" => update(lx).map(|p| p.map(Command::Update)),
         _ => Err(ArgsError::UnknownCommand(name)),
     }
+}
+
+fn update(mut lx: Lexer) -> Result<Parsed<UpdateCommand>, ArgsError> {
+    subcommand(&mut lx, "update", help::UPDATE)?.and_then(|name| match name.as_str() {
+        "check" => leaf(lx, help::UPDATE_CHECK, UpdateCommand::Check),
+        "install" => leaf(lx, help::UPDATE_INSTALL, UpdateCommand::Install),
+        _ => Err(ArgsError::UnknownCommand(name)),
+    })
 }
 
 fn proxy(mut lx: Lexer, help: &'static str) -> Result<Parsed<SocksArgs>, ArgsError> {
@@ -352,6 +372,24 @@ mod tests {
             run(&["doctor", "--x"]),
             Err(ArgsError::UnknownOption("--x".into()))
         );
+    }
+
+    #[test]
+    fn update_subcommands() {
+        assert_eq!(
+            run(&["update", "check"]),
+            Ok(Command::Update(UpdateCommand::Check))
+        );
+        assert_eq!(
+            run(&["update", "install"]),
+            Ok(Command::Update(UpdateCommand::Install))
+        );
+        assert_eq!(run(&["update"]), Err(ArgsError::MissingCommand("update")));
+        assert_eq!(
+            run(&["update", "check", "x"]),
+            Err(ArgsError::Unexpected("x".into()))
+        );
+        assert!(help(&["update", "install", "-h"]).contains("update install"));
     }
 
     #[test]

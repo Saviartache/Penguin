@@ -12,7 +12,7 @@ use uikit::tokens::type_scale;
 use uikit::widgets::Button;
 
 use crate::app::message::{HomeMessage, Message};
-use crate::app::state::State;
+use crate::app::state::{State, UpdateStatus};
 use crate::console::{self, Line, Reveal};
 use crate::screens::tunnel::{Tone, describe, describe_button, describe_service_button};
 
@@ -44,6 +44,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
 fn lines(state: &State) -> Vec<Line> {
     let mut lines = config(state);
     lines.push(status(state));
+    lines.extend(update_notice(state));
     let traffic_head = Line::Section(crate::i18n::s().traffic.to_uppercase());
     if streaming(state) {
         lines.push(traffic_head);
@@ -55,6 +56,18 @@ fn lines(state: &State) -> Vec<Line> {
     }
     lines.extend(traffic(state));
     lines
+}
+
+/// Одна строка, когда есть новый выпуск; иначе ничего.
+fn update_notice(state: &State) -> Option<Line> {
+    let UpdateStatus::Available(found) = &state.updates.status else {
+        return None;
+    };
+    let strings = crate::i18n::s();
+    Some(pair(
+        strings.update_label,
+        format!("{} ({})", found.version, strings.update_in_settings),
+    ))
 }
 
 /// Поток показывается, пока тоннель поднимается, работает или переподключается.

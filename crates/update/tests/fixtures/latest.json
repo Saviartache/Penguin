@@ -1,0 +1,49 @@
+{
+  "url": "https://api.github.com/repos/Saviartache/penguin/releases/301",
+  "html_url": "https://github.com/Saviartache/penguin/releases/tag/v0.8.0",
+  "id": 301,
+  "tag_name": "v0.8.0",
+  "name": "v0.8.0",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-10-01T10:00:00Z",
+  "published_at": "2026-10-01T10:20:00Z",
+  "assets": [
+    {
+      "id": 1,
+      "name": "SHA256SUMS",
+      "size": 372,
+      "content_type": "text/plain",
+      "browser_download_url": "https://github.com/Saviartache/penguin/releases/download/v0.8.0/SHA256SUMS"
+    },
+    {
+      "id": 2,
+      "name": "penguin-0.8.0-linux-x64.tar.gz",
+      "size": 21000000,
+      "content_type": "application/gzip",
+      "browser_download_url": "https://github.com/Saviartache/penguin/releases/download/v0.8.0/penguin-0.8.0-linux-x64.tar.gz"
+    },
+    {
+      "id": 3,
+      "name": "penguin-0.8.0-macos-arm64.zip",
+      "size": 19000000,
+      "content_type": "application/zip",
+      "browser_download_url": "https://github.com/Saviartache/penguin/releases/download/v0.8.0/penguin-0.8.0-macos-arm64.zip"
+    },
+    {
+      "id": 4,
+      "name": "penguin-0.8.0-macos-x64.zip",
+      "size": 20000000,
+      "content_type": "application/zip",
+      "browser_download_url": "https://github.com/Saviartache/penguin/releases/download/v0.8.0/penguin-0.8.0-macos-x64.zip"
+    },
+    {
+      "id": 5,
+      "name": "penguin-0.8.0-windows-x64.zip",
+      "size": 18000000,
+      "content_type": "application/zip",
+      "browser_download_url": "https://github.com/Saviartache/penguin/releases/download/v0.8.0/penguin-0.8.0-windows-x64.zip"
+    }
+  ],
+  "body": "Что нового."
+}

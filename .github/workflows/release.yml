@@ -151,5 +151,7 @@ jobs:
           case "$GITHUB_REF_NAME" in
             *-*) flags="--prerelease" ;;
           esac
+          # Автообновление клиента сверяет скачанный архив с этим файлом.
+          (cd archives && sha256sum -- *.zip *.tar.gz > SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" archives/* \
             --title "$GITHUB_REF_NAME" --generate-notes $flags

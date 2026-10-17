@@ -23,6 +23,8 @@ penguin-dns.workspace = true
 # ответ на него — состояние системы, а не клиента.
 penguin-tun.workspace = true
 penguin-platform.workspace = true
+# Единственный путь клиента на GitHub.
+penguin-update = { workspace = true, features = ["net"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tokio-util.workspace = true
 thiserror.workspace = true

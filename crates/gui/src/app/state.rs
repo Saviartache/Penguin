@@ -50,6 +50,37 @@ pub struct State {
     pub servers: ServersState,
     /// Печатающая заставка.
     pub boot: Boot,
+    /// Обновление программы.
+    pub updates: Updates,
+}
+
+/// Что окно знает об обновлении.
+#[derive(Debug, Default)]
+pub struct Updates {
+    /// Где дело.
+    pub status: UpdateStatus,
+    /// Проверка при запуске уже решалась: настройки приходят от демона не раз.
+    pub startup_done: bool,
+}
+
+/// Ход обновления.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum UpdateStatus {
+    /// Не спрашивали или спросили и тихо не вышло.
+    #[default]
+    Idle,
+    /// Идёт проверка.
+    Checking,
+    /// Новее нет.
+    Latest,
+    /// Есть новый выпуск.
+    Available(penguin_update::Available),
+    /// Идёт скачивание и подмена.
+    Installing,
+    /// Установлено, окно перезапускается.
+    Restarting,
+    /// Не вышло: причина.
+    Failed(String),
 }
 
 impl Default for State {
@@ -66,6 +97,7 @@ impl Default for State {
             logs: LogsState::default(),
             servers: ServersState::default(),
             boot: Boot::idle(),
+            updates: Updates::default(),
         }
     }
 }

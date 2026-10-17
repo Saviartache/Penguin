@@ -433,6 +433,34 @@ pub struct Strings {
     /// Подробность журнала службы.
     pub verbose_log: &'static str,
 
+    // --- обновления ---
+    /// Раздел обновлений.
+    pub updates: &'static str,
+    /// Проверять обновления при запуске.
+    pub check_updates: &'static str,
+    /// «Версия» в строке «Версия 0.7.2, доступна 0.8.0».
+    pub version: &'static str,
+    /// «доступна» в той же строке.
+    pub update_available: &'static str,
+    /// Установлена последняя.
+    pub update_latest: &'static str,
+    /// Идёт проверка.
+    pub update_checking: &'static str,
+    /// Идёт установка.
+    pub update_installing: &'static str,
+    /// Установлено, окно перезапускается.
+    pub update_restarting: &'static str,
+    /// Начало строки с причиной отказа.
+    pub update_failed: &'static str,
+    /// Кнопка проверки.
+    pub update_check: &'static str,
+    /// Кнопка установки.
+    pub update_install: &'static str,
+    /// Поле компактного окна.
+    pub update_label: &'static str,
+    /// Значение поля: где обновиться.
+    pub update_in_settings: &'static str,
+
     // --- значок в лотке ---
     /// Пункт меню значка: достать окно из лотка.
     pub tray_show: &'static str,
@@ -646,6 +674,19 @@ mod tests {
                 table.capture_default_route,
                 table.dns_hijack,
                 table.verbose_log,
+                table.updates,
+                table.check_updates,
+                table.version,
+                table.update_available,
+                table.update_latest,
+                table.update_checking,
+                table.update_installing,
+                table.update_restarting,
+                table.update_failed,
+                table.update_check,
+                table.update_install,
+                table.update_label,
+                table.update_in_settings,
                 table.tray_show,
                 table.tray_quit,
             ];

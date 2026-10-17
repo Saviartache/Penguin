@@ -14,6 +14,11 @@ use penguin_config::{ConfigStore, Paths};
 
 /// Выполняет команду терминала.
 pub fn run(command: &Command, config_dir: Option<&std::path::Path>, json: bool) -> Result<()> {
+    // Настройки не нужны, и битый файл не должен мешать обновиться.
+    if let Command::Update(update) = command {
+        return commands::update::run(update, Format::from_flag(json));
+    }
+
     let store = match config_dir {
         Some(dir) => ConfigStore::new(Paths::rooted(dir)),
         None => ConfigStore::discover().context("не удалось определить каталог настроек")?,
@@ -42,6 +47,7 @@ pub fn run(command: &Command, config_dir: Option<&std::path::Path>, json: bool) 
         Command::Profiles(command) => commands::profiles::run(&config, command, format),
         Command::Rules(command) => commands::rules::run(&config, command, format),
         Command::Doctor => commands::doctor::run(&store, &config, format),
+        Command::Update(update) => commands::update::run(update, format),
     }
 }
 

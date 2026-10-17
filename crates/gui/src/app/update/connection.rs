@@ -22,7 +22,15 @@ const SERVICE_WAIT_STEP: std::time::Duration = std::time::Duration::from_millis(
 /// Разбирает всё, что пришло от демона.
 pub fn handle(app: &mut App, message: IpcMessage) -> Task<Message> {
     match message {
-        IpcMessage::Response(response) => handle_response(app, *response),
+        IpcMessage::Response(response) => {
+            // Настройки известны только после ответа демона: тогда и решается проверка.
+            let config_arrived = matches!(*response, Response::Config(_));
+            let task = handle_response(app, *response);
+            if config_arrived {
+                return Task::batch([task, crate::app::update::release::startup_check(app)]);
+            }
+            task
+        }
         IpcMessage::Event(event) => handle_event(app, *event),
         IpcMessage::Disconnected(reason) => {
             // Пустая причина — подписка подключилась.

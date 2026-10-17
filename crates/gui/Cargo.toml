@@ -17,6 +17,8 @@ penguin-config.workspace = true
 penguin-ipc.workspace = true
 # Автозапуск окна пишет в ветку пользователя; у службы прав на неё нет.
 penguin-platform.workspace = true
+# Только типы и расписание: в сеть окно не ходит, это делает `penguin update`.
+penguin-update.workspace = true
 # Пакет `rust-ui-kit`, библиотека `uikit`. `tray` на Linux требует libgtk-3-dev.
 uikit = { workspace = true, features = ["tray"] }
 # Без `tiny-skia`: в графе он оставляет прошлый кадр прямоугольниками. `crisp` и

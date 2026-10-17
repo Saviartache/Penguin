@@ -13,7 +13,7 @@
 | Крейт | Может зависеть от |
 |---|---|
 | `core` | ничего внутреннего |
-| `config`, `proto`, `match`, `process`, `tun`, `platform` | `core` |
+| `config`, `proto`, `match`, `process`, `tun`, `platform`, `update` | `core` |
 | `netstack` | `core`, `tun` |
 | `dns` | `core`, `proto` |
 | `inbound` | `core` |
@@ -21,8 +21,8 @@
 | `engine` | всё выше + `protocols/*` |
 | `ipc` | `core`, `config` |
 | `daemon` | `engine`, `ipc`, `config`, `platform` |
-| `cli` | `ipc`, `engine`, `inbound`, `proto`, `tun`, `platform` |
-| `gui` | `ipc`, `config`, `core`, `platform`, `uikit` |
+| `cli` | `ipc`, `engine`, `inbound`, `proto`, `tun`, `platform`, `update` |
+| `gui` | `ipc`, `config`, `core`, `platform`, `uikit`, `update` без фичи `net` |
 | `app` | `daemon`, `cli`, `gui`, `config`, `platform` |
 | `protocols/transport`, `protocols/utls` | `core`, `proto` |
 | `protocols/*` | **только** `core`, `proto`, `transport`, `utls` |
@@ -43,6 +43,12 @@
   (цвет значка в лотке). Остальное — через `ipc`.
 - **1.6.** `servers/*` — отдельные программы для другой машины. Формат провода
   берут из своего `protocols/*`, а не повторяют. Клиент о серверах не знает.
+- **1.7.** `update` — единственный код клиента, ходящий на GitHub. Окну
+  достаются его типы и расписание (без фичи `net`, то есть без HTTP-клиента);
+  проверку и установку окно просит у **себя же**, запущенного как
+  `penguin update check|install` (как в 1.3), и читает `--json`. Демон в
+  обновлении не участвует: заменяемый файл принадлежит пользователю, а службу
+  подхватывает прежний путь (`build_stamp`).
 
 ---
 

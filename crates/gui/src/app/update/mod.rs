@@ -3,6 +3,7 @@
 pub mod connection;
 pub mod logs;
 pub mod profiles;
+pub mod release;
 pub mod rules;
 pub mod settings;
 
@@ -37,6 +38,7 @@ pub fn handle(app: &mut App, message: Message) -> Task<Message> {
         Message::SplitTunnel(split) => rules::handle(app, split),
         Message::Logs(logs) => logs::handle(app, logs),
         Message::Settings(settings) => settings::handle(app, settings),
+        Message::Update(update) => release::handle(app, update),
     }
 }
 

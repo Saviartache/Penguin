@@ -14,6 +14,7 @@ members = [
     "crates/inbound",
     "crates/dns",
     "crates/platform",
+    "crates/update",
     "crates/engine",
     "crates/ipc",
     "crates/daemon",
@@ -64,6 +65,8 @@ penguin-netstack = { path = "crates/netstack" }
 penguin-inbound  = { path = "crates/inbound" }
 penguin-dns      = { path = "crates/dns" }
 penguin-platform = { path = "crates/platform" }
+# Без сети окно получает одни типы; сеть включается по умолчанию.
+penguin-update   = { path = "crates/update", default-features = false }
 # Без этого умолчания движка возвращают все протоколы демону и клиенту.
 penguin-engine   = { path = "crates/engine", default-features = false }
 penguin-ipc      = { path = "crates/ipc" }
@@ -112,6 +115,10 @@ h2 = "0.4"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 smoltcp = { version = "0.12", default-features = false }
+# Проверка обновлений: блокирующий клиент, TLS — `rustls`/`ring` из дерева.
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+# Уже в дереве через `png`; здесь — разворот deflate в zip и tar.gz.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # --- данные ---
 serde = { version = "1", features = ["derive", "rc"] }
