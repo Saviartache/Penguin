@@ -4,6 +4,7 @@
 //! просит через канал управления. Библиотека: исполняемый файл — `crates/app`.
 
 pub mod handlers;
+pub mod instance;
 pub mod logging;
 mod preparation;
 mod readiness;

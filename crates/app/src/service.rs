@@ -12,6 +12,12 @@ pub(crate) fn run(
     controller_uid: Option<u32>,
     import_config: Option<&Path>,
 ) -> Result<()> {
+    // Читающая команда не ждёт очереди.
+    let _serial = if matches!(command, ServiceCommand::Status) {
+        None
+    } else {
+        Some(penguin_daemon::instance::lock_service_commands()?)
+    };
     let access_changed = if prepares_service(command) {
         penguin_daemon::prepare_service(controller_uid, import_config)?
     } else {

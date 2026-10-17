@@ -42,6 +42,7 @@ pub static STRINGS: Strings = Strings {
     service_starting: "Starting the service",
     service_needs_rights: "The tunnel needs administrator rights: the service is not installed",
     service_silent: "The service is installed but does not answer — check its log",
+    service_lost: "The service does not answer; restart Penguin to reinstall it",
     service_stopping: "Closing: lowering the tunnel and stopping the service",
 
     start_service: "Start service",

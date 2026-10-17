@@ -31,6 +31,10 @@ async fn run_with_paths(paths: Option<Paths>, cancel: CancellationToken) -> Resu
 }
 
 async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()> {
+    // Раньше сокета: второй демон не должен убрать сокет первого. Объявлена первой — отпускается последней.
+    let _single = tokio::task::spawn_blocking(crate::instance::lock_daemon)
+        .await
+        .context("ожидание блокировки прервано")??;
     // Единственность занимаем до записи настроек и восстановления сети
     let listener = penguin_ipc::transport::listen().context("could not bind control transport")?;
     let paths = paths
