@@ -7,6 +7,7 @@ pub mod servers;
 pub mod settings;
 pub mod table;
 pub mod tunnel;
+pub mod update;
 
 use iced::Element;
 

@@ -49,6 +49,8 @@ pub enum UpdateMessage {
     },
     /// Кнопка «Обновить».
     Install,
+    /// Окно обновления закрыто.
+    Dismissed,
     /// Установка закончилась: путь файла, который надо запустить заново.
     Installed(Result<std::path::PathBuf, String>),
 }

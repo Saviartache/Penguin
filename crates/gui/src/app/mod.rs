@@ -108,7 +108,10 @@ impl App {
             )
             .build();
 
-        let body = container(if self.state.expanded {
+        // Предложение обновиться — поверх любого вида, компактного тоже.
+        let body = container(if self.state.updates.dialog {
+            padded(screens::update::view(&self.state))
+        } else if self.state.expanded {
             self.expanded()
         } else {
             self.compact()
@@ -272,11 +275,7 @@ impl App {
     }
 
     fn compact(&self) -> Element<'_, Message> {
-        container(screens::compact::view(&self.state))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(PAGE_PADDING)
-            .into()
+        padded(screens::compact::view(&self.state))
     }
 
     fn expanded(&self) -> Element<'_, Message> {
@@ -309,6 +308,15 @@ impl App {
             .height(Length::Fill)
             .into()
     }
+}
+
+/// Страница компактного вида: на всё окно с отступом.
+fn padded(content: Element<'_, Message>) -> Element<'_, Message> {
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(PAGE_PADDING)
+        .into()
 }
 
 #[cfg(test)]

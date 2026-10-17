@@ -226,6 +226,7 @@ pub static STRINGS: Strings = Strings {
     update_install: "Обновить",
     update_label: "Обновление",
     update_in_settings: "в настройках",
+    update_title: "Доступно обновление",
 
     tray_show: "Показать окно",
     tray_quit: "Выход",

@@ -8,15 +8,12 @@ use std::process::Command;
 
 use iced::Task;
 use penguin_ipc::schema::LogLevel;
-use penguin_update::{CheckReport, schedule};
+use penguin_update::CheckReport;
 
 use crate::app::App;
 use crate::app::message::{Message, UpdateMessage, WindowMessage};
 use crate::app::state::UpdateStatus;
 use crate::app::update::connection::shutdown_service;
-
-/// Файл с временем последней проверки.
-const STAMP: &str = "update-check";
 
 /// Разбирает сообщения обновления.
 pub fn handle(app: &mut App, message: UpdateMessage) -> Task<Message> {
@@ -24,17 +21,21 @@ pub fn handle(app: &mut App, message: UpdateMessage) -> Task<Message> {
         UpdateMessage::Check => begin_check(app, true),
         UpdateMessage::Checked { manual, result } => checked(app, manual, result),
         UpdateMessage::Install => install(app),
+        UpdateMessage::Dismissed => {
+            app.state_mut().updates.dialog = false;
+            Task::none()
+        }
         UpdateMessage::Installed(result) => installed(app, result),
     }
 }
 
-/// Проверка при запуске: раз за сеанс, если включена и пора.
+/// Проверка при запуске: раз за сеанс, если включена.
 pub fn startup_check(app: &mut App) -> Task<Message> {
     let state = app.state_mut();
     if std::mem::replace(&mut state.updates.startup_done, true) {
         return Task::none();
     }
-    if !state.config.app.check_updates || !due() {
+    if !state.config.app.check_updates {
         return Task::none();
     }
     begin_check(app, false)
@@ -69,6 +70,7 @@ fn checked(app: &mut App, manual: bool, result: Result<CheckReport, String>) -> 
                 );
             }
             state.updates.status = UpdateStatus::Available(found);
+            state.updates.dialog = true;
         }
         Ok(_) => state.updates.status = UpdateStatus::Latest,
         // Тихая проверка при запуске не должна пугать: нет сети — не новость.
@@ -109,28 +111,10 @@ fn installed(app: &mut App, result: Result<PathBuf, String>) -> Task<Message> {
     }
 }
 
-/// Файл с отметкой проверки: в профиле пользователя, окну туда писать можно.
-fn stamp_file() -> Option<PathBuf> {
-    penguin_config::Paths::user()
-        .ok()
-        .map(|paths| paths.data_dir().join(STAMP))
-}
-
-fn due() -> bool {
-    let last = stamp_file().and_then(|file| schedule::last_check(&file));
-    schedule::is_due(last, schedule::now_secs())
-}
-
 async fn check() -> Result<CheckReport, String> {
     tokio::task::spawn_blocking(|| {
         let output = run_self(&["update", "check", "--json"])?;
-        let report = parse_report(&output)?;
-        if let Some(file) = stamp_file()
-            && let Err(err) = schedule::mark_checked(&file, schedule::now_secs())
-        {
-            tracing::warn!(%err, "время проверки не записано");
-        }
-        Ok(report)
+        parse_report(&output)
     })
     .await
     .map_err(|err| err.to_string())?
@@ -152,7 +136,8 @@ async fn restart(online: bool, executable: PathBuf) {
     if online {
         shutdown_service().await;
     }
-    match tokio::task::spawn_blocking(move || Command::new(executable).spawn()).await {
+    let spawn = move || Command::new(executable).env(crate::RESTARTED, "1").spawn();
+    match tokio::task::spawn_blocking(spawn).await {
         Ok(Ok(_child)) => {}
         Ok(Err(err)) => tracing::error!(%err, "новая сборка не запустилась"),
         Err(err) => tracing::error!(%err, "новая сборка не запустилась"),
@@ -238,6 +223,24 @@ mod tests {
 
         assert_eq!(app.state().updates.status, UpdateStatus::Available(found()));
         assert_eq!(app.state().connection.log.len(), before + 1);
+    }
+
+    #[test]
+    fn a_found_release_opens_the_dialog_and_closing_keeps_the_offer() {
+        let mut app = app();
+        let _ = checked(&mut app, true, Ok(report(Some(found()))));
+        assert!(app.state().updates.dialog);
+
+        let _ = handle(&mut app, UpdateMessage::Dismissed);
+        assert!(!app.state().updates.dialog);
+        assert_eq!(app.state().updates.status, UpdateStatus::Available(found()));
+    }
+
+    #[test]
+    fn no_news_opens_no_dialog() {
+        let mut app = app();
+        let _ = checked(&mut app, true, Ok(report(None)));
+        assert!(!app.state().updates.dialog);
     }
 
     #[test]

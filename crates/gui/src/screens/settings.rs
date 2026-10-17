@@ -189,47 +189,55 @@ fn switch<'a>(
         .into()
 }
 
-/// Версия слева, кнопки «Проверить» и «Обновить» справа.
+/// Строка как у переключателей: версия слева, действие в скобках справа, нажимается вся.
 fn update_row(state: &State) -> Element<'_, Message> {
     let palette = &state.palette;
     let status = &state.updates.status;
-    let strings = crate::i18n::s();
+    let (label, message) = update_action(status);
 
     let tone = match status {
         UpdateStatus::Available(_) => palette.text,
         _ => ink::level(palette, ink::SECONDARY),
     };
-    let busy = matches!(
-        status,
-        UpdateStatus::Checking | UpdateStatus::Installing | UpdateStatus::Restarting
-    );
+    let value_tone = if message.is_some() {
+        palette.text
+    } else {
+        ink::level(palette, ink::TERTIARY)
+    };
 
-    let mut line = Flex::row()
+    let line = Flex::row()
         .w(Size::FILL)
         .push_auto(glyphs(status_line(status), tone))
         .push(ui::spring())
+        .push_auto(glyphs(format!("[ {label} ]"), value_tone))
         .gap(CELL)
-        .align(Alignment::Center);
-    if matches!(status, UpdateStatus::Available(_)) {
-        line = line.push_auto(update_button(
-            strings.update_install,
-            UpdateMessage::Install,
-        ));
-    }
-    if !busy {
-        line = line.push_auto(update_button(strings.update_check, UpdateMessage::Check));
-    }
-    line.build()
+        .align(Alignment::Center)
+        .build();
+
+    button(line)
+        .width(Length::Fill)
+        .padding(ROW_PADDING)
+        .style(table::row_style(message.is_some()))
+        .on_press_maybe(message.map(Message::Update))
+        .into()
 }
 
-fn update_button(label: &str, message: UpdateMessage) -> Element<'_, Message> {
-    // Ширина по подписи: на другом языке она другая.
-    let width = (label.chars().count() + 3) as f32 * CELL + 2.0 * gap::XS;
-    table::action(label, width, Message::Update(message))
+/// Что сделает нажатие на строку; пока занято — ничего.
+fn update_action(status: &UpdateStatus) -> (&'static str, Option<UpdateMessage>) {
+    let strings = crate::i18n::s();
+    match status {
+        UpdateStatus::Available(_) => (strings.update_install, Some(UpdateMessage::Install)),
+        UpdateStatus::Checking | UpdateStatus::Installing | UpdateStatus::Restarting => {
+            (strings.update_check, None)
+        }
+        UpdateStatus::Idle | UpdateStatus::Latest | UpdateStatus::Failed(_) => {
+            (strings.update_check, Some(UpdateMessage::Check))
+        }
+    }
 }
 
 /// «Версия 0.7.2, доступна 0.8.0».
-fn status_line(status: &UpdateStatus) -> String {
+pub(crate) fn status_line(status: &UpdateStatus) -> String {
     let strings = crate::i18n::s();
     let version = penguin_update::Version::current();
     let tail = match status {
@@ -302,6 +310,16 @@ mod tests {
                 "подпись `{label}` не объясняет настройку"
             );
         }
+    }
+
+    #[test]
+    fn the_update_row_checks_installs_or_waits() {
+        assert!(matches!(
+            update_action(&UpdateStatus::Idle).1,
+            Some(UpdateMessage::Check)
+        ));
+        assert!(update_action(&UpdateStatus::Checking).1.is_none());
+        assert!(update_action(&UpdateStatus::Installing).1.is_none());
     }
 
     #[test]

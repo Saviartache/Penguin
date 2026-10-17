@@ -61,6 +61,8 @@ pub struct Updates {
     pub status: UpdateStatus,
     /// Проверка при запуске уже решалась: настройки приходят от демона не раз.
     pub startup_done: bool,
+    /// Открыто окно с предложением обновиться.
+    pub dialog: bool,
 }
 
 /// Ход обновления.

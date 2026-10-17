@@ -462,6 +462,8 @@ pub struct Strings {
     pub update_label: &'static str,
     /// Значение поля: где обновиться.
     pub update_in_settings: &'static str,
+    /// Заголовок окна с предложением обновиться.
+    pub update_title: &'static str,
 
     // --- значок в лотке ---
     /// Пункт меню значка: достать окно из лотка.
@@ -689,6 +691,7 @@ mod tests {
                 table.update_install,
                 table.update_label,
                 table.update_in_settings,
+                table.update_title,
                 table.tray_show,
                 table.tray_quit,
             ];
