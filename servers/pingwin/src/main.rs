@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use penguin_core::address::{Address, SocketAddress};
 use penguin_pingwin::StaticKeyPair;
 use penguin_pingwin_server::{Server, ServerConfig};
 
@@ -182,15 +183,14 @@ fn link(path: &Path, args: &LinkArgs) -> Result<()> {
 
 /// Разбирает `example.com:443` и `[2001:db8::1]:443`; адрес чаще доменный.
 fn split_host_port(raw: &str) -> Result<(String, u16)> {
-    let raw = raw.trim();
-    let (host, port) = raw
-        .rsplit_once(':')
-        .with_context(|| format!("в адресе `{raw}` нет порта"))?;
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    let port: u16 = port
+    let target: SocketAddress = raw
         .parse()
-        .with_context(|| format!("порт `{port}` не разбирается"))?;
-    Ok((host.to_owned(), port))
+        .with_context(|| format!("адрес `{raw}` нужен в виде host:port или [IPv6]:port"))?;
+    let host = match target.host {
+        Address::Domain(domain) => domain,
+        Address::Ip(ip) => ip.to_string(),
+    };
+    Ok((host, target.port))
 }
 
 /// Печатает новую пару ключей.
@@ -231,4 +231,28 @@ fn run(path: &Path) -> Result<()> {
                 })
                 .await
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_every_form_of_address() {
+        assert_eq!(
+            split_host_port("example.com:443").expect("разбирается"),
+            ("example.com".to_owned(), 443)
+        );
+        assert_eq!(
+            split_host_port("[2001:db8::1]:8443").expect("разбирается"),
+            ("2001:db8::1".to_owned(), 8443)
+        );
+    }
+
+    #[test]
+    fn a_bare_ipv6_or_a_missing_port_is_refused() {
+        assert!(split_host_port("2001:db8::1").is_err());
+        assert!(split_host_port("[2001:db8::1]").is_err());
+        assert!(split_host_port("example.com").is_err());
+    }
 }

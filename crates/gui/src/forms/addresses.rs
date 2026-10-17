@@ -48,10 +48,17 @@ pub fn classify(value: &str) -> Option<Kind> {
 }
 
 /// Значения строки; разделители любые: списки вставляют откуда придётся.
+/// Скобки вокруг голого IPv6 (`[2001:db8::1]`) снимаются.
 pub fn tokens(raw: &str) -> impl Iterator<Item = &str> {
     raw.split([',', ';', ' ', '\t', '\n', '\r'])
         .map(str::trim)
         .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .strip_prefix('[')
+                .and_then(|inner| inner.strip_suffix(']'))
+                .unwrap_or(token)
+        })
 }
 
 /// Отделяет порт от адреса: `host:443`, `[2001:db8::1]:443`. Голый IPv6 портом
@@ -196,6 +203,29 @@ mod tests {
         assert_eq!(split_port("2001:db8::1"), None);
         assert_eq!(split_port("google.com"), None);
         assert_eq!(split_port("google.com:http"), None);
+    }
+
+    #[test]
+    fn ipv6_networks_are_taken_with_or_without_brackets() {
+        let parsed = parse("2001:db8::/32, [2001:db8:1::1] ::1 [fd00::]:443");
+        assert_eq!(parsed.networks, ["2001:db8::/32", "2001:db8:1::1", "::1"]);
+        assert_eq!(parsed.unknown, ["[fd00::]:443"]);
+    }
+
+    #[test]
+    fn a_zone_is_reported_not_swallowed() {
+        assert_eq!(classify("fe80::1%en0"), None);
+        assert_eq!(parse("fe80::1%en0").unknown, ["fe80::1%en0"]);
+    }
+
+    #[test]
+    fn a_bare_ipv6_is_never_split_at_the_last_colon() {
+        assert_eq!(split_port("2001:db8::1:443"), None);
+        assert_eq!(split_port("[2001:db8::1]"), None);
+        assert_eq!(
+            split_port("[2001:db8::1]:443"),
+            Some(("2001:db8::1", "443"))
+        );
     }
 
     #[test]

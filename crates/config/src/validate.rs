@@ -222,6 +222,37 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_listen_address_follows_the_same_rule_as_ipv4() {
+        let inbound = |listen: &str| InboundConfig {
+            listen: listen.parse().expect("адрес"),
+            auth: None,
+        };
+
+        let mut config = RootConfig::default();
+        config.network.socks = Some(inbound("[::1]:1080"));
+        validate(&config).expect("петля IPv6 — не открытый прокси");
+
+        config.network.socks = Some(inbound("[::]:1080"));
+        assert!(validate(&config).is_err(), "[::] слушает всю сеть");
+    }
+
+    #[test]
+    fn ipv6_settings_survive_a_round_trip() {
+        let mut config = RootConfig::default();
+        config.network.socks = Some(InboundConfig {
+            listen: "[::1]:1080".parse().expect("адрес"),
+            auth: None,
+        });
+        config.network.tun.ipv6 = "fd12:3456::1".parse().expect("адрес");
+        config.network.tun.ipv6_enabled = true;
+
+        let text = serde_json::to_string(&config).expect("пишется");
+        assert!(text.contains("[::1]:1080"), "{text}");
+        let back: RootConfig = serde_json::from_str(&text).expect("читается");
+        assert_eq!(back.network, config.network);
+    }
+
+    #[test]
     fn rejects_impossible_mtu() {
         let mut config = RootConfig::default();
         config.network.tun.mtu = 9000;

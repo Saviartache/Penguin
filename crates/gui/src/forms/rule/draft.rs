@@ -372,6 +372,22 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_values_land_in_their_sections() {
+        let mut draft = draft();
+        let rest = draft.add("2001:db8::/32 [2001:db8:1::1] [2001:db8:2::1]:443 fe80::1%en0");
+
+        assert_eq!(
+            draft.hosts,
+            ["2001:db8::/32", "2001:db8:1::1", "2001:db8:2::1"]
+        );
+        assert_eq!(draft.ports, ["443"]);
+        assert_eq!(
+            rest, "fe80::1%en0",
+            "зона не поддерживается и остаётся в поле"
+        );
+    }
+
+    #[test]
     fn marks_choose_the_kind_of_domain() {
         let mut draft = draft();
         assert_eq!(draft.add("=Copilot.com *google* =nope *a.b"), "=nope, *a.b");

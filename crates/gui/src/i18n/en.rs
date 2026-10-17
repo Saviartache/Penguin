@@ -130,7 +130,7 @@ pub static STRINGS: Strings = Strings {
     dpi_no_tunnel: "No tunnel here: the connection goes straight to the site and is not encrypted. It helps where the site's address is reachable but the conversation is cut by the host name",
     need_server: "Server address is empty",
     need_password: "Password is empty",
-    bad_server: "The address must look like example.com:443",
+    bad_server: "The address must look like example.com:443 or [2001:db8::1]:443 (IPv6 in brackets, no zone)",
 
     mode: "The rest",
     rest: "Everything else",
@@ -143,7 +143,7 @@ pub static STRINGS: Strings = Strings {
     toggle_hint: "TOP TO BOTTOM, FIRST MATCH WINS · CLICK A ROW: EDIT",
     probe_rule: "Test",
     rule_probe: "Check a rule",
-    probe_hint: "Enter an address and, if it matters, an application: I will show which rule wins.",
+    probe_hint: "Enter an address with a port (IPv6: [2001:db8::1]:443) and, if it matters, an application: I will show which rule wins.",
     destination: "Address",
     process: "Application",
     rule_name: "Group name",

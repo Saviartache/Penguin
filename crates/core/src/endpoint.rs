@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::address::Address;
+use crate::address::{Address, split_host_port};
 use crate::error::{CoreError, CoreResult};
 
 /// Адрес сервера вместе с тем, по каким портам к нему стучаться.
@@ -112,19 +112,11 @@ impl FromStr for ServerEndpoint {
     /// Разбирает `example.com:443`, `[2001:db8::1]:443`, `example.com:20000-30000`.
     fn from_str(s: &str) -> CoreResult<Self> {
         let raw = s.trim();
+        // Порта нет — умолчание не подставляется.
         let (host, ports) =
-            split_host_ports(raw).ok_or_else(|| CoreError::InvalidAddress(raw.to_owned()))?;
+            split_host_port(raw).ok_or_else(|| CoreError::InvalidAddress(raw.to_owned()))?;
         Ok(Self::new(host.parse()?, ports.parse()?))
     }
-}
-
-/// Делит `host:ports` (IPv6 в скобках); `None` — порта нет, умолчание не подставляется.
-fn split_host_ports(raw: &str) -> Option<(&str, &str)> {
-    if let Some(rest) = raw.strip_prefix('[') {
-        let (host, tail) = rest.split_once(']')?;
-        return Some((host, tail.trim().strip_prefix(':')?));
-    }
-    raw.rsplit_once(':')
 }
 
 impl FromStr for PortSpec {
@@ -275,6 +267,24 @@ mod tests {
 
         let endpoint: ServerEndpoint = "example.com:20000-30000".parse().expect("разбирается");
         assert!(endpoint.ports.is_hopping());
+    }
+
+    #[test]
+    fn a_v6_endpoint_keeps_brackets_and_hopping_ports() {
+        let endpoint: ServerEndpoint = "[::1]:443,20000-30000".parse().expect("разбирается");
+        assert!(endpoint.ports.is_hopping());
+        assert_eq!(endpoint.to_string(), "[::1]:443,20000-30000");
+
+        let endpoint: ServerEndpoint = "[2001:db8::1]:20000-30000".parse().expect("разбирается");
+        assert_eq!(endpoint.to_string(), "[2001:db8::1]:20000-30000");
+    }
+
+    #[test]
+    fn a_bare_v6_is_not_split_into_a_host_and_a_port() {
+        assert!("2001:db8::1".parse::<ServerEndpoint>().is_err());
+        assert!("2001:db8::1:443".parse::<ServerEndpoint>().is_err());
+        assert!("fe80::1%en0".parse::<ServerEndpoint>().is_err());
+        assert!("[fe80::1%en0]:443".parse::<ServerEndpoint>().is_err());
     }
 
     #[test]
