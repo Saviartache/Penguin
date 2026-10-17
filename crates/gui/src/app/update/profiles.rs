@@ -2,10 +2,10 @@
 
 use iced::Task;
 use penguin_core::id::ProfileId;
-use penguin_ipc::schema::Request;
+use penguin_ipc::schema::{LogLevel, Request, Response};
 
 use crate::app::App;
-use crate::app::message::{Message, ServersMessage};
+use crate::app::message::{IpcMessage, Message, ServersMessage};
 use crate::app::probe_queue::ProbeQueue;
 use crate::app::update::{request, save};
 use crate::forms::server as editor;
@@ -24,6 +24,7 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
             state.servers.probe.start(ids);
             probe_current(&app.state().servers.probe)
         }
+        ServersMessage::ProbeFailed(profile, message) => probe_failed(app, &profile, message),
         ServersMessage::PickerOpened => {
             app.state_mut().servers.picker = true;
             app.state_mut().servers.link.clear();
@@ -67,12 +68,34 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
 
 /// Выбор сохраняется сразу; поднятый тоннель переподключается на новый профиль.
 /// Просит проверить профиль, на котором стоит очередь.
+///
+/// Ошибка уходит отдельным сообщением: чужая ошибка прогон не обрывает.
 pub fn probe_current(queue: &ProbeQueue) -> Task<Message> {
-    queue.current().map_or_else(Task::none, |id| {
-        request(Request::Probe {
-            profile: Some(ProfileId::new(id)),
-        })
-    })
+    let Some(id) = queue.current().map(str::to_owned) else {
+        return Task::none();
+    };
+    let probe = Request::Probe {
+        profile: Some(ProfileId::new(&id)),
+    };
+    Task::perform(
+        crate::ipc::client::send_or_error(probe),
+        move |response| match response {
+            Response::Error { message, .. } => {
+                Message::Servers(ServersMessage::ProbeFailed(id.clone(), message))
+            }
+            other => Message::Ipc(IpcMessage::Response(Box::new(other))),
+        },
+    )
+}
+
+/// Ошибка своего прогона останавливает его: дальше по очереди будет та же.
+fn probe_failed(app: &mut App, profile: &str, message: String) -> Task<Message> {
+    let state = app.state_mut();
+    if state.servers.probe.current() == Some(profile) {
+        state.servers.probe.cancel();
+    }
+    state.connection.push_log(LogLevel::Error, message);
+    Task::none()
 }
 
 fn select(app: &mut App, id: &str) -> Task<Message> {
@@ -245,6 +268,20 @@ mod tests {
 
         assert_eq!(app.state().servers.probe.current(), Some("home"));
         assert_eq!(app.state().servers.latencies.len(), 1);
+    }
+
+    #[test]
+    fn only_an_error_of_the_current_probe_stops_the_run() {
+        let mut app = app_with_profiles(&["home", "work"]);
+        let _ = handle(&mut app, ServersMessage::Probe);
+
+        let stale = ServersMessage::ProbeFailed("work".to_owned(), "старый".to_owned());
+        let _ = handle(&mut app, stale);
+        assert_eq!(app.state().servers.probe.current(), Some("home"));
+
+        let own = ServersMessage::ProbeFailed("home".to_owned(), "нет связи".to_owned());
+        let _ = handle(&mut app, own);
+        assert!(!app.state().servers.probe.is_running());
     }
 
     #[test]

@@ -80,11 +80,7 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
             }
         }
         // В журнал, не в модальное окно: половина ошибок приходит фоном.
-        Response::Error { message, .. } => {
-            // Дальше по очереди та же ошибка: прогон не должен зависнуть
-            state.servers.probe.cancel();
-            state.connection.push_log(LogLevel::Error, message);
-        }
+        Response::Error { message, .. } => state.connection.push_log(LogLevel::Error, message),
     }
     Task::none()
 }
@@ -508,12 +504,12 @@ mod tests {
     }
 
     #[test]
-    fn an_error_stops_the_run() {
+    fn a_foreign_error_does_not_stop_the_run() {
         let mut app = app();
         app.state_mut().servers.probe.start(["a".to_owned()]);
 
-        let _ = handle_response(&mut app, Response::error("нет связи", true));
-        assert!(!app.state().servers.probe.is_running());
+        let _ = handle_response(&mut app, Response::error("правило не сохранилось", false));
+        assert_eq!(app.state().servers.probe.current(), Some("a"));
     }
 
     #[test]
