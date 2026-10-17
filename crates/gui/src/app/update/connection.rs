@@ -1,5 +1,7 @@
 //! Подключение, отключение, смена профиля.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use iced::Task;
 use penguin_core::id::ProfileId;
 use penguin_core::state::TunnelState;
@@ -188,18 +190,40 @@ pub async fn shutdown_service() {
     .await;
 }
 
+/// Права, данные окну в этом процессе. Статик, потому что `bring_up_service` —
+/// свободная функция в `Task::perform`, доступа к `App` у неё нет.
+static RIGHTS_GRANTED: AtomicBool = AtomicBool::new(false);
+
+/// Просить ли права: пока человек их не давал, да; дал — больше никогда в этом сеансе.
+const fn may_ask(granted: bool) -> bool {
+    !granted
+}
+
 /// Проверяет службу и поднимает, если она молчит.
 ///
-/// Права просит только когда без них нельзя: службы нет, она чужой сборки или
-/// разрешения запускать её без пароля ещё нет. Окно UAC при каждом запуске
-/// приучает нажимать «Да», не читая.
+/// Пока права не давали, всегда идёт через `service ensure`: он сам решает, что
+/// поставить, починить или перезапустить. После согласия окно прав не просит, а
+/// молчащую службу объясняет ошибкой: окно UAC посреди работы приучает нажимать «Да», не читая.
 pub async fn bring_up_service() -> ServiceOutcome {
+    if may_ask(RIGHTS_GRANTED.load(Ordering::Acquire)) {
+        return elevated_service(&["service", "ensure"]).await;
+    }
+    check_without_rights().await
+}
+
+/// Служба потеряна после того, как права уже давали.
+fn service_lost() -> ServiceOutcome {
+    ServiceOutcome::Failed(crate::i18n::s().service_lost.to_owned())
+}
+
+/// Поднимает службу тем, что доступно без прав; чинить установку — не здесь.
+async fn check_without_rights() -> ServiceOutcome {
     // Отвечать может служба от другой сборки.
     let ours = tokio::task::spawn_blocking(penguin_platform::service::matches_current_executable)
         .await
         .unwrap_or(false);
     if !ours {
-        return elevated_service(&["service", "ensure"]).await;
+        return service_lost();
     }
 
     // Спрашивается ответ, а не соединение: зависший демон соединение принимает.
@@ -207,23 +231,16 @@ pub async fn bring_up_service() -> ServiceOutcome {
         if !penguin_platform::build::is_stale(&running, &penguin_platform::build_stamp()) {
             return ServiceOutcome::Ready;
         }
-        tracing::info!("служба работает прежней сборкой — перезапускаю");
-        return elevated_service(&["service", "restart"]).await;
+        tracing::warn!("служба работает прежней сборкой");
+        return service_lost();
     }
 
     match tokio::task::spawn_blocking(penguin_platform::service::user_start::request).await {
         Ok(Ok(())) => match wait_for_service().await {
             ServiceOutcome::Ready => ServiceOutcome::Ready,
-            // Запрос принят, а служба молчит: без прав не починить, повторять — по кругу.
-            _ => {
-                tracing::warn!("служба не поднялась без прав — чиню установку с правами");
-                elevated_service(&["service", "ensure"]).await
-            }
+            _ => service_lost(),
         },
-        Ok(Err(err)) if err.needs_privileges() => {
-            tracing::info!("разрешения запускать службу нет — права спрашиваются один раз");
-            elevated_service(&["service", "ensure"]).await
-        }
+        Ok(Err(err)) if err.needs_privileges() => service_lost(),
         Ok(Err(err)) => ServiceOutcome::Failed(err.to_string()),
         Err(err) => ServiceOutcome::Failed(err.to_string()),
     }
@@ -251,7 +268,7 @@ async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome 
     .await;
 
     match asked {
-        Ok(Ok(true)) => {}
+        Ok(Ok(true)) => RIGHTS_GRANTED.store(true, Ordering::Release),
         Ok(Ok(false)) => return ServiceOutcome::Refused,
         Ok(Err(err)) => return ServiceOutcome::Failed(err.to_string()),
         Err(err) => return ServiceOutcome::Failed(err.to_string()),
@@ -281,6 +298,20 @@ mod tests {
     fn app() -> App {
         let (app, _task) = App::new(uikit::ThemeType::Dark, false);
         app
+    }
+
+    #[test]
+    fn rights_are_asked_until_granted_then_never() {
+        assert!(may_ask(false));
+        assert!(!may_ask(true));
+    }
+
+    #[test]
+    fn a_lost_service_is_explained_not_re_elevated() {
+        assert_eq!(
+            service_lost(),
+            ServiceOutcome::Failed(crate::i18n::s().service_lost.to_owned())
+        );
     }
 
     #[test]

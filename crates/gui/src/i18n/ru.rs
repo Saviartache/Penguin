@@ -42,6 +42,7 @@ pub static STRINGS: Strings = Strings {
     service_starting: "Запускаю службу",
     service_needs_rights: "Без прав администратора тоннель не поднять: служба не установлена",
     service_silent: "Служба поставлена, но не отвечает — посмотрите её журнал",
+    service_lost: "Служба не отвечает; перезапустите Penguin, чтобы переустановить её",
     service_stopping: "Закрываю: опускаю тоннель и останавливаю службу",
 
     start_service: "Запустить службу",

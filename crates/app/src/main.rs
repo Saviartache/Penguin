@@ -14,6 +14,7 @@ mod console;
 mod help;
 mod logging;
 mod service;
+mod single;
 
 use std::io::Write;
 
@@ -60,7 +61,13 @@ fn main() -> Result<()> {
         None if cli.foreground => {
             penguin_daemon::runtime::run_foreground(cli.config_dir, cli.verbose)
         }
-        None => penguin_gui::run(cli.tray).context("окно не открылось"),
+        None => {
+            // Второе окно тихо уступает первому.
+            let Some(_single) = single::lock_window()? else {
+                return Ok(());
+            };
+            penguin_gui::run(cli.tray).context("окно не открылось")
+        }
     }
 }
 

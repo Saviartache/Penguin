@@ -60,6 +60,8 @@ pub struct Strings {
     pub service_needs_rights: &'static str,
     /// Служба поставлена, но на связь не вышла.
     pub service_silent: &'static str,
+    /// Служба пропала после того, как права уже давали.
+    pub service_lost: &'static str,
     /// Служба останавливается вместе с окном.
     pub service_stopping: &'static str,
 

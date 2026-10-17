@@ -18,6 +18,7 @@ pub mod dns_settings;
 pub mod elevate;
 pub mod error;
 pub mod firewall;
+pub mod instance;
 pub mod interface;
 pub mod leftovers;
 pub mod privilege;
