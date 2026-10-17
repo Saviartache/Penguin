@@ -306,8 +306,8 @@ pub struct ServersState {
     pub search: String,
     /// Задержки до профилей.
     pub latencies: Vec<(String, Option<u32>)>,
-    /// Идёт проверка.
-    pub probing: bool,
+    /// Очередь проверки: серверы по одному.
+    pub probe: crate::app::probe_queue::ProbeQueue,
     /// Открыт выбор протокола (первый шаг «Добавить сервер»).
     pub picker: bool,
     /// Открытый редактор профиля; `None` — закрыт.

@@ -6,6 +6,7 @@
 //! явно: растянутый ребёнок в группе «по содержимому» схлопывается в ноль.
 
 pub mod message;
+pub mod probe_queue;
 pub mod state;
 pub mod update;
 

@@ -50,8 +50,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
 fn toolbar(state: &State) -> Element<'_, Message> {
     let mut probe =
         ui::button(ButtonVariant::Secondary, crate::i18n::s().probe).h(px(BUTTON_HEIGHT));
-    // Повторное нажатие во время проверки сбросило бы собранное.
-    if !state.servers.probing {
+    // Повторное нажатие во время прогона игнорируется
+    if !state.servers.probe.is_running() {
         probe = probe.on_press(Message::Servers(ServersMessage::Probe));
     }
 
@@ -239,7 +239,7 @@ fn columns<'a, Message: 'a>(
 
 fn latency(state: &State, id: &ProfileId) -> String {
     let strings = crate::i18n::s();
-    if state.servers.probing {
+    if state.servers.probe.current() == Some(id.as_str()) {
         return strings.probing.to_owned();
     }
 
@@ -366,15 +366,19 @@ mod tests {
     }
 
     #[test]
-    fn a_probe_in_flight_shows_itself_in_every_row() {
+    fn only_the_row_being_probed_shows_progress() {
         let mut state = State::default();
         state.config.profiles.push(profile("home"));
-        state.servers.probing = true;
+        state
+            .servers
+            .probe
+            .start(["home".to_owned(), "work".to_owned()]);
 
         assert_eq!(
             latency(&state, &ProfileId::new("home")),
             crate::i18n::s().probing
         );
+        assert_eq!(latency(&state, &ProfileId::new("work")), DASH.to_string());
     }
 
     #[test]

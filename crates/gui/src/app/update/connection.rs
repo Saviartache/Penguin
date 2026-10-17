@@ -9,6 +9,7 @@ use penguin_ipc::schema::{Event, LogLevel, Request, Response};
 
 use crate::app::App;
 use crate::app::message::{HomeMessage, IpcMessage, Message, ServiceOutcome};
+use crate::app::update::profiles::probe_current;
 use crate::app::update::request;
 use crate::forms::flow::Flow;
 
@@ -61,13 +62,21 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
         }
         Response::Processes { apps } => state.split_tunnel.running_apps = apps,
         Response::Probes { results } => {
-            state.servers.probing = false;
+            let mut advanced = false;
             for row in results {
+                advanced |= state.servers.probe.answered(&row.profile);
                 merge_latency(&mut state.servers.latencies, row.profile, row.rtt_millis);
+            }
+            if advanced {
+                return probe_current(&state.servers.probe);
             }
         }
         // В журнал, не в модальное окно: половина ошибок приходит фоном.
-        Response::Error { message, .. } => state.connection.push_log(LogLevel::Error, message),
+        Response::Error { message, .. } => {
+            // Дальше по очереди та же ошибка: прогон не должен зависнуть
+            state.servers.probe.cancel();
+            state.connection.push_log(LogLevel::Error, message);
+        }
     }
     Task::none()
 }
@@ -466,17 +475,37 @@ mod tests {
     }
 
     #[test]
-    fn probe_results_stop_the_spinner() {
+    fn probe_answer_fills_the_row_and_moves_on() {
         let mut app = app();
-        app.state_mut().servers.probing = true;
+        app.state_mut()
+            .servers
+            .probe
+            .start(["a".to_owned(), "b".to_owned()]);
 
         let _ = handle_response(
             &mut app,
             Response::Probes {
-                results: Vec::new(),
+                results: vec![penguin_ipc::schema::ProbeResult {
+                    profile: "a".to_owned(),
+                    rtt_millis: Some(5),
+                    error: None,
+                }],
             },
         );
-        assert!(!app.state().servers.probing);
+        assert_eq!(
+            app.state().servers.latencies,
+            vec![("a".to_owned(), Some(5))]
+        );
+        assert_eq!(app.state().servers.probe.current(), Some("b"));
+    }
+
+    #[test]
+    fn an_error_stops_the_run() {
+        let mut app = app();
+        app.state_mut().servers.probe.start(["a".to_owned()]);
+
+        let _ = handle_response(&mut app, Response::error("нет связи", true));
+        assert!(!app.state().servers.probe.is_running());
     }
 
     #[test]

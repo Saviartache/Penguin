@@ -6,6 +6,7 @@ use penguin_ipc::schema::Request;
 
 use crate::app::App;
 use crate::app::message::{Message, ServersMessage};
+use crate::app::probe_queue::ProbeQueue;
 use crate::app::update::{request, save};
 use crate::forms::server as editor;
 
@@ -18,9 +19,10 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
         }
         ServersMessage::Select(id) => select(app, &id),
         ServersMessage::Probe => {
-            app.state_mut().servers.probing = true;
-            app.state_mut().servers.latencies.clear();
-            request(Request::Probe { profile: None })
+            let state = app.state_mut();
+            let ids = state.config.profiles.iter().map(|p| p.id.to_string());
+            state.servers.probe.start(ids);
+            probe_current(&app.state().servers.probe)
         }
         ServersMessage::PickerOpened => {
             app.state_mut().servers.picker = true;
@@ -64,6 +66,15 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
 }
 
 /// Выбор сохраняется сразу; поднятый тоннель переподключается на новый профиль.
+/// Просит проверить профиль, на котором стоит очередь.
+pub fn probe_current(queue: &ProbeQueue) -> Task<Message> {
+    queue.current().map_or_else(Task::none, |id| {
+        request(Request::Probe {
+            profile: Some(ProfileId::new(id)),
+        })
+    })
+}
+
 fn select(app: &mut App, id: &str) -> Task<Message> {
     let profile = ProfileId::new(id);
     app.state_mut().config.active_profile = Some(profile.clone());
@@ -226,14 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn probing_clears_previous_results() {
-        let mut app = app_with_profiles(&["home"]);
-        app.state_mut().servers.latencies = vec![("home".to_owned(), Some(42))];
+    fn probing_starts_with_the_first_profile_and_keeps_old_results() {
+        let mut app = app_with_profiles(&["home", "work"]);
+        app.state_mut().servers.latencies = vec![("work".to_owned(), Some(42))];
 
         let _ = handle(&mut app, ServersMessage::Probe);
 
-        assert!(app.state().servers.probing);
-        assert!(app.state().servers.latencies.is_empty());
+        assert_eq!(app.state().servers.probe.current(), Some("home"));
+        assert_eq!(app.state().servers.latencies.len(), 1);
     }
 
     #[test]
