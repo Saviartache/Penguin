@@ -79,6 +79,10 @@ pub async fn pump(
 
         let Some(datagram) = datagram else { break };
 
+        if !leaves_the_link(datagram.destination.ip()) {
+            continue;
+        }
+
         if datagram.destination.port() == DNS_PORT
             && let Some(hijacker) = &dns
         {
@@ -100,6 +104,15 @@ pub async fn pump(
     }
 
     shared.sessions.write().clear();
+}
+
+/// Мультикаст и широковещание (mDNS, LLMNR, SSDP) живут в своём сегменте: выпущенные
+/// наружу, они возвращаются системой в тоннель и крутятся по кругу.
+fn leaves_the_link(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => !(v4.is_multicast() || v4.is_broadcast()),
+        std::net::IpAddr::V6(v6) => !v6.is_multicast(),
+    }
 }
 
 /// Отвечает на запрос DNS, не выпуская его наружу.
@@ -282,6 +295,22 @@ mod tests {
     fn timeout_is_reasonable() {
         assert!(SESSION_TIMEOUT >= Duration::from_secs(15));
         assert!(SESSION_TIMEOUT <= Duration::from_secs(120));
+    }
+
+    #[test]
+    fn multicast_and_broadcast_stay_in_the_segment() {
+        for local in [
+            "224.0.0.251",
+            "224.0.0.252",
+            "239.255.255.250",
+            "255.255.255.255",
+            "ff02::fb",
+        ] {
+            assert!(!leaves_the_link(local.parse().expect("адрес")), "{local}");
+        }
+        for remote in ["1.1.1.1", "192.168.1.1", "2606:4700::1111"] {
+            assert!(leaves_the_link(remote.parse().expect("адрес")), "{remote}");
+        }
     }
 
     #[test]
