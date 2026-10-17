@@ -27,6 +27,7 @@ pub fn handle(app: &mut App, message: SettingsMessage) -> Task<Message> {
         }
         SettingsMessage::DnsHijack(enabled) => config.dns.hijack = enabled,
         SettingsMessage::VerboseLog(enabled) => config.app.log_level = log_level(enabled),
+        SettingsMessage::CheckUpdates(enabled) => config.app.check_updates = enabled,
     }
     save(app)
 }

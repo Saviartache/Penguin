@@ -20,6 +20,9 @@ use penguin_config::schema::app::Language;
 ///
 /// `hidden` — открыться сразу в лотке (автозапуск); без значка окно покажется.
 pub fn run(hidden: bool) -> iced::Result {
+    // Остаток прошлого обновления: на Windows прежний exe уходит в `.old`.
+    penguin_update::remove_leftovers();
+
     let settings = penguin_config::ConfigStore::discover()
         .ok()
         .and_then(|store| store.load().ok());

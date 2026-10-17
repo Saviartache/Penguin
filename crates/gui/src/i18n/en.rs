@@ -213,6 +213,20 @@ pub static STRINGS: Strings = Strings {
     dns_hijack: "Intercept the system's name lookups",
     verbose_log: "Write a verbose service log",
 
+    updates: "UPDATES",
+    check_updates: "Check for updates on start",
+    version: "Version",
+    update_available: "available",
+    update_latest: "latest",
+    update_checking: "checking...",
+    update_installing: "installing...",
+    update_restarting: "installed, restarting...",
+    update_failed: "failed:",
+    update_check: "Check",
+    update_install: "Update",
+    update_label: "Update",
+    update_in_settings: "in settings",
+
     tray_show: "Show window",
     tray_quit: "Quit",
 };

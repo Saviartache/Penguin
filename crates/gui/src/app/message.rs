@@ -31,6 +31,26 @@ pub enum Message {
     Logs(LogsMessage),
     /// Настройки.
     Settings(SettingsMessage),
+    /// Обновление программы.
+    Update(UpdateMessage),
+}
+
+/// Обновление программы; сеть ходит в отдельном процессе (`penguin update`).
+#[derive(Debug, Clone)]
+pub enum UpdateMessage {
+    /// Кнопка «Проверить».
+    Check,
+    /// Проверка закончилась; `manual` — по кнопке, а не при запуске.
+    Checked {
+        /// Нажал человек.
+        manual: bool,
+        /// Ответ или причина отказа.
+        result: Result<penguin_update::CheckReport, String>,
+    },
+    /// Кнопка «Обновить».
+    Install,
+    /// Установка закончилась: путь файла, который надо запустить заново.
+    Installed(Result<std::path::PathBuf, String>),
 }
 
 /// Журнал: копирование строки и правило по соединению.
@@ -257,6 +277,8 @@ pub enum SettingsMessage {
     DnsHijack(bool),
     /// Подробность журнала службы.
     VerboseLog(bool),
+    /// Проверять обновления при запуске.
+    CheckUpdates(bool),
 }
 
 #[cfg(test)]

@@ -14,8 +14,8 @@ use iced::{Alignment, Element, Length};
 use uikit::layout::{Flex, Sizable, Size, gap};
 use uikit::tokens::ink;
 
-use crate::app::message::{Message, SettingsMessage};
-use crate::app::state::State;
+use crate::app::message::{Message, SettingsMessage, UpdateMessage};
+use crate::app::state::{State, UpdateStatus};
 use crate::screens::table::{self, CELL, ROW_GAP, ROW_PADDING, glyphs, pad};
 use crate::ui;
 
@@ -89,12 +89,27 @@ fn panel(state: &State) -> Element<'_, Message> {
         )],
     );
 
+    let updates = section(
+        state,
+        strings.updates,
+        vec![
+            switch(
+                state,
+                strings.check_updates,
+                config.app.check_updates,
+                SettingsMessage::CheckUpdates,
+            ),
+            update_row(state),
+        ],
+    );
+
     // Между разделами зазор больше, чем между строками.
     let body = Flex::col()
         .w(Size::FILL)
         .push_auto(startup)
         .push_auto(network)
         .push_auto(log)
+        .push_auto(updates)
         .gap(gap::MD)
         .build();
 
@@ -174,6 +189,63 @@ fn switch<'a>(
         .into()
 }
 
+/// Версия слева, кнопки «Проверить» и «Обновить» справа.
+fn update_row(state: &State) -> Element<'_, Message> {
+    let palette = &state.palette;
+    let status = &state.updates.status;
+    let strings = crate::i18n::s();
+
+    let tone = match status {
+        UpdateStatus::Available(_) => palette.text,
+        _ => ink::level(palette, ink::SECONDARY),
+    };
+    let busy = matches!(
+        status,
+        UpdateStatus::Checking | UpdateStatus::Installing | UpdateStatus::Restarting
+    );
+
+    let mut line = Flex::row()
+        .w(Size::FILL)
+        .push_auto(glyphs(status_line(status), tone))
+        .push(ui::spring())
+        .gap(CELL)
+        .align(Alignment::Center);
+    if matches!(status, UpdateStatus::Available(_)) {
+        line = line.push_auto(update_button(
+            strings.update_install,
+            UpdateMessage::Install,
+        ));
+    }
+    if !busy {
+        line = line.push_auto(update_button(strings.update_check, UpdateMessage::Check));
+    }
+    line.build()
+}
+
+fn update_button(label: &str, message: UpdateMessage) -> Element<'_, Message> {
+    // Ширина по подписи: на другом языке она другая.
+    let width = (label.chars().count() + 3) as f32 * CELL + 2.0 * gap::XS;
+    table::action(label, width, Message::Update(message))
+}
+
+/// «Версия 0.7.2, доступна 0.8.0».
+fn status_line(status: &UpdateStatus) -> String {
+    let strings = crate::i18n::s();
+    let version = penguin_update::Version::current();
+    let tail = match status {
+        UpdateStatus::Idle => return format!("{} {version}", strings.version),
+        UpdateStatus::Latest => strings.update_latest.to_owned(),
+        UpdateStatus::Checking => strings.update_checking.to_owned(),
+        UpdateStatus::Available(found) => {
+            format!("{} {}", strings.update_available, found.version)
+        }
+        UpdateStatus::Installing => strings.update_installing.to_owned(),
+        UpdateStatus::Restarting => strings.update_restarting.to_owned(),
+        UpdateStatus::Failed(reason) => format!("{} {reason}", strings.update_failed),
+    };
+    format!("{} {version}, {tail}", strings.version)
+}
+
 /// Значение в скобках; обе подписи одной ширины (по самим подписям: на другом
 /// языке длина другая), иначе правый край прыгает.
 fn value(enabled: bool) -> String {
@@ -223,11 +295,43 @@ mod tests {
             crate::i18n::s().autostart,
             crate::i18n::s().autoconnect,
             crate::i18n::s().verbose_log,
+            crate::i18n::s().check_updates,
         ] {
             assert!(
                 label.split_whitespace().count() > 2,
                 "подпись `{label}` не объясняет настройку"
             );
+        }
+    }
+
+    #[test]
+    fn the_status_line_names_both_versions_when_one_is_offered() {
+        let found = penguin_update::Available {
+            version: "99.0.0".into(),
+            page_url: String::new(),
+            archive_name: String::new(),
+            archive_url: String::new(),
+            sums_url: String::new(),
+        };
+        let line = status_line(&UpdateStatus::Available(found));
+        assert!(line.contains(&penguin_update::Version::current().to_string()));
+        assert!(line.contains("99.0.0"), "{line}");
+        assert!(status_line(&UpdateStatus::Failed("нет сети".into())).contains("нет сети"));
+    }
+
+    #[test]
+    fn every_update_state_renders() {
+        let mut state = State::default();
+        for status in [
+            UpdateStatus::Idle,
+            UpdateStatus::Checking,
+            UpdateStatus::Latest,
+            UpdateStatus::Installing,
+            UpdateStatus::Restarting,
+            UpdateStatus::Failed("x".into()),
+        ] {
+            state.updates.status = status;
+            let _ = view(&state);
         }
     }
 

@@ -117,6 +117,42 @@ Options:
     global_options!()
 );
 
+pub(super) const UPDATE: &str = concat!(
+    "Обновление с GitHub
+
+Usage: penguin update [OPTIONS] <COMMAND>
+
+Commands:
+  check    Спросить GitHub, есть ли выпуск новее
+  install  Скачать выпуск, сверить SHA-256 и заменить исполняемый файл
+
+Options:
+",
+    global_options!()
+);
+
+pub(super) const UPDATE_CHECK: &str = concat!(
+    "Спросить GitHub, есть ли выпуск новее
+
+Usage: penguin update check [OPTIONS]
+
+Options:
+",
+    global_options!()
+);
+
+pub(super) const UPDATE_INSTALL: &str = concat!(
+    "Скачать выпуск, сверить SHA-256 и заменить исполняемый файл.
+
+Служба подхватит новую сборку при следующем запуске окна или командой `penguin service restart`.
+
+Usage: penguin update install [OPTIONS]
+
+Options:
+",
+    global_options!()
+);
+
 pub(super) const DOCTOR: &str = concat!(
     "Проверка окружения: настройки, профили, права
 

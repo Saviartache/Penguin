@@ -1,0 +1,25 @@
+[package]
+name = "penguin-update"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Проверка и установка обновлений Penguin с GitHub"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+# Сеть нужна только `cli`: окну достаются одни типы и расписание проверок.
+ureq = { workspace = true, optional = true }
+
+[features]
+default = ["net"]
+net = ["dep:ureq"]
