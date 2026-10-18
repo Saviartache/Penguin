@@ -59,7 +59,7 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
         Response::Status(status) => {
             let was = state.connection.tunnel.clone();
             state.connection.apply_status(&status);
-            return probe_if_connected(&was, &status.state);
+            return on_connect(app, &was, &status.state);
         }
         Response::Config(config) => {
             state.config = *config;
@@ -92,10 +92,10 @@ fn handle_event(app: &mut App, event: Event) -> Task<Message> {
 
     match event {
         Event::State { state: tunnel } => {
-            let probe = probe_if_connected(&connection.tunnel, &tunnel);
-            connection.set_tunnel(tunnel);
+            let was = connection.tunnel.clone();
+            connection.set_tunnel(tunnel.clone());
             connection.online = true;
-            return probe;
+            return on_connect(app, &was, &tunnel);
         }
         Event::Throughput {
             rate,
@@ -121,13 +121,18 @@ fn handle_event(app: &mut App, event: Event) -> Task<Message> {
     Task::none()
 }
 
-/// Меряет задержку до сервера, к которому тоннель только что поднялся.
-fn probe_if_connected(was: &TunnelState, now: &TunnelState) -> Task<Message> {
-    just_connected(was, now).map_or_else(Task::none, |profile| {
+/// Тоннель только что поднялся: задержка до его сервера и страны, которые не
+/// узнались раньше (при запуске окна сети могло не быть).
+fn on_connect(app: &mut App, was: &TunnelState, now: &TunnelState) -> Task<Message> {
+    let Some(profile) = just_connected(was, now) else {
+        return Task::none();
+    };
+    Task::batch([
         request(Request::Probe {
             profile: Some(profile.clone()),
-        })
-    })
+        }),
+        crate::app::update::profiles::locate_countries(app),
+    ])
 }
 
 fn just_connected<'a>(was: &TunnelState, now: &'a TunnelState) -> Option<&'a ProfileId> {
