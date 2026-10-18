@@ -46,7 +46,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
             &state.palette,
             &lines(state),
             reveal(state),
-            Some(&picker),
+            // При тоннеле профиль не меняется: выбор не нажимается.
+            (!state.connection.locks_profile()).then_some(&picker),
         ))
         .push_auto(button(state))
         .gap(gap::SM)

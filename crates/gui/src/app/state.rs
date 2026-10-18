@@ -155,6 +155,9 @@ pub struct Connection {
     pub error: Option<String>,
     /// Состояние тоннеля; показывать надо [`Self::tunnel_now`].
     pub tunnel: TunnelState,
+    /// Перед подключением обновляется подписка: демон ещё не подключается,
+    /// а окно уже показывает подключение. Сброс — отмена.
+    pub reloading: bool,
     /// Точка отсчёта времени работы: демон шлёт состояние только при смене.
     since: Option<Instant>,
     /// Счётчики.
@@ -253,6 +256,15 @@ impl Connection {
     /// Окно само возится со службой (ставит, запускает, гасит).
     pub fn is_busy_with_service(&self) -> bool {
         self.starting || self.stopping
+    }
+
+    /// Профиль менять нельзя: тоннель поднят или поднимается.
+    pub fn locks_profile(&self) -> bool {
+        self.reloading
+            || !matches!(
+                self.tunnel,
+                TunnelState::Disconnected | TunnelState::Failed { .. }
+            )
     }
 
     /// Отмечает потерю связи; «подключено» без демона было бы враньём.

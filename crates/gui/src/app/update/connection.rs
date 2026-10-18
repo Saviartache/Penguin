@@ -162,6 +162,9 @@ pub fn handle_home(app: &mut App, message: HomeMessage) -> Task<Message> {
         }
         HomeMessage::ReloadedForConnect(result) => reloaded_for_connect(app, result),
         HomeMessage::ProfileMenu(open) => {
+            if open && app.state().connection.locks_profile() {
+                return Task::none();
+            }
             let config = &app.state().config;
             let top = open.then(|| {
                 let active = config.active().and_then(|active| {
@@ -184,6 +187,9 @@ pub fn handle_home(app: &mut App, message: HomeMessage) -> Task<Message> {
         HomeMessage::ProfileChosen(at) => {
             let state = app.state_mut();
             state.profile_menu = None;
+            if state.connection.locks_profile() {
+                return Task::none();
+            }
             let Some(profile) = state.config.profiles.get(at) else {
                 return Task::none();
             };
@@ -206,6 +212,12 @@ fn toggle_connection(app: &mut App) -> Task<Message> {
             return Task::perform(bring_up_service(), |ready| {
                 Message::Home(HomeMessage::ServiceChecked(ready))
             });
+        }
+        // Демон ещё не подключается: отмена — забыть ответ шлюза.
+        if connection.reloading {
+            connection.reloading = false;
+            connection.set_tunnel(TunnelState::Disconnected);
+            return Task::none();
         }
         if connection.tunnel.is_active() || connection.tunnel.is_busy() {
             return request(Request::Disconnect);
@@ -230,11 +242,22 @@ fn connect(app: &mut App) -> Task<Message> {
         Some((sub, country))
     });
 
+    let state = app.state_mut();
+    state.profile_menu = None;
     match managed {
-        Some((id, country)) => Task::perform(
-            crate::subscription::refresh_subscription(id, country),
-            |result| Message::Home(HomeMessage::ReloadedForConnect(result)),
-        ),
+        Some((id, country)) => {
+            // Шлюз отвечает секундами: кнопка сразу становится отменой.
+            if let Some(active) = state.config.active_profile.clone() {
+                state
+                    .connection
+                    .set_tunnel(TunnelState::Connecting { profile: active });
+            }
+            state.connection.reloading = true;
+            Task::perform(
+                crate::subscription::refresh_subscription(id, country),
+                |result| Message::Home(HomeMessage::ReloadedForConnect(result)),
+            )
+        }
         None => request(Request::Connect { profile: None }),
     }
 }
@@ -247,20 +270,24 @@ fn reloaded_for_connect(
     app: &mut App,
     result: Result<Vec<penguin_config::schema::profile::Profile>, String>,
 ) -> Task<Message> {
+    // Отменили, пока ждали шлюз: свежий конфиг берём, подключение — нет.
+    let wanted = std::mem::take(&mut app.state_mut().connection.reloading);
+    let connect = if wanted {
+        request(Request::Connect { profile: None })
+    } else {
+        Task::none()
+    };
     match result {
         Ok(profiles) => {
             crate::app::update::profiles::merge_managed(app, profiles);
-            Task::batch([
-                crate::app::update::save(app),
-                request(Request::Connect { profile: None }),
-            ])
+            Task::batch([crate::app::update::save(app), connect])
         }
         Err(reason) => {
             app.state_mut().connection.push_log(
                 LogLevel::Error,
                 format!("{}: {reason}", crate::i18n::s().subscription_failed),
             );
-            request(Request::Connect { profile: None })
+            connect
         }
     }
 }
@@ -449,6 +476,66 @@ mod tests {
         let _ = reloaded_for_connect(&mut app, Err("шлюз недоступен".to_owned()));
 
         assert_eq!(app.state().connection.log.len(), before + 1);
+    }
+
+    fn online_with_managed() -> App {
+        let mut app = app();
+        let state = app.state_mut();
+        state.connection.online = true;
+        state.connection.starting = false;
+        state.config.profiles.push(managed("a-nl", "amnezia-1"));
+        state.config.active_profile = Some(ProfileId::new("a-nl"));
+        app
+    }
+
+    #[test]
+    fn a_reload_before_connecting_shows_as_connecting_and_can_be_cancelled() {
+        let mut app = online_with_managed();
+
+        let _ = handle_home(&mut app, HomeMessage::ToggleConnection);
+        let connection = &app.state().connection;
+        assert!(connection.reloading);
+        assert!(matches!(connection.tunnel, TunnelState::Connecting { .. }));
+
+        let _ = handle_home(&mut app, HomeMessage::ToggleConnection);
+        let connection = &app.state().connection;
+        assert!(!connection.reloading);
+        assert_eq!(connection.tunnel, TunnelState::Disconnected);
+
+        // Запоздалый ответ шлюза не возвращает подключение.
+        let _ = reloaded_for_connect(&mut app, Ok(vec![managed("a-nl", "amnezia-1")]));
+        assert!(!app.state().connection.reloading);
+        assert_eq!(app.state().connection.tunnel, TunnelState::Disconnected);
+    }
+
+    #[test]
+    fn the_quick_pick_is_locked_while_the_tunnel_is_up() {
+        let mut app = online_with_managed();
+        app.state_mut()
+            .config
+            .profiles
+            .push(managed("a-de", "amnezia-1"));
+        app.state_mut()
+            .connection
+            .set_tunnel(TunnelState::Connected {
+                profile: ProfileId::new("a-nl"),
+                uptime_secs: 1,
+            });
+
+        let _ = handle_home(&mut app, HomeMessage::ProfileMenu(true));
+        assert!(app.state().profile_menu.is_none(), "список не открылся");
+
+        let _ = handle_home(&mut app, HomeMessage::ProfileChosen(1));
+        assert_eq!(
+            app.state().config.active_profile,
+            Some(ProfileId::new("a-nl"))
+        );
+
+        app.state_mut()
+            .connection
+            .set_tunnel(TunnelState::Disconnected);
+        let _ = handle_home(&mut app, HomeMessage::ProfileMenu(true));
+        assert!(app.state().profile_menu.is_some());
     }
 
     #[test]
