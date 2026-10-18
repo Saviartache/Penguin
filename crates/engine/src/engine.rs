@@ -47,6 +47,9 @@ pub struct Engine {
     events: EventBus,
     /// Поднятый тоннель; `Mutex` разводит подключение и отключение.
     session: Mutex<Option<TunnelSession>>,
+    /// Отмена идущего подключения: рукопожатие держит `session` до конца,
+    /// и отключение без этого ждало бы его.
+    connecting: parking_lot::Mutex<Option<CancellationToken>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -93,6 +96,7 @@ impl Engine {
             state: Arc::new(StateMachine::new(events.clone())),
             events,
             session: Mutex::new(None),
+            connecting: parking_lot::Mutex::new(None),
         }))
     }
 
@@ -168,9 +172,24 @@ impl Engine {
             }
         }
 
-        let outbound = match self.outbounds.get_or_connect(profile).await {
-            Ok(outbound) => outbound,
-            Err(err) => {
+        let abort = CancellationToken::new();
+        *self.connecting.lock() = Some(abort.clone());
+        let connected = tokio::select! {
+            result = self.outbounds.get_or_connect(profile) => Some(result),
+            () = abort.cancelled() => None,
+        };
+        self.connecting.lock().take();
+
+        let outbound = match connected {
+            Some(Ok(outbound)) => outbound,
+            None => {
+                self.dialer.protect_with(0);
+                self.state.disconnected();
+                self.events
+                    .emit(Event::log(LogLevel::Info, "подключение отменено"));
+                return Ok(());
+            }
+            Some(Err(err)) => {
                 self.state.failed(err.to_string());
                 return Err(EngineError::Protocol(err));
             }
@@ -233,6 +252,10 @@ impl Engine {
 
     /// Опускает тоннель; возвращает первую ошибку, откат идёт до конца.
     pub async fn disconnect(&self) -> EngineResult<()> {
+        // До замка: его держит подключение, пока ждёт сервер.
+        if let Some(abort) = self.connecting.lock().take() {
+            abort.cancel();
+        }
         let mut session = self.session.lock().await;
         // Снимается всегда: интерфейса после смены сети может не быть.
         self.dialer.protect_with(0);
@@ -351,6 +374,49 @@ mod tests {
     async fn disconnect_without_connect_is_not_an_error() {
         let engine = Engine::new(config_with_profiles(&["home"])).expect("собирается");
         engine.disconnect().await.expect("отключение проходит");
+        assert_eq!(engine.state(), TunnelState::Disconnected);
+    }
+
+    #[cfg(feature = "wireguard")]
+    #[tokio::test]
+    async fn disconnect_cancels_a_connect_waiting_for_the_server() {
+        // Сервер, который молчит: рукопожатие ждало бы свой срок.
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("сокет");
+        let key = penguin_core::base64::encode(&[7u8; 32]);
+        let mut config = RootConfig::default();
+        config.profiles.push(Profile::new(
+            "wg",
+            "wg",
+            penguin_config::schema::outbound::RawOutbound::new(
+                "wireguard",
+                serde_json::json!({
+                    "server": silent.local_addr().expect("адрес").to_string(),
+                    "private_key": key,
+                    "server_public_key": key,
+                    "address_ipv4": "10.0.0.2/32",
+                }),
+            ),
+        ));
+        let engine = Engine::new(config).expect("собирается");
+
+        let connecting = tokio::spawn({
+            let engine = Arc::clone(&engine);
+            async move { engine.connect(None).await }
+        });
+        while !matches!(engine.state(), TunnelState::Connecting { .. }) {
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), engine.disconnect())
+            .await
+            .expect("отключение не ждёт рукопожатия")
+            .expect("отключение проходит");
+        connecting
+            .await
+            .expect("задача")
+            .expect("отменённое подключение — не ошибка");
         assert_eq!(engine.state(), TunnelState::Disconnected);
     }
 
