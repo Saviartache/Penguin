@@ -75,7 +75,7 @@ pub fn parse_wireguard_conf(text: &str) -> ConfigResult<RawOutbound> {
     if let Some(mtu) = integer(&interface, "mtu") {
         params.insert("mtu".into(), json!(mtu));
     }
-    if let Some(keepalive) = integer(&peer, "persistentkeepalive") {
+    if let Some(keepalive) = lower_bound(&peer, "persistentkeepalive") {
         params.insert("keepalive_secs".into(), json!(keepalive));
     }
 
@@ -169,11 +169,11 @@ fn obfuscation(interface: &BTreeMap<String, String>) -> ConfigResult<Map<String,
     Ok(amnezia)
 }
 
-/// Логическое значение, как `strconv.ParseBool` эталона.
+/// Логическое значение, как `strconv.ParseBool` эталона, плюс `on`/`off` экспорта Amnezia.
 fn boolean(text: &str) -> ConfigResult<bool> {
     match text {
-        "1" | "t" | "T" | "true" | "TRUE" | "True" => Ok(true),
-        "0" | "f" | "F" | "false" | "FALSE" | "False" => Ok(false),
+        "1" | "t" | "T" | "true" | "TRUE" | "True" | "on" | "On" | "ON" => Ok(true),
+        "0" | "f" | "F" | "false" | "FALSE" | "False" | "off" | "Off" | "OFF" => Ok(false),
         other => Err(invalid(format!(
             "`RandomTrailers` не логическое: `{other}`"
         ))),
@@ -183,6 +183,12 @@ fn boolean(text: &str) -> ConfigResult<bool> {
 /// Целое поле.
 fn integer(map: &BTreeMap<String, String>, key: &str) -> Option<u64> {
     map.get(key)?.trim().parse().ok()
+}
+
+/// Целое либо нижняя граница диапазона `lo-hi` (AWG 3 случайный keepalive).
+fn lower_bound(map: &BTreeMap<String, String>, key: &str) -> Option<u64> {
+    let value = map.get(key)?;
+    value.split('-').next()?.trim().parse().ok()
 }
 
 /// Ошибка разбора `.conf`.
@@ -280,6 +286,16 @@ endpoint = 1.2.3.4:51820
         );
         assert_eq!(amnezia["content_padding_addition"], "8-32");
         assert_eq!(amnezia["random_trailers"], true);
+    }
+
+    #[test]
+    fn an_amnezia_export_with_on_switches_and_keepalive_range_is_read() {
+        let conf = AWG
+            .replace("Jc = 4", "Jc = 4\nRandomTrailers = on\nDisableCookies = on")
+            .replace("PersistentKeepalive = 25", "PersistentKeepalive = 25-35");
+        let outbound = parse_wireguard_conf(&conf).expect("разбор");
+        assert_eq!(outbound.params["amnezia"]["random_trailers"], true);
+        assert_eq!(outbound.params["keepalive_secs"], 25);
     }
 
     #[test]
