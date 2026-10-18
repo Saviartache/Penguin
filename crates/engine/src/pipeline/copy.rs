@@ -1,11 +1,16 @@
-//! Поток, считающий трафик: обёртка, чтобы входящие точки не знали о счётчиках.
+//! Поток и канал датаграмм, считающие трафик: обёртки, чтобы входящие точки не знали о счётчиках.
 
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
+use async_trait::async_trait;
+use bytes::Bytes;
+use penguin_core::address::SocketAddress;
 use penguin_core::id::OutboundId;
 use penguin_core::stats::Counters;
+use penguin_proto::datagram::ProxyDatagram;
+use penguin_proto::error::ProtocolError;
 use penguin_proto::stream::ProxyStream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -87,11 +92,100 @@ impl AsyncWrite for Metered {
     }
 }
 
+/// Канал датаграмм, считающий полезную нагрузку: отправка — `uploaded`, приём — `downloaded`.
+pub struct MeteredDatagram {
+    inner: Box<dyn ProxyDatagram>,
+    metrics: Arc<Metrics>,
+    outbound: Arc<Counters>,
+}
+
+impl MeteredDatagram {
+    /// Оборачивает канал учётом.
+    pub fn new(
+        inner: Box<dyn ProxyDatagram>,
+        metrics: Arc<Metrics>,
+        outbound: &OutboundId,
+    ) -> Self {
+        let outbound = metrics.outbound(outbound);
+        Self {
+            inner,
+            metrics,
+            outbound,
+        }
+    }
+}
+
+#[async_trait]
+impl ProxyDatagram for MeteredDatagram {
+    async fn send_to(&self, payload: Bytes, target: &SocketAddress) -> Result<(), ProtocolError> {
+        let len = payload.len() as u64;
+        self.inner.send_to(payload, target).await?;
+        self.metrics.add_uploaded_to(&self.outbound, len);
+        Ok(())
+    }
+
+    async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
+        let received = self.inner.recv_from().await?;
+        self.metrics
+            .add_downloaded_to(&self.outbound, received.0.len() as u64);
+        Ok(received)
+    }
+
+    async fn close(&self) -> Result<(), ProtocolError> {
+        self.inner.close().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
+
+    /// Канал, возвращающий отправленное.
+    struct Echo(tokio::sync::Mutex<Vec<(Bytes, SocketAddress)>>);
+
+    #[async_trait]
+    impl ProxyDatagram for Echo {
+        async fn send_to(
+            &self,
+            payload: Bytes,
+            target: &SocketAddress,
+        ) -> Result<(), ProtocolError> {
+            self.0.lock().await.push((payload, target.clone()));
+            Ok(())
+        }
+
+        async fn recv_from(&self) -> Result<(Bytes, SocketAddress), ProtocolError> {
+            self.0
+                .lock()
+                .await
+                .pop()
+                .ok_or_else(|| ProtocolError::Disconnected("пусто".to_owned()))
+        }
+    }
+
+    #[tokio::test]
+    async fn datagrams_are_counted_both_ways() {
+        let metrics = Metrics::new();
+        let channel = MeteredDatagram::new(
+            Box::new(Echo(Default::default())),
+            Arc::clone(&metrics),
+            &OutboundId::new("home"),
+        );
+        let target: SocketAddress = "1.1.1.1:443".parse().expect("адрес");
+
+        channel
+            .send_to(Bytes::from_static(b"quic"), &target)
+            .await
+            .expect("отправлено");
+        channel.recv_from().await.expect("принято");
+
+        let traffic = metrics.total();
+        assert_eq!(traffic.uploaded, 4);
+        assert_eq!(traffic.downloaded, 4);
+        assert_eq!(traffic.connections, 0);
+    }
 
     fn wrap(inner: Box<dyn ProxyStream>) -> (Metered, Arc<Metrics>) {
         let metrics = Metrics::new();

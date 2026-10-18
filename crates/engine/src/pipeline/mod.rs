@@ -40,7 +40,7 @@ use crate::events::{Event, EventBus};
 
 use crate::metrics::counters::Metrics;
 use crate::outbounds::OutboundPool;
-use crate::pipeline::copy::Metered;
+use crate::pipeline::copy::{Metered, MeteredDatagram};
 use crate::pipeline::live::LiveFlows;
 use crate::pipeline::revocable::{RevocableDatagram, RevocableStream};
 
@@ -232,17 +232,24 @@ impl InboundHandler for Pipeline {
 
         let outbound = self.outbounds.revive(outbound).await?;
         // Иначе датаграммы (и DNS) терялись бы молча.
-        let channel = if outbound.capabilities().udp {
-            outbound.bind_udp().await?
+        let (channel, id) = if outbound.capabilities().udp {
+            (
+                outbound.bind_udp().await?,
+                Self::outbound_id(&verdict.decision),
+            )
         } else {
             tracing::warn!(
                 outbound = %outbound.id(),
                 "направление не поддерживает UDP — датаграммы пойдут напрямую"
             );
-            self.outbounds.direct().bind_udp().await?
+            (
+                self.outbounds.direct().bind_udp().await?,
+                OutboundId::direct(),
+            )
         };
+        let metered = MeteredDatagram::new(channel, Arc::clone(&self.metrics), &id);
         let lease = self.flows.register(flow, verdict.decision);
-        Ok(Box::new(RevocableDatagram::new(channel, lease)))
+        Ok(Box::new(RevocableDatagram::new(Box::new(metered), lease)))
     }
 }
 
