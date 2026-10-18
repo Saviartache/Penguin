@@ -39,11 +39,6 @@ impl Countries {
             .filter_map(server_of)
     }
 
-    /// Известна ли хоть одна страна: тогда видна подпись источника данных.
-    pub fn any(&self) -> bool {
-        !self.known.is_empty()
-    }
-
     /// Отмечает и отдаёт серверы, о которых ещё не спрашивали.
     pub fn unasked<'a>(&mut self, servers: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         let mut fresh = Vec::new();
@@ -106,12 +101,10 @@ mod tests {
     #[test]
     fn a_located_server_gets_its_flag() {
         let mut countries = Countries::default();
-        assert!(!countries.any());
         countries.located(HashMap::from([
             ("a:1".to_owned(), "JP".to_owned()),
             ("b:2".to_owned(), "ZZ".to_owned()),
         ]));
-        assert!(countries.any());
         assert_eq!(countries.flag(&profile("a:1", None)), Flag::of("jp"));
         assert_eq!(countries.flag(&profile("b:2", None)), None);
         assert_eq!(countries.flag(&profile("c:3", None)), None);

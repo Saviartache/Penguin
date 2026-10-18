@@ -78,21 +78,8 @@ fn panel(state: &State) -> Element<'_, Message> {
         }),
         head(state),
         rows(state),
-        &hint(state),
+        crate::i18n::s().select_hint,
     )
-}
-
-/// Подсказка; с флагами — и подпись источника стран (её требует CC BY 4.0).
-fn hint(state: &State) -> String {
-    let hint = crate::i18n::s().select_hint;
-    if state.servers.countries.any() {
-        format!(
-            "{hint}   {}",
-            penguin_update::geoip::ATTRIBUTION.to_uppercase()
-        )
-    } else {
-        hint.to_owned()
-    }
 }
 
 /// Шапка с тем же отступом и местом под действие, что у строки.

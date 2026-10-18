@@ -27,9 +27,6 @@ const SUMS_LIMIT: u64 = 4 * 1024;
 /// Срок, после которого база обновляется: источник выпускает её ежемесячно.
 pub const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// Подпись, которой лицензия CC BY 4.0 требует там, где видны данные.
-pub const ATTRIBUTION: &str = "IP Geolocation by DB-IP";
-
 /// Нужно ли качать базу: её нет или она старше [`MAX_AGE`].
 pub fn is_stale(path: &Path, now: SystemTime) -> bool {
     let Ok(modified) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {

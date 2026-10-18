@@ -78,11 +78,7 @@ fn render(countries: &BTreeMap<String, String>) -> String {
         .iter()
         .map(|(server, country)| vec![server.clone(), country.clone()])
         .collect();
-    format!(
-        "{}\n{}",
-        table(&["СЕРВЕР", "СТРАНА"], &rows),
-        penguin_update::geoip::ATTRIBUTION
-    )
+    table(&["СЕРВЕР", "СТРАНА"], &rows)
 }
 
 #[cfg(test)]
