@@ -5,6 +5,7 @@ mod help;
 mod lexer;
 
 pub use command::{
-    Command, NAMES, ProfilesCommand, RulesCommand, SocksArgs, UpdateCommand, leaf, parse,
+    Command, NAMES, ProfilesCommand, RulesCommand, SocksArgs, SubscriptionCommand, UpdateCommand,
+    leaf, parse,
 };
 pub use lexer::{ArgsError, Lexer, Parsed, Token};

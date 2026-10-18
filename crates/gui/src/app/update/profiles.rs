@@ -63,6 +63,174 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
         }
         ServersMessage::EditorSubmitted => submit(app),
         ServersMessage::Removed(id) => remove(app, &id),
+        ServersMessage::WireguardManual => wireguard_manual(app),
+        ServersMessage::WireguardFromConf => wireguard_from_conf(app),
+        ServersMessage::ConfImported(result) => conf_imported(app, result),
+        ServersMessage::WireguardClosed => {
+            close_wireguard(app);
+            Task::none()
+        }
+        ServersMessage::SubscriptionKeyChanged(value) => {
+            app.state_mut().servers.subscription_key = value;
+            Task::none()
+        }
+        ServersMessage::SubscriptionRefresh => subscription_refresh(app),
+        ServersMessage::SubscriptionRefreshed(result) => subscription_refreshed(app, result),
+    }
+}
+
+/// Открывает форму WireGuard вручную из окна выбора способа.
+fn wireguard_manual(app: &mut App) -> Task<Message> {
+    let Some(spec) = crate::forms::protocol::by_id("wireguard") else {
+        return Task::none();
+    };
+    close_wireguard(app);
+    app.state_mut().servers.editor = Some(editor::Draft::new(spec));
+    Task::none()
+}
+
+/// Спрашивает файл `.conf` и разбирает его в отдельном потоке (окно держит поток).
+fn wireguard_from_conf(app: &mut App) -> Task<Message> {
+    if app.state().servers.subscription_busy {
+        return Task::none();
+    }
+    app.state_mut().servers.subscription_busy = true;
+    Task::perform(read_conf(), |result| {
+        Message::Servers(ServersMessage::ConfImported(result))
+    })
+}
+
+/// Заводит профиль из `.conf`; отмена — не ошибка, ошибка — в журнал.
+fn conf_imported(
+    app: &mut App,
+    result: Result<Option<penguin_config::schema::profile::Profile>, String>,
+) -> Task<Message> {
+    app.state_mut().servers.subscription_busy = false;
+    match result {
+        Ok(None) => Task::none(),
+        Ok(Some(profile)) => {
+            close_wireguard(app);
+            add_or_replace(app, profile);
+            save(app)
+        }
+        Err(reason) => {
+            app.state_mut().connection.push_log(
+                LogLevel::Error,
+                format!("{}: {reason}", crate::i18n::s().import_conf_failed),
+            );
+            Task::none()
+        }
+    }
+}
+
+/// Закрывает окно добавления WireGuard и чистит ключ подписки.
+fn close_wireguard(app: &mut App) {
+    let state = app.state_mut();
+    state.servers.wireguard = false;
+    state.servers.subscription_key.clear();
+}
+
+/// Добавляет профиль или заменяет существующий с тем же идентификатором.
+fn add_or_replace(app: &mut App, profile: penguin_config::schema::profile::Profile) {
+    let profiles = &mut app.state_mut().config.profiles;
+    match profiles.iter_mut().find(|known| known.id == profile.id) {
+        Some(existing) => *existing = profile,
+        None => profiles.push(profile),
+    }
+}
+
+/// Спрашивает `.conf` и разбирает его в профиль; `None` — окно закрыли без выбора.
+async fn read_conf() -> Result<Option<penguin_config::schema::profile::Profile>, String> {
+    use penguin_config::import::parse_wireguard_conf;
+    use penguin_config::schema::profile::Profile;
+
+    let title = crate::i18n::s().import_conf_title;
+    let filter = crate::i18n::s().wireguard_configs;
+    let unreadable = crate::i18n::s().import_conf_failed;
+
+    let read = tokio::task::spawn_blocking(move || {
+        let Some(path) = penguin_platform::dialog::pick_wireguard_config(title, filter)
+            .map_err(|err| err.to_string())?
+        else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(&path).map_err(|err| format!("{unreadable}: {err}"))?;
+        let outbound = parse_wireguard_conf(&text).map_err(|err| err.to_string())?;
+        let name = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "WireGuard".to_owned());
+        Ok(Some(Profile::new(editor::slug(&name), name, outbound)))
+    })
+    .await;
+
+    read.unwrap_or_else(|err| Err(err.to_string()))
+}
+
+/// Просит себя-как-CLI забрать серверы по ключу; пустой ключ ничего не делает.
+fn subscription_refresh(app: &mut App) -> Task<Message> {
+    let key = app.state().servers.subscription_key.trim().to_owned();
+    if key.is_empty() || app.state().servers.subscription_busy {
+        return Task::none();
+    }
+    app.state_mut().servers.subscription_busy = true;
+    Task::perform(crate::subscription::refresh(key), |result| {
+        Message::Servers(ServersMessage::SubscriptionRefreshed(result))
+    })
+}
+
+/// Вливает присланные профили, заменяя управляемые той же подпиской.
+fn subscription_refreshed(
+    app: &mut App,
+    result: Result<Vec<penguin_config::schema::profile::Profile>, String>,
+) -> Task<Message> {
+    app.state_mut().servers.subscription_busy = false;
+    let strings = crate::i18n::s();
+    match result {
+        Ok(profiles) => {
+            let count = profiles.len();
+            merge_managed(app, profiles);
+            close_wireguard(app);
+            let state = app.state_mut();
+            state.servers.picker = false;
+            state.connection.push_log(
+                LogLevel::Info,
+                format!("{}: {count}", strings.subscription_updated),
+            );
+            save(app)
+        }
+        Err(reason) => {
+            app.state_mut().connection.push_log(
+                LogLevel::Error,
+                format!("{}: {reason}", strings.subscription_failed),
+            );
+            Task::none()
+        }
+    }
+}
+
+/// Заменяет управляемые профили подписок свежим набором (по `subscription`).
+pub(crate) fn merge_managed(
+    app: &mut App,
+    profiles: Vec<penguin_config::schema::profile::Profile>,
+) {
+    let ids: std::collections::BTreeSet<String> = profiles
+        .iter()
+        .filter_map(|profile| profile.subscription.clone())
+        .collect();
+    let config = &mut app.state_mut().config;
+    config
+        .profiles
+        .retain(|profile| match &profile.subscription {
+            Some(id) => !ids.contains(id),
+            None => true,
+        });
+    config.profiles.extend(profiles);
+    if let Some(active) = config.active_profile.clone()
+        && config.profile(&active).is_none()
+    {
+        config.active_profile = None;
     }
 }
 
@@ -122,8 +290,14 @@ fn choose_protocol(app: &mut App, id: &str) -> Task<Message> {
 
     let state = app.state_mut();
     state.servers.picker = false;
-    state.servers.editor = Some(editor::Draft::new(spec));
     state.servers.link.clear();
+    // У WireGuard три способа добавить: вручную, из `.conf`, подпиской.
+    if id == "wireguard" {
+        state.servers.wireguard = true;
+        state.servers.subscription_key.clear();
+    } else {
+        state.servers.editor = Some(editor::Draft::new(spec));
+    }
     Task::none()
 }
 
@@ -431,6 +605,46 @@ mod tests {
 
         assert!(app.state().config.profiles.is_empty());
         assert!(app.state().servers.editor.is_some());
+    }
+
+    fn managed(id: &str, sub: &str) -> Profile {
+        let mut profile = Profile::new(id, id, RawOutbound::new("wireguard", json!({})));
+        profile.subscription = Some(sub.to_owned());
+        profile
+    }
+
+    #[test]
+    fn a_subscription_refresh_replaces_only_its_own_profiles() {
+        let mut app = app_with_profiles(&["home"]);
+        app.state_mut()
+            .config
+            .profiles
+            .push(managed("old-nl", "amnezia-1"));
+        app.state_mut().servers.subscription_busy = true;
+
+        let _ = subscription_refreshed(&mut app, Ok(vec![managed("new-de", "amnezia-1")]));
+
+        let ids: Vec<&str> = app
+            .state()
+            .config
+            .profiles
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["home", "new-de"], "старый управляемый не убран");
+        assert!(!app.state().servers.subscription_busy);
+    }
+
+    #[test]
+    fn a_failed_subscription_refresh_clears_the_flag_and_logs() {
+        let mut app = app_with_profiles(&[]);
+        app.state_mut().servers.subscription_busy = true;
+        let before = app.state().connection.log.len();
+
+        let _ = subscription_refreshed(&mut app, Err("шлюз недоступен".to_owned()));
+
+        assert!(!app.state().servers.subscription_busy);
+        assert_eq!(app.state().connection.log.len(), before + 1);
     }
 
     #[test]

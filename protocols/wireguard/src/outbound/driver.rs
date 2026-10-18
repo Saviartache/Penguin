@@ -1,5 +1,7 @@
 //! Задача-водитель: единственный владелец сокета и сеанса (без `Mutex`);
-//! `send`/`recv` передают байты через каналы.
+//! `send`/`recv` передают байты через каналы. Обфускация AmneziaWG
+//! (`crate::obfs`), если задана, оборачивает исходящие и классифицирует входящие
+//! датаграммы; без неё путь байт в байт прежний.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,13 +12,14 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::crypto::constants::{
-    MESSAGE_COOKIE_REPLY, MESSAGE_RESPONSE, MESSAGE_TRANSPORT_DATA, REKEY_ATTEMPT_TIME,
-    REKEY_TIMEOUT, REKEY_TIMEOUT_JITTER_MAX_MS,
+    INITIATION_MESSAGE_LEN, MESSAGE_COOKIE_REPLY, MESSAGE_INITIATION, MESSAGE_RESPONSE,
+    MESSAGE_TRANSPORT_DATA, REKEY_ATTEMPT_TIME, REKEY_TIMEOUT, REKEY_TIMEOUT_JITTER_MAX_MS,
 };
 use crate::crypto::handshake::{PendingHandshake, StaticKeys, consume_response, create_initiation};
 use crate::crypto::session::Session;
 use crate::error::WireguardResult;
-use crate::frame::response;
+use crate::frame::{response, transport};
+use crate::obfs::{MsgKind, Obfuscation};
 
 /// Буфер одного чтения сокета: с запасом больше любого MTU.
 const RECV_BUFFER_LEN: usize = 2048;
@@ -29,6 +32,7 @@ pub(super) struct Handles {
     pub socket: Arc<UdpSocket>,
     pub static_keys: Arc<StaticKeys>,
     pub reserved: [u8; 3],
+    pub obfs: Option<Obfuscation>,
     pub keepalive: Option<Duration>,
     pub session: Session,
     pub outbound_rx: mpsc::Receiver<Bytes>,
@@ -52,21 +56,90 @@ impl RekeyAttempt {
     }
 }
 
+/// Класс входящей датаграммы после классификации.
+enum Incoming {
+    Transport,
+    Response,
+    Cookie,
+    Other,
+}
+
+/// Первые 4 байта инициации: обычный заголовок или магический `H1` от обфускатора.
+fn init_header(reserved: [u8; 3], obfs: &Option<Obfuscation>) -> [u8; 4] {
+    match obfs {
+        Some(o) => o.init_header(),
+        None => [MESSAGE_INITIATION, reserved[0], reserved[1], reserved[2]],
+    }
+}
+
+/// Отправляет инициацию: при обфускации сперва сигнатуры и junk, затем кадр с padding.
+async fn send_initiation_datagram(
+    socket: &UdpSocket,
+    message: &[u8; INITIATION_MESSAGE_LEN],
+    obfs: &Option<Obfuscation>,
+) -> std::io::Result<()> {
+    match obfs {
+        Some(o) => {
+            for packet in o.prelude() {
+                socket.send(&packet).await?;
+            }
+            socket.send(&o.wrap_initiation(message)).await?;
+        }
+        None => {
+            socket.send(message).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Нули к открытому тексту пакета данных (AWG 3); без обфускации — ни одного.
+fn data_padding(obfs: &mut Option<Obfuscation>, plaintext_len: usize) -> usize {
+    obfs.as_mut()
+        .map_or(0, |o| o.transport_padding(plaintext_len))
+}
+
+/// Классифицирует датаграмму и возвращает границы кадра (padding и защита сняты).
+fn classify_incoming(datagram: &mut [u8], obfs: &Option<Obfuscation>) -> (Incoming, usize, usize) {
+    match obfs {
+        Some(o) => match o.open(datagram) {
+            Some(c) => {
+                let kind = match c.kind {
+                    MsgKind::Transport => Incoming::Transport,
+                    MsgKind::Response => Incoming::Response,
+                    MsgKind::Cookie => Incoming::Cookie,
+                };
+                (kind, c.start, c.end)
+            }
+            None => (Incoming::Other, 0, 0),
+        },
+        None => {
+            let kind = match datagram.first().copied() {
+                Some(MESSAGE_TRANSPORT_DATA) => Incoming::Transport,
+                Some(MESSAGE_RESPONSE) => Incoming::Response,
+                Some(MESSAGE_COOKIE_REPLY) => Incoming::Cookie,
+                _ => Incoming::Other,
+            };
+            (kind, 0, datagram.len())
+        }
+    }
+}
+
 /// Рукопожатие с нуля: инициация повторяется, пока сервер не ответит.
 pub(super) async fn initial_handshake(
     socket: &UdpSocket,
     keys: &StaticKeys,
     reserved: [u8; 3],
+    obfs: &Option<Obfuscation>,
 ) -> WireguardResult<Session> {
     let mut buf = [0u8; RECV_BUFFER_LEN];
     loop {
-        let (message, pending) = create_initiation(keys, reserved);
-        socket.send(&message).await?;
+        let (message, pending) = create_initiation(keys, init_header(reserved, obfs));
+        send_initiation_datagram(socket, &message, obfs).await?;
 
         let timeout = REKEY_TIMEOUT + jitter();
-        match tokio::time::timeout(timeout, wait_for_response(socket, &mut buf)).await {
-            Ok(Ok(len)) => {
-                if let Ok(keys_out) = consume_response(keys, pending, &buf[..len]) {
+        match tokio::time::timeout(timeout, wait_for_response(socket, &mut buf, obfs)).await {
+            Ok(Ok((start, end))) => {
+                if let Ok(keys_out) = consume_response(keys, pending, &buf[start..end]) {
                     return Ok(Session::new(keys_out));
                 }
             }
@@ -76,12 +149,16 @@ pub(super) async fn initial_handshake(
     }
 }
 
-/// Ждёт пакет «ответ на рукопожатие», остальное отбрасывает.
-async fn wait_for_response(socket: &UdpSocket, buf: &mut [u8]) -> std::io::Result<usize> {
+/// Ждёт пакет «ответ на рукопожатие», возвращает границы кадра; остальное отбрасывает.
+async fn wait_for_response(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+    obfs: &Option<Obfuscation>,
+) -> std::io::Result<(usize, usize)> {
     loop {
         let len = socket.recv(buf).await?;
-        if buf.first() == Some(&MESSAGE_RESPONSE) {
-            return Ok(len);
+        if let (Incoming::Response, start, end) = classify_incoming(&mut buf[..len], obfs) {
+            return Ok((start, end));
         }
     }
 }
@@ -97,6 +174,7 @@ pub(super) async fn run(handles: Handles) {
         socket,
         static_keys,
         reserved,
+        mut obfs,
         keepalive,
         mut session,
         mut outbound_rx,
@@ -123,9 +201,13 @@ pub(super) async fn run(handles: Handles) {
 
             outgoing = outbound_rx.recv() => {
                 let Some(packet) = outgoing else { break };
-                if let Err(error) = session.seal_packet(reserved, &packet, &mut send_buf) {
+                let padding = data_padding(&mut obfs, packet.len());
+                if let Err(error) = session.seal_packet(reserved, &packet, padding, &mut send_buf) {
                     tracing::warn!(%error, "сеанс WireGuard не может больше шифровать — направление закрывается");
                     break;
+                }
+                if let Some(o) = &obfs {
+                    o.wrap_transport(&mut send_buf);
                 }
                 if socket.send(&send_buf).await.is_err() {
                     break;
@@ -137,6 +219,7 @@ pub(super) async fn run(handles: Handles) {
                 let Ok(len) = incoming else { break };
                 if !handle_datagram(
                     &mut recv_buf[..len],
+                    &mut obfs,
                     &static_keys,
                     &mut session,
                     &mut rekey,
@@ -151,11 +234,11 @@ pub(super) async fn run(handles: Handles) {
                     tracing::warn!(age = ?session.age(), "сеанс WireGuard истёк без обновления рукопожатия");
                     break;
                 }
-                advance_rekey(&socket, &static_keys, reserved, &session, &mut rekey).await;
+                advance_rekey(&socket, &static_keys, reserved, &obfs, &session, &mut rekey).await;
                 if let Some(interval) = keepalive
                     && last_sent_data.elapsed() >= interval
                 {
-                    send_keepalive(&socket, reserved, &mut session, &mut send_buf, &mut last_sent_data).await;
+                    send_keepalive(&socket, reserved, &mut obfs, &mut session, &mut send_buf, &mut last_sent_data).await;
                 }
                 timer.as_mut().reset(wake_at(&session, &rekey, keepalive, last_sent_data).into());
             }
@@ -186,28 +269,40 @@ fn wake_at(
 /// остановить. Остальное постороннее отбрасывается молча.
 async fn handle_datagram(
     datagram: &mut [u8],
+    obfs: &mut Option<Obfuscation>,
     static_keys: &StaticKeys,
     session: &mut Session,
     rekey: &mut Option<RekeyAttempt>,
     inbound_tx: &mpsc::Sender<Bytes>,
 ) -> bool {
-    match datagram.first().copied() {
-        Some(MESSAGE_TRANSPORT_DATA) => {
-            let Ok(plaintext) = session.open_packet(datagram) else {
+    let (incoming, start, end) = classify_incoming(datagram, obfs);
+    match incoming {
+        Incoming::Transport => {
+            // AWG: вернуть стандартный заголовок типа 4 (он вне AEAD) для разбора.
+            if obfs.is_some() {
+                datagram[start..start + 4].copy_from_slice(&[MESSAGE_TRANSPORT_DATA, 0, 0, 0]);
+            }
+            let Ok(plaintext) = session.open_packet(&mut datagram[start..end]) else {
                 return true;
             };
-            // Пустой пакет - keepalive сервера.
-            plaintext.is_empty()
-                || inbound_tx
-                    .send(Bytes::copy_from_slice(plaintext))
+            if let Some(o) = obfs {
+                o.observe_received(start, plaintext.len());
+            }
+            // `None` - keepalive сервера (в том числе с добавкой нулей) или не IP.
+            match transport::inner_packet(plaintext) {
+                Some(packet) => inbound_tx
+                    .send(Bytes::copy_from_slice(packet))
                     .await
-                    .is_ok()
+                    .is_ok(),
+                None => true,
+            }
         }
-        Some(MESSAGE_RESPONSE) => {
+        Incoming::Response => {
+            let message = &datagram[start..end];
             if let Some(attempt) = rekey.take() {
-                match response::parse(datagram) {
+                match response::parse(message) {
                     Ok(fields) if fields.receiver_index == attempt.pending.local_index() => {
-                        match consume_response(static_keys, attempt.pending, datagram) {
+                        match consume_response(static_keys, attempt.pending, message) {
                             Ok(keys) => *session = Session::new(keys),
                             Err(error) => {
                                 tracing::debug!(%error, "ответ на обновление рукопожатия не принят");
@@ -219,11 +314,11 @@ async fn handle_datagram(
             }
             true
         }
-        Some(MESSAGE_COOKIE_REPLY) => {
+        Incoming::Cookie => {
             tracing::debug!("сервер прислал cookie-ответ: cookie-протокол не реализован");
             true
         }
-        _ => true,
+        Incoming::Other => true,
     }
 }
 
@@ -232,9 +327,13 @@ async fn initiate(
     socket: &UdpSocket,
     static_keys: &StaticKeys,
     reserved: [u8; 3],
+    obfs: &Option<Obfuscation>,
 ) -> Option<PendingHandshake> {
-    let (message, pending) = create_initiation(static_keys, reserved);
-    socket.send(&message).await.ok().map(|_| pending)
+    let (message, pending) = create_initiation(static_keys, init_header(reserved, obfs));
+    send_initiation_datagram(socket, &message, obfs)
+        .await
+        .ok()
+        .map(|()| pending)
 }
 
 /// Шаг обновления рукопожатия: начать, повторить или сдаться до следующего круга.
@@ -242,12 +341,13 @@ async fn advance_rekey(
     socket: &UdpSocket,
     static_keys: &StaticKeys,
     reserved: [u8; 3],
+    obfs: &Option<Obfuscation>,
     session: &Session,
     rekey: &mut Option<RekeyAttempt>,
 ) {
     let Some(attempt) = rekey.take() else {
         if session.needs_rekey()
-            && let Some(pending) = initiate(socket, static_keys, reserved).await
+            && let Some(pending) = initiate(socket, static_keys, reserved, obfs).await
         {
             let now = Instant::now();
             *rekey = Some(RekeyAttempt {
@@ -271,7 +371,7 @@ async fn advance_rekey(
         *rekey = Some(attempt);
         return;
     }
-    *rekey = Some(match initiate(socket, static_keys, reserved).await {
+    *rekey = Some(match initiate(socket, static_keys, reserved, obfs).await {
         Some(pending) => RekeyAttempt {
             pending,
             first_sent_at: attempt.first_sent_at,
@@ -286,11 +386,19 @@ async fn advance_rekey(
 async fn send_keepalive(
     socket: &UdpSocket,
     reserved: [u8; 3],
+    obfs: &mut Option<Obfuscation>,
     session: &mut Session,
     buf: &mut Vec<u8>,
     last_sent_data: &mut Instant,
 ) {
-    if session.seal_packet(reserved, &[], buf).is_ok() && socket.send(buf).await.is_ok() {
+    let padding = data_padding(obfs, 0);
+    if session.seal_packet(reserved, &[], padding, buf).is_err() {
+        return;
+    }
+    if let Some(o) = obfs {
+        o.wrap_transport(buf);
+    }
+    if socket.send(buf).await.is_ok() {
         *last_sent_data = Instant::now();
     }
 }

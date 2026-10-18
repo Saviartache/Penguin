@@ -16,4 +16,5 @@ pub mod doctor;
 pub mod profiles;
 pub mod rules;
 pub mod socks;
+pub mod subscription;
 pub mod update;

@@ -36,7 +36,7 @@ fn ask(line: &str) -> PlatformResult<Option<PathBuf>> {
 fn script(kind: Kind, title: &str) -> String {
     let types = match kind {
         Kind::Program => format!(" of type {PROGRAM_TYPES}"),
-        Kind::RuleList => String::new(),
+        Kind::RuleList | Kind::WireguardConfig => String::new(),
     };
     format!(
         "POSIX path of (choose file with prompt \"{}\"{types})",

@@ -19,6 +19,7 @@ use crate::error::PlatformResult;
 enum Kind {
     Program,
     RuleList,
+    WireguardConfig,
 }
 
 /// Просит человека показать программу: `title` — заголовок окна, `filter` — подпись вида файлов
@@ -32,6 +33,11 @@ pub fn pick_program(title: &str, filter: &str) -> PlatformResult<Option<PathBuf>
 /// Просит человека показать текстовый список правил; подписи — как у [`pick_program`].
 pub fn pick_rule_list(title: &str, filter: &str) -> PlatformResult<Option<PathBuf>> {
     pick(Kind::RuleList, title, filter)
+}
+
+/// Просит человека показать файл `.conf` WireGuard; подписи — как у [`pick_program`].
+pub fn pick_wireguard_config(title: &str, filter: &str) -> PlatformResult<Option<PathBuf>> {
+    pick(Kind::WireguardConfig, title, filter)
 }
 
 /// Просит человека назвать файл для выгрузки списка правил; `name` — имя по умолчанию,

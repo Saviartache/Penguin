@@ -20,6 +20,35 @@ pub enum Command {
     Doctor,
     /// Обновление с GitHub.
     Update(UpdateCommand),
+    /// Подписка Amnezia: серверы по ключу `vpn://`.
+    Subscription(SubscriptionCommand),
+}
+
+/// Команды подписки.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubscriptionCommand {
+    /// Забрать серверы у шлюза; без ключа — обновить все заведённые.
+    Refresh {
+        /// Ключ подписки `vpn://…`.
+        key: Option<String>,
+        /// Обновить только одну заведённую подписку по идентификатору.
+        id: Option<String>,
+        /// Пометить запрос событием подключения (`is_connect_event`).
+        connect_event: bool,
+        /// Взять второй (dev) ключ шлюза вместо первого — какой боевой, не проверено.
+        dev: bool,
+        /// Адрес шлюза вместо боевого (для отладки и dev-шлюза).
+        endpoint: Option<String>,
+        /// Обновить только одну локацию по коду страны (иначе — все).
+        country: Option<String>,
+    },
+    /// Показать заведённые подписки.
+    List,
+    /// Убрать подписку и её профили по идентификатору.
+    Remove {
+        /// Идентификатор подписки.
+        id: String,
+    },
 }
 
 /// Команды обновления.
@@ -81,7 +110,15 @@ pub enum RulesCommand {
 }
 
 /// Имена команд этого модуля.
-pub const NAMES: [&str; 6] = ["socks", "http", "profiles", "rules", "doctor", "update"];
+pub const NAMES: [&str; 7] = [
+    "socks",
+    "http",
+    "profiles",
+    "rules",
+    "doctor",
+    "update",
+    "subscription",
+];
 
 /// Разбирает команду; первым идёт её имя, общие флаги уже убраны.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed<Command>, ArgsError> {
@@ -96,8 +133,88 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed<Command>, 
         "rules" => rules(lx).map(|p| p.map(Command::Rules)),
         "doctor" => leaf(lx, help::DOCTOR, Command::Doctor),
         "update" => update(lx).map(|p| p.map(Command::Update)),
+        "subscription" => subscription(lx).map(|p| p.map(Command::Subscription)),
         _ => Err(ArgsError::UnknownCommand(name)),
     }
+}
+
+fn subscription(mut lx: Lexer) -> Result<Parsed<SubscriptionCommand>, ArgsError> {
+    subcommand(&mut lx, "subscription", help::SUBSCRIPTION)?.and_then(|name| match name.as_str() {
+        "refresh" => refresh(lx),
+        "list" => leaf(lx, help::SUBSCRIPTION_LIST, SubscriptionCommand::List),
+        "remove" => remove(lx),
+        _ => Err(ArgsError::UnknownCommand(name)),
+    })
+}
+
+fn refresh(mut lx: Lexer) -> Result<Parsed<SubscriptionCommand>, ArgsError> {
+    let mut key = None;
+    let mut id = None;
+    let mut connect_event = false;
+    let mut dev = false;
+    let mut endpoint = None;
+    let mut country = None;
+    let wanted = walk(
+        &mut lx,
+        |flag, lx| match flag {
+            "--id" => {
+                id = Some(lx.value(flag)?);
+                Ok(())
+            }
+            "--connect-event" => {
+                connect_event = true;
+                Ok(())
+            }
+            "--dev" => {
+                dev = true;
+                Ok(())
+            }
+            "--endpoint" => {
+                endpoint = Some(lx.value(flag)?);
+                Ok(())
+            }
+            "--country" => {
+                country = Some(lx.value(flag)?);
+                Ok(())
+            }
+            _ => Err(ArgsError::UnknownOption(flag.to_owned())),
+        },
+        |word| {
+            if key.is_some() {
+                return Err(ArgsError::Unexpected(word));
+            }
+            key = Some(word);
+            Ok(())
+        },
+    )?;
+    Ok(done(
+        wanted,
+        help::SUBSCRIPTION_REFRESH,
+        SubscriptionCommand::Refresh {
+            key,
+            id,
+            connect_event,
+            dev,
+            endpoint,
+            country,
+        },
+    ))
+}
+
+fn remove(mut lx: Lexer) -> Result<Parsed<SubscriptionCommand>, ArgsError> {
+    let mut id = None;
+    let wanted = walk(&mut lx, unknown_flag, |word| {
+        if id.is_some() {
+            return Err(ArgsError::Unexpected(word));
+        }
+        id = Some(word);
+        Ok(())
+    })?;
+    if wanted {
+        return Ok(Parsed::Print(help::SUBSCRIPTION_REMOVE));
+    }
+    let id = id.ok_or(ArgsError::MissingArgument("<ID>"))?;
+    Ok(Parsed::Run(SubscriptionCommand::Remove { id }))
 }
 
 fn update(mut lx: Lexer) -> Result<Parsed<UpdateCommand>, ArgsError> {
@@ -390,6 +507,65 @@ mod tests {
             Err(ArgsError::Unexpected("x".into()))
         );
         assert!(help(&["update", "install", "-h"]).contains("update install"));
+    }
+
+    #[test]
+    fn subscription_subcommands() {
+        assert_eq!(
+            run(&["subscription", "refresh"]),
+            Ok(Command::Subscription(SubscriptionCommand::Refresh {
+                key: None,
+                id: None,
+                connect_event: false,
+                dev: false,
+                endpoint: None,
+                country: None,
+            }))
+        );
+        assert_eq!(
+            run(&["subscription", "refresh", "vpn://abc", "--dev"]),
+            Ok(Command::Subscription(SubscriptionCommand::Refresh {
+                key: Some("vpn://abc".into()),
+                id: None,
+                connect_event: false,
+                dev: true,
+                endpoint: None,
+                country: None,
+            }))
+        );
+        assert_eq!(
+            run(&[
+                "subscription",
+                "refresh",
+                "--id",
+                "amnezia-1",
+                "--connect-event",
+                "--country",
+                "nl"
+            ]),
+            Ok(Command::Subscription(SubscriptionCommand::Refresh {
+                key: None,
+                id: Some("amnezia-1".into()),
+                connect_event: true,
+                dev: false,
+                endpoint: None,
+                country: Some("nl".into()),
+            }))
+        );
+        assert_eq!(
+            run(&["subscription", "remove", "amnezia-1"]),
+            Ok(Command::Subscription(SubscriptionCommand::Remove {
+                id: "amnezia-1".into()
+            }))
+        );
+        assert_eq!(
+            run(&["subscription", "remove"]),
+            Err(ArgsError::MissingArgument("<ID>"))
+        );
+        assert_eq!(
+            run(&["subscription"]),
+            Err(ArgsError::MissingCommand("subscription"))
+        );
     }
 
     #[test]

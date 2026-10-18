@@ -13,12 +13,20 @@
 //! обновляется на лету ([`crypto::constants::REKEY_AFTER_TIME`]). Сверено с
 //! `wireguard-go` и `boringtun`; не поддержан cookie-протокол (тип 3), с живым
 //! сервером не проверялся.
+//!
+//! AmneziaWG — обфускация поверх тех же кадров ([`obfs`]), включается
+//! необязательной секцией [`config::WireguardConfig::amnezia`]. Поддержаны
+//! v1/v2 (`Jc`/`Jmin`/`Jmax`, `S1`–`S4`, `H1`–`H4`) и 1.5/3 (`I1`–`I5`, защита
+//! заголовков, `content_padding_addition`, `random_trailers`), сверенные с
+//! `amneziawg-go` (b5928ef); таймеры AWG 3 отклоняются. С живым сервером
+//! Amnezia не проверялось.
 
 pub mod config;
 pub mod crypto;
 pub mod error;
 pub mod factory;
 pub mod frame;
+pub mod obfs;
 pub mod outbound;
 
 pub use config::WireguardConfig;

@@ -1,11 +1,14 @@
 //! Ответ (тип 2), 92 байта ([`RESPONSE_MESSAGE_LEN`]): тип 1, резерв 3, отправитель 4,
 //! получатель 4, эфемерный 32, пустой+метка 16, mac1 16, mac2 16
 //! (`MessageResponse` в `device/noise-protocol.go`). Только разбор: строит его сервер.
+//!
+//! Первые 4 байта не проверяются: в AmneziaWG там магический заголовок `H2`,
+//! а не тип 2. Класс сообщения определяет вызывающий (по типу или через
+//! `crate::obfs`), а `mac1` сервер считает поверх этих байт как есть.
 
-use crate::crypto::constants::{MESSAGE_RESPONSE, RESPONSE_MESSAGE_LEN};
+use crate::crypto::constants::RESPONSE_MESSAGE_LEN;
 use crate::error::{WireguardError, WireguardResult};
 
-const OFF_TYPE: usize = 0;
 const OFF_SENDER: usize = 4;
 const OFF_RECEIVER: usize = 8;
 const OFF_EPHEMERAL: usize = 12;
@@ -40,12 +43,6 @@ pub fn parse(bytes: &[u8]) -> WireguardResult<ResponseFields> {
             bytes.len()
         )));
     }
-    if bytes[OFF_TYPE] != MESSAGE_RESPONSE {
-        return Err(WireguardError::malformed(format!(
-            "тип сообщения {} вместо {MESSAGE_RESPONSE}",
-            bytes[OFF_TYPE]
-        )));
-    }
 
     let mut sender = [0u8; 4];
     sender.copy_from_slice(&bytes[OFF_SENDER..OFF_RECEIVER]);
@@ -67,11 +64,12 @@ pub fn parse(bytes: &[u8]) -> WireguardResult<ResponseFields> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::constants::MESSAGE_RESPONSE;
 
     /// Сборка только для тестов: строит ответ сервер.
     fn encode_for_test(fields: &ResponseFields) -> [u8; RESPONSE_MESSAGE_LEN] {
         let mut out = [0u8; RESPONSE_MESSAGE_LEN];
-        out[OFF_TYPE] = MESSAGE_RESPONSE;
+        out[0] = MESSAGE_RESPONSE;
         out[OFF_SENDER..OFF_RECEIVER].copy_from_slice(&fields.sender_index.to_le_bytes());
         out[OFF_RECEIVER..OFF_EPHEMERAL].copy_from_slice(&fields.receiver_index.to_le_bytes());
         out[OFF_EPHEMERAL..OFF_EMPTY].copy_from_slice(&fields.ephemeral_public);
@@ -111,9 +109,12 @@ mod tests {
     }
 
     #[test]
-    fn the_wrong_message_type_is_rejected() {
+    fn an_amneziawg_magic_header_in_the_first_four_bytes_is_accepted() {
+        // В AmneziaWG первые 4 байта - заголовок `H2`, а не тип 2; разбор смотрит
+        // только на длину, поля читаются по фиксированным смещениям.
         let mut encoded = encode_for_test(&sample());
-        encoded[0] = 1;
-        assert!(parse(&encoded).is_err());
+        encoded[0..4].copy_from_slice(&0x7D21_93FEu32.to_le_bytes());
+        let parsed = parse(&encoded).expect("разбирается несмотря на магический заголовок");
+        assert_eq!(parsed.sender_index, sample().sender_index);
     }
 }

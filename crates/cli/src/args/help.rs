@@ -162,3 +162,66 @@ Options:
 ",
     global_options!()
 );
+
+pub(super) const SUBSCRIPTION: &str = concat!(
+    "Подписка Amnezia: сервы по ключу vpn://
+
+Usage: penguin subscription [OPTIONS] <COMMAND>
+
+Commands:
+  refresh  Забрать серверы у шлюза и завести как управляемые профили
+  list     Показать заведённые подписки
+  remove   Убрать подписку и её профили
+
+Options:
+",
+    global_options!()
+);
+
+pub(super) const SUBSCRIPTION_REFRESH: &str = concat!(
+    "Забрать серверы подписки у шлюза и завести как управляемые профили.
+
+Ключ подписки `vpn://…` — свой, из оплаченной подписки Amnezia. Устройство
+(ключи и installation_uuid) хранится у настроек и переиспользуется, чтобы не
+тратить слоты. Без ключа обновляет уже заведённые подписки.
+
+О боевой шлюз (gw.amnezia.org) проверяется пользователем: по умолчанию берётся
+один из двух извлечённых ключей шлюза, боевой из них не подтверждён.
+
+Usage: penguin subscription refresh [OPTIONS] [КЛЮЧ]
+
+Arguments:
+  [КЛЮЧ]  Ключ подписки `vpn://…`. По умолчанию — обновить все заведённые
+
+Options:
+      --id <ID>            Обновить только одну заведённую подписку по идентификатору
+      --connect-event      Пометить запрос событием подключения (шлюз держит пир живым)
+      --dev                Взять второй (dev) ключ шлюза — если первый даёт 500
+      --endpoint <URL>     Адрес шлюза вместо боевого (отладка, dev-шлюз)
+      --country <КОД>      Обновить только одну локацию (иначе — все)
+",
+    global_options!()
+);
+
+pub(super) const SUBSCRIPTION_LIST: &str = concat!(
+    "Показать заведённые подписки
+
+Usage: penguin subscription list [OPTIONS]
+
+Options:
+",
+    global_options!()
+);
+
+pub(super) const SUBSCRIPTION_REMOVE: &str = concat!(
+    "Убрать подписку и все её профили
+
+Usage: penguin subscription remove [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Идентификатор подписки (из `subscription list`)
+
+Options:
+",
+    global_options!()
+);

@@ -8,10 +8,11 @@ use penguin_core::state::TunnelState;
 use penguin_ipc::schema::{Event, LogLevel, Request, Response};
 
 use crate::app::App;
-use crate::app::message::{HomeMessage, IpcMessage, Message, ServiceOutcome};
+use crate::app::message::{HomeMessage, IpcMessage, Message, ServersMessage, ServiceOutcome};
 use crate::app::update::profiles::probe_current;
 use crate::app::update::request;
 use crate::forms::flow::Flow;
+use crate::screens::compact::menu;
 
 /// Сколько ждать, пока служба опустит тоннель и остановится.
 const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -153,27 +154,108 @@ pub fn handle_home(app: &mut App, message: HomeMessage) -> Task<Message> {
             // Спрашиваем в любом случае: подписка достучится, когда служба поднимется.
             crate::app::update::request_initial_state()
         }
+        HomeMessage::ReloadedForConnect(result) => reloaded_for_connect(app, result),
+        HomeMessage::ProfileMenu(open) => {
+            let config = &app.state().config;
+            let top = open.then(|| {
+                let active = config.active().and_then(|active| {
+                    config
+                        .profiles
+                        .iter()
+                        .position(|profile| profile.id == active.id)
+                });
+                menu::opened_at(active, config.profiles.len())
+            });
+            app.state_mut().profile_menu = top;
+            Task::none()
+        }
+        HomeMessage::ProfileScrolled(rows) => {
+            let len = app.state().config.profiles.len();
+            let state = app.state_mut();
+            state.profile_menu = state.profile_menu.map(|top| menu::scrolled(top, rows, len));
+            Task::none()
+        }
+        HomeMessage::ProfileChosen(at) => {
+            let state = app.state_mut();
+            state.profile_menu = None;
+            let Some(profile) = state.config.profiles.get(at) else {
+                return Task::none();
+            };
+            let id = profile.id.as_str().to_owned();
+            Task::done(Message::Servers(ServersMessage::Select(id)))
+        }
     }
 }
 
 fn toggle_connection(app: &mut App) -> Task<Message> {
-    let connection = &mut app.state_mut().connection;
-    if connection.is_busy_with_service() {
-        return Task::none();
+    {
+        let connection = &mut app.state_mut().connection;
+        if connection.is_busy_with_service() {
+            return Task::none();
+        }
+        // Службы нет — кнопка означает «Запустить службу».
+        if !connection.online {
+            connection.starting = true;
+            connection.push_log(LogLevel::Info, crate::i18n::s().service_starting.to_owned());
+            return Task::perform(bring_up_service(), |ready| {
+                Message::Home(HomeMessage::ServiceChecked(ready))
+            });
+        }
+        if connection.tunnel.is_active() || connection.tunnel.is_busy() {
+            return request(Request::Disconnect);
+        }
     }
-    // Службы нет — кнопка означает «Запустить службу».
-    if !connection.online {
-        connection.starting = true;
-        connection.push_log(LogLevel::Info, crate::i18n::s().service_starting.to_owned());
-        return Task::perform(bring_up_service(), |ready| {
-            Message::Home(HomeMessage::ServiceChecked(ready))
-        });
-    }
+    connect(app)
+}
 
-    if connection.tunnel.is_active() || connection.tunnel.is_busy() {
-        request(Request::Disconnect)
-    } else {
-        request(Request::Connect { profile: None })
+/// Подключение: у профиля из подписки сперва обновляем конфиг (как Reload API
+/// у Amnezia), иначе он протухает — сервер отбраковывает давно не виденное
+/// устройство. Обновление делает отдельный процесс (`AGENTS.md` §1.8).
+fn connect(app: &mut App) -> Task<Message> {
+    // Управляемый профиль: обновить перед подключением только его локацию.
+    let managed = app.state().config.active().and_then(|profile| {
+        let sub = profile.subscription.clone()?;
+        // Идентификатор профиля — `<подписка>-<страна>`; страна — хвост.
+        let country = profile
+            .id
+            .as_str()
+            .strip_prefix(&format!("{sub}-"))
+            .map(str::to_owned);
+        Some((sub, country))
+    });
+
+    match managed {
+        Some((id, country)) => Task::perform(
+            crate::subscription::refresh_subscription(id, country),
+            |result| Message::Home(HomeMessage::ReloadedForConnect(result)),
+        ),
+        None => request(Request::Connect { profile: None }),
+    }
+}
+
+/// Конфиг подписки обновлён перед подключением — или не достучались до шлюза.
+///
+/// Неудача не отменяет подключение: поднимаемся на сохранённом конфиге, иначе
+/// без сети не подключиться вовсе.
+fn reloaded_for_connect(
+    app: &mut App,
+    result: Result<Vec<penguin_config::schema::profile::Profile>, String>,
+) -> Task<Message> {
+    match result {
+        Ok(profiles) => {
+            crate::app::update::profiles::merge_managed(app, profiles);
+            Task::batch([
+                crate::app::update::save(app),
+                request(Request::Connect { profile: None }),
+            ])
+        }
+        Err(reason) => {
+            app.state_mut().connection.push_log(
+                LogLevel::Error,
+                format!("{}: {reason}", crate::i18n::s().subscription_failed),
+            );
+            request(Request::Connect { profile: None })
+        }
     }
 }
 
@@ -317,6 +399,50 @@ mod tests {
     fn rights_are_asked_until_granted_then_never() {
         assert!(may_ask(false));
         assert!(!may_ask(true));
+    }
+
+    fn managed(id: &str, sub: &str) -> penguin_config::schema::profile::Profile {
+        use penguin_config::schema::outbound::RawOutbound;
+        let mut profile = penguin_config::schema::profile::Profile::new(
+            id,
+            id,
+            RawOutbound::new("wireguard", serde_json::json!({})),
+        );
+        profile.subscription = Some(sub.to_owned());
+        profile
+    }
+
+    #[test]
+    fn a_successful_reload_merges_the_fresh_config() {
+        let mut app = app();
+        app.state_mut()
+            .config
+            .profiles
+            .push(managed("a-nl", "amnezia-1"));
+        app.state_mut().config.active_profile = Some(ProfileId::new("a-nl"));
+
+        let fresh = managed("a-nl", "amnezia-1");
+        let _ = reloaded_for_connect(&mut app, Ok(vec![fresh]));
+
+        // Старый управляемый заменён свежим, профиль не раздвоился.
+        let count = app
+            .state()
+            .config
+            .profiles
+            .iter()
+            .filter(|p| p.id.as_str() == "a-nl")
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_failed_reload_still_connects_and_logs_why() {
+        let mut app = app();
+        let before = app.state().connection.log.len();
+
+        let _ = reloaded_for_connect(&mut app, Err("шлюз недоступен".to_owned()));
+
+        assert_eq!(app.state().connection.log.len(), before + 1);
     }
 
     #[test]

@@ -90,7 +90,11 @@ pub fn panel<'a, M: 'a>(
             .push_auto(container(head).padding(scrollbar::safe(0.0)))
             .push_auto(divider(palette))
             .push(body)
-            .push_auto(glyphs(hint.to_owned(), ink::level(palette, ink::TERTIARY)))
+            // Отрыв от списка как от поля поиска: рамка поля добавляет свой.
+            .push_auto(
+                container(glyphs(hint.to_owned(), ink::level(palette, ink::TERTIARY)))
+                    .padding(Padding::ZERO.top(gap::XS)),
+            )
             .push_auto(search)
             .gap(gap::XS)
             .build(),

@@ -52,6 +52,9 @@ pub struct State {
     pub boot: Boot,
     /// Обновление программы.
     pub updates: Updates,
+    /// Открыт список профилей на компактном экране: первая видимая строка,
+    /// дробная — трекпад листает долями строки.
+    pub profile_menu: Option<f32>,
 }
 
 /// Что окно знает об обновлении.
@@ -100,6 +103,7 @@ impl Default for State {
             servers: ServersState::default(),
             boot: Boot::idle(),
             updates: Updates::default(),
+            profile_menu: None,
         }
     }
 }
@@ -348,6 +352,12 @@ pub struct ServersState {
     pub editor: Option<ServerDraft>,
     /// Вставленная ссылка-приглашение; живёт, пока открыт редактор.
     pub link: String,
+    /// Открыт выбор способа добавить WireGuard (вручную, `.conf`, подпиской).
+    pub wireguard: bool,
+    /// Ключ подписки в окне добавления WireGuard.
+    pub subscription_key: String,
+    /// Идёт работа в окне (обновление подписки или чтение `.conf`): кнопки заблокированы.
+    pub subscription_busy: bool,
 }
 
 #[cfg(test)]

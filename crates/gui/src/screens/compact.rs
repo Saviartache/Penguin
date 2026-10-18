@@ -4,8 +4,12 @@
 //! заголовок трафика, поток данных (пока соединение поднимается или работает) и
 //! цифры, прижатые к нижнему краю.
 
+pub mod menu;
+
 use iced::Element;
 use iced::widget::text;
+use penguin_config::schema::profile::Profile;
+use penguin_core::id::ProfileId;
 use penguin_core::state::TunnelState;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
 use uikit::tokens::type_scale;
@@ -13,7 +17,7 @@ use uikit::widgets::Button;
 
 use crate::app::message::{HomeMessage, Message};
 use crate::app::state::{State, UpdateStatus};
-use crate::console::{self, Line, Reveal};
+use crate::console::{self, Line, Picker, Reveal};
 use crate::screens::tunnel::{Tone, describe, describe_button, describe_service_button};
 
 /// Высота кнопки: единственное действие окна не должно быть легко промахнуть.
@@ -27,6 +31,12 @@ const IDLE_FLOW: f32 = 0.2;
 
 /// Собирает компактный экран.
 pub fn view(state: &State) -> Element<'_, Message> {
+    let picker = Picker {
+        toggle: Message::Home(HomeMessage::ProfileMenu(state.profile_menu.is_none())),
+        choose: |at| Message::Home(HomeMessage::ProfileChosen(at)),
+        scroll: |rows| Message::Home(HomeMessage::ProfileScrolled(rows)),
+    };
+
     // Размер колонки явный: растянутая консоль в группе «по содержимому» схлопнется.
     Flex::col()
         .w(Size::FILL)
@@ -35,6 +45,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
             &state.palette,
             &lines(state),
             reveal(state),
+            Some(&picker),
         ))
         .push_auto(button(state))
         .gap(gap::SM)
@@ -114,33 +125,68 @@ fn config(state: &State) -> Vec<Line> {
         return vec![head, pair(strings.profile, strings.no_profiles.to_owned())];
     };
 
-    let latency = state
-        .servers
-        .latencies
-        .iter()
-        .find(|(id, _)| id == profile.id.as_str())
-        .and_then(|(_, rtt)| *rtt)
-        .map_or_else(
-            || NONE.to_owned(),
-            |rtt| format!("{rtt} {}", strings.millis),
-        );
-
-    vec![
+    let mut lines = vec![
         head,
-        pair(strings.profile, profile.name.clone()),
+        Line::Pick(strings.profile.to_uppercase(), profile.name.clone()),
+    ];
+    match state.profile_menu {
+        Some(top) => lines.extend(choices(state, top)),
+        None => lines.extend(details(state, profile)),
+    }
+    lines
+}
+
+/// Строки под профилем; открытый список встаёт на их место.
+fn details(state: &State, profile: &Profile) -> [Line; menu::ROWS] {
+    let strings = crate::i18n::s();
+    [
         pair(
             strings.server,
             crate::screens::servers::server_of(profile)
                 .map_or_else(|| NONE.to_owned(), str::to_owned),
         ),
         pair(strings.protocol, profile.outbound.protocol.clone()),
-        pair(strings.latency, latency),
+        pair(strings.latency, latency(state, &profile.id)),
         pair(
             strings.mode,
             crate::i18n::mode_label(state.config.routing.mode).to_owned(),
         ),
         pair(strings.rules, state.config.routing.rules.len().to_string()),
     ]
+}
+
+/// Видимое окно списка профилей; недостающие строки пустые, чтобы ниже ничего не съехало.
+fn choices(state: &State, top: f32) -> Vec<Line> {
+    let config = &state.config;
+    let active = config.active().map(|profile| &profile.id);
+    let mut lines: Vec<Line> = menu::window(top, config.profiles.len())
+        .map(|at| {
+            let profile = &config.profiles[at];
+            let chosen = active == Some(&profile.id);
+            Line::Choice(
+                profile.name.clone(),
+                latency(state, &profile.id),
+                chosen,
+                at,
+            )
+        })
+        .collect();
+    lines.resize_with(menu::ROWS, || Line::Blank);
+    lines
+}
+
+/// Последняя задержка профиля или дефис.
+fn latency(state: &State, profile: &ProfileId) -> String {
+    state
+        .servers
+        .latencies
+        .iter()
+        .find(|(id, _)| id == profile.as_str())
+        .and_then(|(_, rtt)| *rtt)
+        .map_or_else(
+            || NONE.to_owned(),
+            |rtt| format!("{rtt} {}", crate::i18n::s().millis),
+        )
 }
 
 /// Цифры под потоком; заголовком им служит сам поток.
@@ -252,6 +298,24 @@ mod tests {
 
         assert_eq!(size.width, Length::Fill);
         assert_eq!(size.height, Length::Fill);
+    }
+
+    #[test]
+    fn the_profile_line_opens_a_menu() {
+        let mut state = with_profile();
+        assert!(
+            lines(&state)
+                .iter()
+                .any(|line| matches!(line, Line::Pick(..)))
+        );
+
+        let closed = lines(&state).len();
+        state.profile_menu = Some(0.0);
+        let open = lines(&state);
+        // Иначе поток ниже сменит место в дереве и начнётся заново.
+        assert_eq!(open.len(), closed, "список сдвинул строки под собой");
+        assert!(matches!(open[2], Line::Choice(_, _, true, 0)));
+        let _ = view(&state);
     }
 
     #[test]
@@ -440,11 +504,12 @@ mod tests {
     fn no_console_value_uses_a_glyph_the_font_may_lack() {
         for line in &lines(&with_profile()) {
             let (label, value) = match line {
-                Line::Pair(label, value) | Line::Toned(label, value, _) => {
-                    (label.as_str(), value.as_str())
-                }
+                Line::Pair(label, value)
+                | Line::Toned(label, value, _)
+                | Line::Pick(label, value)
+                | Line::Choice(label, value, ..) => (label.as_str(), value.as_str()),
                 Line::Section(label) => (label.as_str(), ""),
-                Line::Stream(_) | Line::Space => continue,
+                Line::Blank | Line::Stream(_) | Line::Space => continue,
             };
 
             for glyph in RISKY {

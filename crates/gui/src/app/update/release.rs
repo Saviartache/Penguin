@@ -3,7 +3,7 @@
 //! В сеть окно не ходит: проверку и установку делает отдельный процесс — это же приложение,
 //! запущенное как `penguin update check|install`. Окно читает его вывод и перезапускается.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use iced::Task;
@@ -113,7 +113,7 @@ fn installed(app: &mut App, result: Result<PathBuf, String>) -> Task<Message> {
 
 async fn check() -> Result<CheckReport, String> {
     tokio::task::spawn_blocking(|| {
-        let output = run_self(&["update", "check", "--json"])?;
+        let output = crate::self_exec::run_self(&["update", "check", "--json"])?;
         parse_report(&output)
     })
     .await
@@ -124,7 +124,7 @@ async fn run_install() -> Result<PathBuf, String> {
     tokio::task::spawn_blocking(|| {
         // До подмены: на Linux после неё путь работающего файла заканчивается на «(deleted)».
         let executable = std::env::current_exe().map_err(|err| err.to_string())?;
-        run_self(&["update", "install"])?;
+        crate::self_exec::run_self(&["update", "install"])?;
         Ok(executable)
     })
     .await
@@ -141,44 +141,6 @@ async fn restart(online: bool, executable: PathBuf) {
         Ok(Ok(_child)) => {}
         Ok(Err(err)) => tracing::error!(%err, "новая сборка не запустилась"),
         Err(err) => tracing::error!(%err, "новая сборка не запустилась"),
-    }
-}
-
-/// Запускает это же приложение с аргументами и возвращает его вывод.
-fn run_self(args: &[&str]) -> Result<Vec<u8>, String> {
-    let executable = std::env::current_exe().map_err(|err| err.to_string())?;
-    run(&executable, args)
-}
-
-fn run(executable: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(executable);
-    command.args(args);
-    #[cfg(windows)]
-    {
-        // Без мелькнувшей консоли у отладочной сборки.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::os::windows::process::CommandExt::creation_flags(&mut command, CREATE_NO_WINDOW);
-    }
-
-    let output = command.output().map_err(|err| err.to_string())?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(failure(&output.stderr, output.status))
-    }
-}
-
-/// Причина отказа: последняя непустая строка stderr без «Error: ».
-fn failure(stderr: &[u8], status: std::process::ExitStatus) -> String {
-    let text = String::from_utf8_lossy(stderr);
-    let line = text
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty());
-    match line {
-        Some(line) => line.strip_prefix("Error: ").unwrap_or(line).to_owned(),
-        None => status.to_string(),
     }
 }
 
@@ -323,26 +285,5 @@ mod tests {
         let json = serde_json::to_vec(&report(Some(found()))).expect("json");
         assert_eq!(parse_report(&json).expect("разбор"), report(Some(found())));
         assert!(parse_report(b"not json").is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_last_stderr_line_is_the_reason() {
-        use std::os::unix::process::ExitStatusExt;
-
-        let status = std::process::ExitStatus::from_raw(256);
-        assert_eq!(
-            failure("Error: SHA-256 не сошёлся\n\n".as_bytes(), status),
-            "SHA-256 не сошёлся"
-        );
-        assert!(!failure(b"", status).is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_child_that_fails_is_an_error_and_one_that_prints_is_read() {
-        let ok = run(Path::new("/bin/echo"), &["{}"]).expect("echo");
-        assert_eq!(ok, b"{}\n");
-        assert!(run(Path::new("/usr/bin/false"), &[]).is_err());
     }
 }

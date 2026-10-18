@@ -17,6 +17,7 @@ members = [
     "crates/update",
     "crates/engine",
     "crates/ipc",
+    "crates/subscription",
     "crates/daemon",
     "crates/gui",
     "crates/cli",
@@ -70,6 +71,7 @@ penguin-update   = { path = "crates/update", default-features = false }
 # Без этого умолчания движка возвращают все протоколы демону и клиенту.
 penguin-engine   = { path = "crates/engine", default-features = false }
 penguin-ipc      = { path = "crates/ipc" }
+penguin-subscription = { path = "crates/subscription" }
 penguin-daemon   = { path = "crates/daemon" }
 penguin-cli      = { path = "crates/cli" }
 penguin-gui      = { path = "crates/gui" }
@@ -148,8 +150,15 @@ getrandom = "0.4"
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "getrandom"] }
 # Голый блок AES у Shadowsocks 2022 и VMess.
 aes = "0.9"
+# Конверт шлюза подписки Amnezia: AES-256-CBC и RSA PKCS#1 v1.5.
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
+rsa = "0.9"
+# RNG для RSA (OsRng); X25519 и AES берут байты из `getrandom` напрямую.
+rand = "0.8"
 # XChaCha20-Poly1305: в `ring` нет.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+# Голый ChaCha20 защиты заголовков AmneziaWG 3; та же версия, что внутри `chacha20poly1305`.
+chacha20 = "0.10"
 
 # --- служебное ---
 thiserror = "2"

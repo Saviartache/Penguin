@@ -10,6 +10,8 @@ mod forms;
 mod i18n;
 mod ipc;
 mod screens;
+mod self_exec;
+mod subscription;
 mod theme;
 mod tray;
 mod ui;

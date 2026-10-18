@@ -20,8 +20,9 @@
 | `router` | `core`, `match`, `config`, `process` |
 | `engine` | всё выше + `protocols/*` |
 | `ipc` | `core`, `config` |
+| `subscription` | `core`, `config` |
 | `daemon` | `engine`, `ipc`, `config`, `platform` |
-| `cli` | `ipc`, `engine`, `inbound`, `proto`, `tun`, `platform`, `update` |
+| `cli` | `ipc`, `engine`, `inbound`, `proto`, `tun`, `platform`, `update`, `subscription` |
 | `gui` | `ipc`, `config`, `core`, `platform`, `uikit`, `update` без фичи `net` |
 | `app` | `daemon`, `cli`, `gui`, `config`, `platform` |
 | `protocols/transport`, `protocols/utls` | `core`, `proto` |
@@ -49,6 +50,12 @@
   `penguin update check|install` (как в 1.3), и читает `--json`. Демон в
   обновлении не участвует: заменяемый файл принадлежит пользователю, а службу
   подхватывает прежний путь (`build_stamp`).
+- **1.8.** `subscription` — шлюз подписки Amnezia, внешний сервис, отличный от
+  GitHub. Поэтому это не `update` и не демон, а свой крейт (`core`+`config`,
+  сеть за фичей `net`). Сеть к шлюзу — из `cli`, как и у `update`; окно просит
+  у **себя же** `penguin subscription refresh … --json` (как в 1.7) и вливает
+  профили через демона. Устройство подписки (ключи, `installation_uuid`)
+  лежит файлом в каталоге данных, чтобы не жечь слоты Amnezia.
 
 ---
 

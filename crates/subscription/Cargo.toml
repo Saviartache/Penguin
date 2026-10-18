@@ -1,0 +1,41 @@
+[package]
+name = "penguin-subscription"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Клиент шлюза подписки Amnezia: конфиги серверов по ключу vpn://"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+penguin-config.workspace = true
+
+# Конверт запроса к шлюзу.
+rsa.workspace = true
+rand.workspace = true
+aes.workspace = true
+cbc.workspace = true
+# Ключи WireGuard клиента и байты для AES/UUID.
+x25519-dalek.workspace = true
+getrandom.workspace = true
+# Ответ шлюза бывает сжат zlib (`qCompress` в эталоне).
+flate2.workspace = true
+
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+# Без `net` крейт отдаёт только типы и чистые функции (окну сеть не нужна).
+default = ["net"]
+net = ["dep:ureq"]
+
+[dependencies.ureq]
+workspace = true
+optional = true

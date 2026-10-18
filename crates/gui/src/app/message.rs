@@ -1,6 +1,7 @@
 //! Сообщения верхнего уровня; каждый экран приносит своё вложенное.
 
 use penguin_config::import::Imported;
+use penguin_config::schema::profile::Profile;
 use penguin_config::schema::routing::TunnelMode;
 use penguin_ipc::schema::{Event, Response};
 
@@ -155,6 +156,14 @@ pub enum HomeMessage {
     ToggleConnection,
     /// Служба проверена или поднята (при открытии окна или кнопкой «Запустить службу»).
     ServiceChecked(ServiceOutcome),
+    /// Подписка активного профиля обновлена перед подключением (или причина отказа).
+    ReloadedForConnect(Result<Vec<Profile>, String>),
+    /// Открыть или закрыть список профилей под строкой «Профиль».
+    ProfileMenu(bool),
+    /// Список прокручен на столько строк: вниз — плюс.
+    ProfileScrolled(f32),
+    /// Выбран профиль по месту в списке профилей.
+    ProfileChosen(usize),
 }
 
 /// Итог попытки поднять службу; отказ в окне прав — решение человека, не сбой.
@@ -201,6 +210,20 @@ pub enum ServersMessage {
     EditorSubmitted,
     /// Удалить профиль.
     Removed(String),
+    /// Добавить WireGuard вручную (форма).
+    WireguardManual,
+    /// Добавить WireGuard из файла `.conf`.
+    WireguardFromConf,
+    /// Файл `.conf` разобран в профиль (или причина отказа; `None` — отменили).
+    ConfImported(Result<Option<Profile>, String>),
+    /// Закрыть окно добавления WireGuard.
+    WireguardClosed,
+    /// Изменён ключ подписки в окне добавления WireGuard.
+    SubscriptionKeyChanged(String),
+    /// Обновить серверы по ключу подписки.
+    SubscriptionRefresh,
+    /// Подписка обновилась: профили либо причина отказа.
+    SubscriptionRefreshed(Result<Vec<Profile>, String>),
 }
 
 /// Раздельное тоннелирование.

@@ -40,10 +40,13 @@ impl Session {
     }
 
     /// Собирает в `out` пакет данных: заголовок, шифротекст и метка. Буфер переиспользуется.
+    /// `padding` нулей дописывается к открытому тексту под шифр (получатель отрежет
+    /// их по длине из IP-заголовка).
     pub fn seal_packet(
         &mut self,
         reserved: [u8; 3],
         plaintext: &[u8],
+        padding: usize,
         out: &mut Vec<u8>,
     ) -> WireguardResult<()> {
         if self.tx_counter >= REJECT_AFTER_MESSAGES {
@@ -59,6 +62,7 @@ impl Session {
         out.clear();
         out.extend_from_slice(&transport::encode_header(&header, reserved));
         out.extend_from_slice(plaintext);
+        out.resize(out.len() + padding, 0);
         let tag = aead_seal_in_place(
             &self.send_key,
             counter,
@@ -152,9 +156,19 @@ mod tests {
     fn seal(session: &mut Session, plaintext: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         session
-            .seal_packet([0; 3], plaintext, &mut out)
+            .seal_packet([0; 3], plaintext, 0, &mut out)
             .expect("шифруется");
         out
+    }
+
+    #[test]
+    fn padding_is_sealed_as_trailing_zeros() {
+        let mut out = Vec::new();
+        session()
+            .seal_packet([0; 3], b"ip", 5, &mut out)
+            .expect("шифруется");
+        let plaintext = peer().open_packet(&mut out).expect("расшифровывается");
+        assert_eq!(plaintext, b"ip\0\0\0\0\0");
     }
 
     #[test]
@@ -202,7 +216,11 @@ mod tests {
     fn a_session_at_the_message_ceiling_refuses_to_seal_further() {
         let mut session = session();
         session.set_tx_counter_for_test(REJECT_AFTER_MESSAGES);
-        assert!(session.seal_packet([0; 3], b"x", &mut Vec::new()).is_err());
+        assert!(
+            session
+                .seal_packet([0; 3], b"x", 0, &mut Vec::new())
+                .is_err()
+        );
     }
 
     #[test]

@@ -96,10 +96,12 @@ fn random_secret() -> StaticSecret {
     StaticSecret::from(random::array::<KEY_LEN>())
 }
 
-/// Строит сообщение 1 (инициация) и состояние для разбора ответа.
+/// Строит сообщение 1 (инициация) и состояние для разбора ответа. `header` -
+/// первые 4 байта: в обычном WireGuard `[MESSAGE_INITIATION, резерв…]`, в
+/// AmneziaWG магический заголовок `H1` (`crate::obfs`); он входит под `mac1`.
 pub fn create_initiation(
     keys: &StaticKeys,
-    reserved: [u8; 3],
+    header: [u8; 4],
 ) -> ([u8; INITIATION_MESSAGE_LEN], PendingHandshake) {
     // Шаги 1-2.
     let mut chaining_key = hash(&[CONSTRUCTION]);
@@ -139,7 +141,7 @@ pub fn create_initiation(
         static_ciphertext,
         timestamp_ciphertext,
     };
-    let mut message = initiation::encode(&fields, reserved);
+    let mut message = initiation::encode(&fields, header);
 
     // Шаг 8: `mac1` вне транскрипта, `mac2` - ноль (cookie не запрашивается).
     let mac1 = mac(&keys.mac1_key_send, initiation::mac1_covered(&message));
@@ -234,6 +236,7 @@ fn to_array<const N: usize>(bytes: &[u8]) -> [u8; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::constants::MESSAGE_INITIATION;
 
     fn keypair() -> (StaticSecret, PublicKey) {
         let secret = random_secret();
@@ -263,7 +266,7 @@ mod tests {
     fn a_full_handshake_between_two_instances_of_this_crate_agrees_on_keys() {
         let (client_keys, server_keys) = key_pairs();
 
-        let (message1, pending) = create_initiation(&client_keys, [0, 0, 0]);
+        let (message1, pending) = create_initiation(&client_keys, [MESSAGE_INITIATION, 0, 0, 0]);
         let (message2, server_local_index) =
             server_side_response(&server_keys, &message1).expect("сервер отвечает");
 
@@ -278,7 +281,7 @@ mod tests {
     fn a_response_addressed_to_a_different_handshake_is_refused() {
         let (client_keys, server_keys) = key_pairs();
 
-        let (message1, pending) = create_initiation(&client_keys, [0, 0, 0]);
+        let (message1, pending) = create_initiation(&client_keys, [MESSAGE_INITIATION, 0, 0, 0]);
         let (mut message2, _) = server_side_response(&server_keys, &message1).expect("отвечает");
         message2[8..12].copy_from_slice(&(pending.local_index().wrapping_add(1)).to_le_bytes());
 
@@ -289,7 +292,7 @@ mod tests {
     fn a_response_with_a_tampered_mac1_is_refused() {
         let (client_keys, server_keys) = key_pairs();
 
-        let (message1, pending) = create_initiation(&client_keys, [0, 0, 0]);
+        let (message1, pending) = create_initiation(&client_keys, [MESSAGE_INITIATION, 0, 0, 0]);
         let (mut message2, _) = server_side_response(&server_keys, &message1).expect("отвечает");
         message2[60] ^= 0xFF;
 

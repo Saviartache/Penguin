@@ -7,6 +7,7 @@
 pub mod editor;
 pub mod list;
 pub mod picker;
+pub mod wireguard;
 
 use iced::Element;
 use penguin_config::schema::profile::Profile;
@@ -16,9 +17,12 @@ use crate::app::state::State;
 
 /// Собирает экран; модальное окно заменяет тело (наложений в `iced` нет).
 pub fn view(state: &State) -> Element<'_, Message> {
-    // Порядок — порядок шагов: выбор протокола, потом форма.
+    // Порядок — порядок шагов: выбор протокола, способ WireGuard, потом форма.
     if state.servers.picker {
         return picker::view(state);
+    }
+    if state.servers.wireguard {
+        return wireguard::view(state);
     }
     if let Some(draft) = state.servers.editor.as_ref() {
         return editor::view(state, draft);

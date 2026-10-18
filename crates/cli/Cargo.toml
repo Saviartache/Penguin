@@ -25,6 +25,8 @@ penguin-tun.workspace = true
 penguin-platform.workspace = true
 # Единственный путь клиента на GitHub.
 penguin-update = { workspace = true, features = ["net"] }
+# Сеть к шлюзу подписки Amnezia — тоже из терминала, не из окна (§1.7).
+penguin-subscription.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tokio-util.workspace = true
 thiserror.workspace = true

@@ -23,6 +23,7 @@ use super::Kind;
 fn mask(kind: Kind) -> &'static str {
     match kind {
         Kind::Program => "*.exe",
+        Kind::WireguardConfig => "*.conf",
         Kind::RuleList => "*.conf;*.list;*.txt",
     }
 }

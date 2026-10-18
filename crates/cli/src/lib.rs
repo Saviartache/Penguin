@@ -18,6 +18,12 @@ pub fn run(command: &Command, config_dir: Option<&std::path::Path>, json: bool) 
     if let Command::Update(update) = command {
         return commands::update::run(update, Format::from_flag(json));
     }
+    // Подписка читает общий (чужой) каталог службы лишь когда сама пишет туда
+    // настройки; окну (оно от пользователя) к нему не дотянуться, и обновление
+    // по подписке в JSON настроек не трогает — поэтому до их чтения.
+    if let Command::Subscription(command) = command {
+        return commands::subscription::run(command, config_dir, Format::from_flag(json));
+    }
 
     let store = match config_dir {
         Some(dir) => ConfigStore::new(Paths::rooted(dir)),
@@ -48,6 +54,8 @@ pub fn run(command: &Command, config_dir: Option<&std::path::Path>, json: bool) 
         Command::Rules(command) => commands::rules::run(&config, command, format),
         Command::Doctor => commands::doctor::run(&store, &config, format),
         Command::Update(update) => commands::update::run(update, format),
+        // Разобрана выше, до чтения настроек.
+        Command::Subscription(_) => unreachable!("подписка разобрана до чтения настроек"),
     }
 }
 

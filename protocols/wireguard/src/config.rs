@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::constants::{DEFAULT_KEEPALIVE_SECS, DEFAULT_MTU, KEY_LEN, MAX_KEEPALIVE_SECS};
 use crate::error::{WireguardError, WireguardResult};
+use crate::obfs::AmneziaParams;
 
 /// Настройки подключения к серверу WireGuard (подлинность даёт пара ключей X25519).
 #[derive(Clone, Serialize, Deserialize)]
@@ -51,6 +52,10 @@ pub struct WireguardConfig {
     /// которые метят ими свой трафик.
     #[serde(default)]
     pub reserved: [u8; 3],
+
+    /// Обфускация AmneziaWG; незаданная - обычный WireGuard (`crate::obfs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amnezia: Option<AmneziaParams>,
 }
 
 /// Умолчание для [`WireguardConfig::mtu`].
@@ -106,6 +111,7 @@ impl Default for WireguardConfig {
             mtu: default_mtu(),
             keepalive_secs: default_keepalive_secs(),
             reserved: [0, 0, 0],
+            amnezia: None,
         }
     }
 }
@@ -180,7 +186,18 @@ impl WireguardConfig {
                 self.keepalive_secs
             )));
         }
+        if let Some(amnezia) = &self.amnezia {
+            amnezia.validate()?;
+        }
         Ok(())
+    }
+
+    /// Разбирает обфускацию AmneziaWG, если она задана.
+    pub fn obfuscation(&self) -> WireguardResult<Option<crate::obfs::Obfuscation>> {
+        self.amnezia
+            .as_ref()
+            .map(AmneziaParams::resolve)
+            .transpose()
     }
 }
 
@@ -220,6 +237,7 @@ impl std::fmt::Debug for WireguardConfig {
             .field("mtu", &self.mtu)
             .field("keepalive_secs", &self.keepalive_secs)
             .field("reserved", &self.reserved)
+            .field("amnezia", &self.amnezia)
             .finish()
     }
 }

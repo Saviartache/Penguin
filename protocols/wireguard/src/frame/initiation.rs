@@ -7,6 +7,9 @@ use crate::crypto::constants::INITIATION_MESSAGE_LEN;
 use crate::crypto::constants::MESSAGE_INITIATION;
 use crate::error::{WireguardError, WireguardResult};
 
+/// Длина заголовка: тип и три резервных байта вместе (магический заголовок AmneziaWG).
+const HEADER_LEN: usize = 4;
+
 const OFF_TYPE: usize = 0;
 const OFF_SENDER: usize = 4;
 const OFF_EPHEMERAL: usize = 8;
@@ -33,11 +36,11 @@ pub struct InitiationFields {
 }
 
 /// Собирает сообщение без `mac1` ([`set_mac1`]); `mac2` остаётся нулём.
-/// `reserved` - три байта после типа (`crate::config::WireguardConfig::reserved`).
-pub fn encode(fields: &InitiationFields, reserved: [u8; 3]) -> [u8; INITIATION_MESSAGE_LEN] {
+/// `header` - первые 4 байта: в обычном WireGuard `[тип, резерв…]`, в AmneziaWG
+/// магический заголовок `H1` целиком. Он входит под `mac1`, поэтому ставится здесь.
+pub fn encode(fields: &InitiationFields, header: [u8; HEADER_LEN]) -> [u8; INITIATION_MESSAGE_LEN] {
     let mut out = [0u8; INITIATION_MESSAGE_LEN];
-    out[OFF_TYPE] = MESSAGE_INITIATION;
-    out[OFF_TYPE + 1..OFF_SENDER].copy_from_slice(&reserved);
+    out[OFF_TYPE..OFF_SENDER].copy_from_slice(&header);
     out[OFF_SENDER..OFF_EPHEMERAL].copy_from_slice(&fields.sender_index.to_le_bytes());
     out[OFF_EPHEMERAL..OFF_STATIC].copy_from_slice(&fields.ephemeral_public);
     out[OFF_STATIC..OFF_TIMESTAMP].copy_from_slice(&fields.static_ciphertext);
@@ -107,27 +110,27 @@ mod tests {
 
     #[test]
     fn the_encoded_message_has_the_exact_wire_length() {
-        let encoded = encode(&sample(), [0, 0, 0]);
+        let encoded = encode(&sample(), [MESSAGE_INITIATION, 0, 0, 0]);
         assert_eq!(encoded.len(), INITIATION_MESSAGE_LEN);
     }
 
     #[test]
     fn the_type_byte_is_first_and_reserved_bytes_follow_it() {
-        let encoded = encode(&sample(), [0xAA, 0xBB, 0xCC]);
+        let encoded = encode(&sample(), [MESSAGE_INITIATION, 0xAA, 0xBB, 0xCC]);
         assert_eq!(encoded[0], MESSAGE_INITIATION);
         assert_eq!(&encoded[1..4], &[0xAA, 0xBB, 0xCC]);
     }
 
     #[test]
     fn the_sender_index_is_little_endian() {
-        let encoded = encode(&sample(), [0, 0, 0]);
+        let encoded = encode(&sample(), [MESSAGE_INITIATION, 0, 0, 0]);
         assert_eq!(&encoded[4..8], &0xAABB_CCDDu32.to_le_bytes());
     }
 
     #[test]
     fn round_trip_through_encode_and_parse_preserves_every_field() {
         let fields = sample();
-        let encoded = encode(&fields, [0, 0, 0]);
+        let encoded = encode(&fields, [MESSAGE_INITIATION, 0, 0, 0]);
         let parsed = parse(&encoded).expect("разбирается");
         assert_eq!(parsed.sender_index, fields.sender_index);
         assert_eq!(parsed.ephemeral_public, fields.ephemeral_public);
@@ -137,14 +140,14 @@ mod tests {
 
     #[test]
     fn mac_ranges_cover_exactly_what_the_spec_says_they_cover() {
-        let encoded = encode(&sample(), [0, 0, 0]);
+        let encoded = encode(&sample(), [MESSAGE_INITIATION, 0, 0, 0]);
         assert_eq!(mac1_covered(&encoded).len(), 116);
         assert_eq!(mac2_covered(&encoded).len(), 132);
     }
 
     #[test]
     fn setting_mac1_does_not_disturb_the_rest_of_the_message() {
-        let mut encoded = encode(&sample(), [0, 0, 0]);
+        let mut encoded = encode(&sample(), [MESSAGE_INITIATION, 0, 0, 0]);
         let before = mac1_covered(&encoded).to_vec();
         set_mac1(&mut encoded, [0xEE; MAC_LEN]);
         assert_eq!(mac1_covered(&encoded), before.as_slice());
@@ -159,7 +162,7 @@ mod tests {
 
     #[test]
     fn the_wrong_message_type_is_rejected() {
-        let mut encoded = encode(&sample(), [0, 0, 0]);
+        let mut encoded = encode(&sample(), [MESSAGE_INITIATION, 0, 0, 0]);
         encoded[0] = 2;
         assert!(parse(&encoded).is_err());
     }

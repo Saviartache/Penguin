@@ -63,9 +63,52 @@ pub fn split(bytes: &[u8]) -> WireguardResult<(TransportHeader, &[u8])> {
     Ok((header, &bytes[TRANSPORT_HEADER_LEN..]))
 }
 
+/// IP-пакет внутри открытого текста без хвостовых нулей padding (`RoutineSequentialReceiver`
+/// в `device/receive.go`). `None` — keepalive (пусто или первый байт ноль) либо не IP.
+pub fn inner_packet(plaintext: &[u8]) -> Option<&[u8]> {
+    const IPV4_HEADER_LEN: usize = 20;
+    const IPV6_HEADER_LEN: usize = 40;
+    let length = match plaintext.first()? >> 4 {
+        4 if plaintext.len() >= IPV4_HEADER_LEN => {
+            usize::from(u16::from_be_bytes([plaintext[2], plaintext[3]]))
+        }
+        6 if plaintext.len() >= IPV6_HEADER_LEN => {
+            usize::from(u16::from_be_bytes([plaintext[4], plaintext[5]])) + IPV6_HEADER_LEN
+        }
+        _ => return None,
+    };
+    (IPV4_HEADER_LEN..=plaintext.len())
+        .contains(&length)
+        .then(|| &plaintext[..length])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn padding_after_an_ip_packet_is_cut_by_its_own_length() {
+        let mut v4 = vec![0u8; 28 + 13];
+        v4[0] = 0x45;
+        v4[2..4].copy_from_slice(&28u16.to_be_bytes());
+        assert_eq!(inner_packet(&v4).map(<[u8]>::len), Some(28));
+
+        let mut v6 = vec![0u8; 40 + 8 + 30];
+        v6[0] = 0x60;
+        v6[4..6].copy_from_slice(&8u16.to_be_bytes());
+        assert_eq!(inner_packet(&v6).map(<[u8]>::len), Some(48));
+    }
+
+    #[test]
+    fn a_padded_keepalive_and_a_lying_length_yield_nothing() {
+        assert_eq!(inner_packet(&[]), None);
+        assert_eq!(inner_packet(&[0u8; 32]), None);
+        let mut v4 = vec![0u8; 24];
+        v4[0] = 0x45;
+        v4[2..4].copy_from_slice(&100u16.to_be_bytes());
+        assert_eq!(inner_packet(&v4), None);
+        assert_eq!(inner_packet(&[0x45, 0, 0]), None);
+    }
 
     fn sample() -> TransportHeader {
         TransportHeader {

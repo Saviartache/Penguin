@@ -62,11 +62,12 @@ impl WireguardOutbound {
             config.preshared_key_bytes()?,
         ));
         let reserved = config.reserved;
+        let obfs = config.obfuscation()?;
 
         let session = deadline::within(
             REKEY_ATTEMPT_TIME,
             "рукопожатие WireGuard",
-            driver::initial_handshake(&socket, &static_keys, reserved),
+            driver::initial_handshake(&socket, &static_keys, reserved, &obfs),
         )
         .await?;
 
@@ -88,6 +89,7 @@ impl WireguardOutbound {
             socket,
             static_keys,
             reserved,
+            obfs,
             keepalive,
             session,
             outbound_rx,

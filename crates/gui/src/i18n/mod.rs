@@ -108,6 +108,28 @@ pub struct Strings {
     pub add_server: &'static str,
     /// Заголовок окна выбора протокола.
     pub choose_protocol: &'static str,
+    /// Подпись раздела подписки в окне выбора.
+    pub subscription: &'static str,
+    /// Подсказка в поле ключа подписки.
+    pub subscription_key_hint: &'static str,
+    /// Кнопка «обновить по подписке».
+    pub subscription_refresh: &'static str,
+    /// Журнал: подписка обновлена (дальше число серверов).
+    pub subscription_updated: &'static str,
+    /// Журнал: подписка не обновлена (дальше причина).
+    pub subscription_failed: &'static str,
+    /// Заголовок окна «как добавить WireGuard».
+    pub wireguard_add: &'static str,
+    /// Добавить WireGuard вручную (форма).
+    pub wireguard_manual: &'static str,
+    /// Добавить WireGuard из файла `.conf`.
+    pub wireguard_from_conf: &'static str,
+    /// Заголовок окна выбора файла `.conf`.
+    pub import_conf_title: &'static str,
+    /// Подпись вида файла `.conf` в окне выбора.
+    pub wireguard_configs: &'static str,
+    /// Журнал: файл `.conf` не разобран (дальше причина).
+    pub import_conf_failed: &'static str,
     /// Протокол профиля этой сборке неизвестен.
     pub protocol_unknown: &'static str,
     /// Новый сервер.
@@ -532,6 +554,17 @@ mod tests {
                 table.managed,
                 table.add_server,
                 table.choose_protocol,
+                table.subscription,
+                table.subscription_key_hint,
+                table.subscription_refresh,
+                table.subscription_updated,
+                table.subscription_failed,
+                table.wireguard_add,
+                table.wireguard_manual,
+                table.wireguard_from_conf,
+                table.import_conf_title,
+                table.wireguard_configs,
+                table.import_conf_failed,
                 table.protocol_unknown,
                 table.username,
                 table.proxy_address,
