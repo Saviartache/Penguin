@@ -35,7 +35,7 @@ pub struct WireguardConfig {
     pub address_ipv6: Option<String>,
 
     /// Наибольший пакет (по умолчанию 1420, `crate::crypto::constants::DEFAULT_MTU`).
-    #[serde(default = "default_mtu")]
+    #[serde(default = "default_mtu", deserialize_with = "deserialize_number")]
     pub mtu: u16,
 
     /// Серверы имён в тоннеле (`DNS` из `wg-quick`): списком или строкой через запятую.
@@ -45,7 +45,10 @@ pub struct WireguardConfig {
     pub dns: Vec<std::net::IpAddr>,
 
     /// `PersistentKeepalive` в секундах (по умолчанию 25), ноль - выключен.
-    #[serde(default = "default_keepalive_secs")]
+    #[serde(
+        default = "default_keepalive_secs",
+        deserialize_with = "deserialize_number"
+    )]
     pub keepalive_secs: u32,
 
     /// Три зарезервированных байта заголовка после типа; ненулевые - для серверов,
@@ -94,6 +97,32 @@ where
                     .map_err(|e| D::Error::custom(format!("сервер имён `{part}`: {e}")))
             })
             .collect(),
+    }
+}
+
+/// Читает целое числом или строкой: форма окна пишет поля строками.
+fn deserialize_number<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    use serde::Deserialize as _;
+    use serde::de::Error as _;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Written<T> {
+        Number(T),
+        Text(String),
+    }
+
+    match Written::<T>::deserialize(deserializer)? {
+        Written::Number(value) => Ok(value),
+        Written::Text(text) => text
+            .trim()
+            .parse()
+            .map_err(|e| D::Error::custom(format!("число `{text}`: {e}"))),
     }
 }
 
@@ -413,6 +442,33 @@ mod tests {
         assert_eq!(parsed.mtu, built.mtu);
         assert_eq!(parsed.keepalive_secs, built.keepalive_secs);
         assert_eq!(parsed.reserved, built.reserved);
+    }
+
+    #[test]
+    fn numbers_written_as_text_by_the_form_are_read() {
+        let params = json!({
+            "server": "vpn.example.com:51820",
+            "private_key": ZERO_KEY,
+            "server_public_key": ZERO_KEY,
+            "address_ipv4": "10.0.0.2/32",
+            "mtu": "1280",
+            "keepalive_secs": " 25 ",
+        });
+        let parsed: WireguardConfig = serde_json::from_value(params).expect("разбирается");
+        assert_eq!(parsed.mtu, 1280);
+        assert_eq!(parsed.keepalive_secs, 25);
+    }
+
+    #[test]
+    fn a_non_numeric_mtu_is_refused() {
+        let params = json!({
+            "server": "vpn.example.com:51820",
+            "private_key": ZERO_KEY,
+            "server_public_key": ZERO_KEY,
+            "address_ipv4": "10.0.0.2/32",
+            "mtu": "много",
+        });
+        assert!(serde_json::from_value::<WireguardConfig>(params).is_err());
     }
 
     #[test]
