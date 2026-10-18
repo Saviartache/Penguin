@@ -254,11 +254,17 @@ fn at_path<'a>(params: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde
     Some(current)
 }
 
-/// Значение строкой для поля; числа тоже (полосу пишут и `100`).
+/// Значение строкой для поля; числа тоже (полосу пишут и `100`), список — через
+/// запятую (`dns` из импорта).
 fn as_text(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(text) => Some(text.clone()),
         serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(as_text)
+            .collect::<Option<Vec<_>>>()
+            .map(|parts| parts.join(", ")),
         _ => None,
     }
 }
@@ -769,5 +775,17 @@ mod tests {
             ),
         );
         assert_eq!(Draft::from_profile(&profile).text("up"), "100");
+    }
+
+    #[test]
+    fn a_dns_list_survives_a_rename() {
+        let mut profile = amnezia();
+        profile.outbound.params["dns"] = json!(["1.1.1.1", "1.0.0.1"]);
+        let mut draft = Draft::from_profile(&profile);
+        assert_eq!(draft.text("dns"), "1.1.1.1, 1.0.0.1");
+        draft.name = "Другое".to_owned();
+
+        let params = draft.to_profile().expect("собирается").outbound.params;
+        assert_eq!(params["dns"], json!("1.1.1.1, 1.0.0.1"));
     }
 }
