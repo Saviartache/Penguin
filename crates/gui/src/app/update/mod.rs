@@ -106,9 +106,13 @@ pub fn save(app: &mut App) -> Task<Message> {
     config.routing = app.state().saved.routing.clone();
 
     app.state_mut().saved = config.clone();
-    request(Request::SetConfig {
-        config: Box::new(config),
-    })
+    // Новый или изменённый сервер — новый вопрос о стране.
+    Task::batch([
+        request(Request::SetConfig {
+            config: Box::new(config),
+        }),
+        profiles::locate_countries(app),
+    ])
 }
 
 /// Сохраняет всё, включая правила («Сохранить» на их вкладке).

@@ -4,7 +4,8 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use maxminddb::{Reader, geoip2};
+use maxminddb::Reader;
+use serde::Deserialize;
 
 use crate::matcher::Matcher;
 use crate::target::MatchTarget;
@@ -34,12 +35,34 @@ impl GeoIpDatabase {
 
     /// Код страны адреса в верхнем регистре: `RU`, `DE`.
     pub fn country_of(&self, ip: IpAddr) -> Option<String> {
-        let record: geoip2::Country = self.reader.lookup(ip).ok()?;
-        record
-            .country
-            .or(record.registered_country)
-            .and_then(|country| country.iso_code)
-            .map(str::to_ascii_uppercase)
+        let record: Record<'_> = self.reader.lookup(ip).ok()?;
+        record.code().map(str::to_ascii_uppercase)
+    }
+}
+
+/// Запись страны в двух раскладках: GeoIP2 (`country.iso_code`) и плоской
+/// (`country_code`, DB-IP Lite у `sapics/ip-location-db`).
+#[derive(Debug, Deserialize)]
+struct Record<'a> {
+    #[serde(borrow)]
+    country: Option<Named<'a>>,
+    #[serde(borrow)]
+    registered_country: Option<Named<'a>>,
+    country_code: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Named<'a> {
+    iso_code: Option<&'a str>,
+}
+
+impl<'a> Record<'a> {
+    fn code(&self) -> Option<&'a str> {
+        let named = |named: &Option<Named<'a>>| named.as_ref().and_then(|n| n.iso_code);
+        self.country_code
+            .or_else(|| named(&self.country))
+            .or_else(|| named(&self.registered_country))
+            .filter(|code| !code.is_empty())
     }
 }
 
@@ -75,7 +98,7 @@ impl Matcher for GeoIpSet {
         else {
             return false;
         };
-        self.countries.iter().any(|wanted| *wanted == country)
+        self.countries.contains(&country)
     }
 
     fn describe(&self) -> String {
@@ -91,6 +114,25 @@ mod tests {
     fn missing_database_is_reported_not_panicking() {
         let err = GeoIpDatabase::open("такого-файла-нет.mmdb").expect_err("файла нет");
         assert!(err.contains("такого-файла-нет.mmdb"));
+    }
+
+    fn code_of(json: &str) -> Option<String> {
+        let record: Record<'_> = serde_json::from_str(json).expect("запись");
+        record.code().map(str::to_owned)
+    }
+
+    #[test]
+    fn both_record_layouts_give_the_country() {
+        assert_eq!(code_of(r#"{"country_code":"JP"}"#).as_deref(), Some("JP"));
+        assert_eq!(
+            code_of(r#"{"country":{"iso_code":"DE","names":{"en":"Germany"}}}"#).as_deref(),
+            Some("DE")
+        );
+        assert_eq!(
+            code_of(r#"{"registered_country":{"iso_code":"NL"}}"#).as_deref(),
+            Some("NL")
+        );
+        assert_eq!(code_of(r#"{"continent":{"code":"EU"}}"#), None);
     }
 
     #[test]

@@ -65,6 +65,7 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
             state.config = *config;
             state.saved = state.config.clone();
             state.dirty = false;
+            return crate::app::update::profiles::locate_countries(app);
         }
         Response::Explanation(explanation) => {
             state.split_tunnel.probe_result = Some(*explanation);

@@ -224,6 +224,11 @@ pub enum ServersMessage {
     SubscriptionRefresh,
     /// Подписка обновилась: профили либо причина отказа.
     SubscriptionRefreshed(Result<Vec<Profile>, String>),
+    /// Пришли страны серверов: о каких спрашивали и ответ.
+    CountriesLocated(
+        Vec<String>,
+        Result<std::collections::HashMap<String, String>, String>,
+    ),
 }
 
 /// Раздельное тоннелирование.

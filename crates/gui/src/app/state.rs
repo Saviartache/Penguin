@@ -358,6 +358,8 @@ pub struct ServersState {
     pub subscription_key: String,
     /// Идёт работа в окне (обновление подписки или чтение `.conf`): кнопки заблокированы.
     pub subscription_busy: bool,
+    /// Страны серверов для флагов.
+    pub countries: crate::app::countries::Countries,
 }
 
 #[cfg(test)]

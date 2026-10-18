@@ -9,20 +9,34 @@ use uikit::layout::{Flex, Sizable, Size};
 use uikit::tokens::{ink, state, surface};
 
 use super::{CELL, DOTS, LIMIT, LINE, Picker, SPACING, cell, clip, filler};
+use crate::flags::Flag;
 
 /// Метка выбранного пункта.
 const MARK: char = '>';
 
-/// Пункт: метка и имя слева, примечание у правого края; без `picker` не нажимается.
+/// Пункт списка.
+pub struct Choice {
+    /// Имя слева.
+    pub name: String,
+    /// Примечание у правого края.
+    pub note: String,
+    /// Выбран ли.
+    pub chosen: bool,
+    /// Номер для [`Picker::choose`].
+    pub index: usize,
+    /// Флаг перед именем.
+    pub flag: Option<Flag>,
+}
+
+/// Пункт: метка, флаг и имя слева, примечание у правого края; без `picker` не нажимается.
+///
+/// Место под флаг есть всегда: иначе имена с флагом и без стояли бы вразнобой.
 pub(super) fn row<'a, Message: Clone + 'a>(
     palette: &Palette,
-    name: &str,
-    note: &str,
-    chosen: bool,
-    index: usize,
+    entry: &Choice,
     picker: Option<&Picker<Message>>,
 ) -> Element<'a, Message> {
-    let (marker, tone) = if chosen {
+    let (marker, tone) = if entry.chosen {
         (MARK, palette.text)
     } else {
         (' ', ink::level(palette, ink::SECONDARY))
@@ -30,9 +44,11 @@ pub(super) fn row<'a, Message: Clone + 'a>(
 
     let line = Flex::row()
         .w(Size::FILL)
-        .push_auto(cell(format!("{marker} {}", clip(name, LIMIT)), tone))
+        .push_auto(cell(marker.to_string(), tone))
+        .push_auto(crate::flags::slot(entry.flag))
+        .push_auto(cell(clip(&entry.name, LIMIT), tone))
         .push(filler(palette, &DOTS, true))
-        .push_auto(cell(note.to_owned(), tone))
+        .push_auto(cell(entry.note.clone(), tone))
         .gap(CELL)
         .build();
 
@@ -44,7 +60,7 @@ pub(super) fn row<'a, Message: Clone + 'a>(
         .padding(0)
         .width(Length::Fill)
         .style(style)
-        .on_press((picker.choose)(index));
+        .on_press((picker.choose)(entry.index));
 
     mouse_area(pressable)
         .on_scroll(move |delta| scroll(rows(delta)))

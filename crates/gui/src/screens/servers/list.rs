@@ -3,7 +3,8 @@
 //! Таблица общая ([`crate::screens::table`]), здесь только столбцы. Выбор —
 //! щелчок по строке, выбранная помечена волной: знак в первом столбце сдвинул
 //! бы строку (нет в шрифте кита, см. [`crate::console`]). Задержка нужна для
-//! выбора, «нет ответа» значит «этот не трогай».
+//! выбора, «нет ответа» значит «этот не трогай». Флаг страны — картинка
+//! ([`crate::flags`]); пока страна неизвестна, место под него пустое.
 
 use iced::widget::{Space, button};
 use iced::{Alignment, Element, Length};
@@ -16,6 +17,7 @@ use uikit::widgets::ButtonVariant;
 use crate::app::TAB_GAP;
 use crate::app::message::{Message, ServersMessage};
 use crate::app::state::State;
+use crate::flags;
 use crate::screens::table::{
     self, BUTTON_HEIGHT, CELL, DASH, ROW_GAP, ROW_PADDING, cell, glyphs, lpad, pad,
 };
@@ -76,8 +78,21 @@ fn panel(state: &State) -> Element<'_, Message> {
         }),
         head(state),
         rows(state),
-        crate::i18n::s().select_hint,
+        &hint(state),
     )
+}
+
+/// Подсказка; с флагами — и подпись источника стран (её требует CC BY 4.0).
+fn hint(state: &State) -> String {
+    let hint = crate::i18n::s().select_hint;
+    if state.servers.countries.any() {
+        format!(
+            "{hint}   {}",
+            penguin_update::geoip::ATTRIBUTION.to_uppercase()
+        )
+    } else {
+        hint.to_owned()
+    }
 }
 
 /// Шапка с тем же отступом и местом под действие, что у строки.
@@ -86,6 +101,7 @@ fn head(state: &State) -> Element<'_, Message> {
     let dim = ink::level(&state.palette, ink::TERTIARY);
 
     let titles = columns(
+        flags::slot(None),
         glyphs(pad(strings.profile, NAME_WIDTH), dim),
         glyphs(pad(strings.server, SERVER_WIDTH), dim),
         glyphs(pad(strings.protocol, PROTOCOL_WIDTH), dim),
@@ -177,6 +193,7 @@ fn row<'a>(
         .map_or_else(|| DASH.to_string(), |server| cell(server, SERVER_WIDTH));
 
     let cells = columns(
+        flags::slot(state.servers.countries.flag(profile)),
         glyphs(cell(&profile.name, NAME_WIDTH), name_ink),
         glyphs(pad(&server, SERVER_WIDTH), server_ink),
         glyphs(
@@ -213,6 +230,7 @@ fn row<'a>(
 
 /// Ряд ячеек — общий для шапки и строк, чтобы столбцы не разъезжались.
 fn columns<'a, Message: 'a>(
+    flag: Element<'a, Message>,
     name: Element<'a, Message>,
     server: Element<'a, Message>,
     protocol: Element<'a, Message>,
@@ -221,6 +239,7 @@ fn columns<'a, Message: 'a>(
 ) -> Element<'a, Message> {
     let mut line = Flex::row()
         .w(Size::FILL)
+        .push_auto(flag)
         .push_auto(name)
         .push_auto(server)
         .push_auto(protocol);
@@ -304,6 +323,7 @@ mod tests {
     fn the_chosen_row_never_shifts_its_columns() {
         let dim = Color::WHITE;
         let head: Element<'_, Message> = columns(
+            flags::slot(None),
             glyphs(pad("ПРОФИЛЬ", NAME_WIDTH), dim),
             glyphs(pad("СЕРВЕР", SERVER_WIDTH), dim),
             glyphs(pad("ПРОТОКОЛ", PROTOCOL_WIDTH), dim),
@@ -311,6 +331,7 @@ mod tests {
             glyphs(lpad("ЗАДЕРЖКА", LATENCY_WIDTH), dim),
         );
         let row: Element<'_, Message> = columns(
+            flags::slot(crate::flags::Flag::of("jp")),
             glyphs(pad("source", NAME_WIDTH), dim),
             glyphs(pad("example.com:443", SERVER_WIDTH), dim),
             glyphs(pad("hysteria2", PROTOCOL_WIDTH), dim),

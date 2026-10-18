@@ -22,7 +22,7 @@
 | `ipc` | `core`, `config` |
 | `subscription` | `core`, `config` |
 | `daemon` | `engine`, `ipc`, `config`, `platform` |
-| `cli` | `ipc`, `engine`, `inbound`, `proto`, `tun`, `platform`, `update`, `subscription` |
+| `cli` | `ipc`, `engine`, `inbound`, `proto`, `tun`, `platform`, `update`, `subscription`, `match` |
 | `gui` | `ipc`, `config`, `core`, `platform`, `uikit`, `update` без фичи `net` |
 | `app` | `daemon`, `cli`, `gui`, `config`, `platform` |
 | `protocols/transport`, `protocols/utls` | `core`, `proto` |
@@ -56,6 +56,14 @@
   у **себя же** `penguin subscription refresh … --json` (как в 1.7) и вливает
   профили через демона. Устройство подписки (ключи, `installation_uuid`)
   лежит файлом в каталоге данных, чтобы не жечь слоты Amnezia.
+- **1.9.** Флаг сервера — по `Profile::country`, если страну назвал источник
+  (подписка: у её локаций общий адрес входа), иначе по GeoIP адреса.
+  Базу (DB-IP Lite с релизов `sapics/ip-location-db`, GitHub) качает `update`
+  (§1.7), читает `match` с фичей `geo` — тем же кодом, что правила `geoip`.
+  Имя сервера резолвит `cli`: окно просит у **себя же** `penguin geoip
+  <сервер>… --json`. База лежит в каталоге данных пользователя. Лицензия
+  CC BY 4.0: подпись `IP Geolocation by DB-IP` стоит в списке серверов и в
+  выводе `penguin geoip`.
 
 ---
 

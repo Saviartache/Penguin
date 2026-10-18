@@ -14,6 +14,9 @@ use crate::device::Device;
 use crate::error::{SubscriptionError, SubscriptionResult};
 use crate::key::{SubscriptionKey, decode_blob};
 
+/// Начало имени профиля: протокол, а не сервис — флаг и страну рисует окно.
+const NAME_PREFIX: &str = "AWG";
+
 /// Целочисленные параметры обфускации: имя у Amnezia → имя у Penguin.
 const NUMERIC_PARAMS: &[(&str, &str)] = &[
     ("Jc", "jc"),
@@ -72,10 +75,11 @@ pub fn profile(
         .map(str::to_owned)
         .or_else(|| config_country(&server_config));
 
-    let name = match &country {
-        Some(code) => format!("Amnezia {code}"),
-        None => format!("Amnezia {}", str_field(&last, "hostName")),
+    let place = match &country {
+        Some(code) => country_name(&server_config, code),
+        None => str_field(&last, "hostName"),
     };
+    let name = format!("{NAME_PREFIX} {place}");
     let id = match &country {
         Some(code) => format!("{}-{}", key.id(), code.to_lowercase()),
         None => key.id().to_owned(),
@@ -83,7 +87,30 @@ pub fn profile(
 
     let mut profile = Profile::new(id, name.trim().to_owned(), outbound);
     profile.subscription = Some(key.id().to_owned());
+    // Адрес у локаций общий (вход шлюза), GeoIP по нему назвал бы страну входа.
+    profile.country = country.as_deref().and_then(iso_country);
     Ok(profile)
+}
+
+/// Код ISO из кода локации шлюза: `nl` → `NL`, `us-east` → `US`.
+fn iso_country(code: &str) -> Option<String> {
+    let head = code.split('-').next()?;
+    (head.len() == 2 && head.bytes().all(|b| b.is_ascii_alphabetic()))
+        .then(|| head.to_ascii_uppercase())
+}
+
+/// Имя локации из списка шлюза (`Japan`, `USA East`); нет в списке — код заглавными.
+fn country_name(server_config: &Value, code: &str) -> String {
+    server_config
+        .pointer("/api_config/available_countries")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                nonempty(item, "server_country_code").is_some_and(|c| c.eq_ignore_ascii_case(code))
+            })
+        })
+        .and_then(|item| nonempty(item, "server_country_name"))
+        .unwrap_or_else(|| code.to_uppercase())
 }
 
 /// Коды стран из ответа (`api_config.available_countries`) — список локаций.
@@ -347,7 +374,7 @@ mod tests {
             profile(&response(good_last_config()), &key(), &device, Some("NL")).expect("перевод");
 
         assert_eq!(built.outbound.protocol, "wireguard");
-        assert_eq!(built.name, "Amnezia NL");
+        assert_eq!(built.name, "AWG Netherlands");
         assert_eq!(built.subscription.as_deref(), Some(key().id()));
         assert!(built.is_managed());
 
@@ -434,8 +461,37 @@ mod tests {
         // Первый запрос (без страны) — профиль получает свою страну из ответа.
         let built =
             profile(&response(good_last_config()), &key(), &device(), None).expect("перевод");
-        assert_eq!(built.name, "Amnezia nl");
+        assert_eq!(built.name, "AWG Netherlands");
         assert_eq!(built.id.as_str(), format!("{}-nl", key().id()));
+    }
+
+    #[test]
+    fn a_location_takes_the_gateway_name_or_falls_back_to_its_code() {
+        let response = response(good_last_config());
+        let named = |country| {
+            profile(&response, &key(), &device(), Some(country))
+                .expect("перевод")
+                .name
+        };
+        assert_eq!(named("us-east"), "AWG USA East");
+        assert_eq!(named("jp"), "AWG JP");
+    }
+
+    #[test]
+    fn a_location_carries_its_iso_country() {
+        let response = response(good_last_config());
+        let country = |code| {
+            profile(&response, &key(), &device(), code)
+                .expect("перевод")
+                .country
+        };
+        assert_eq!(country(Some("us-east")).as_deref(), Some("US"));
+        assert_eq!(country(Some("JP")).as_deref(), Some("JP"));
+        // Без запрошенной — страна самого ответа.
+        assert_eq!(country(None).as_deref(), Some("NL"));
+        assert_eq!(iso_country("eu-central-1x"), Some("EU".to_owned()));
+        assert_eq!(iso_country("usa"), None);
+        assert_eq!(iso_country(""), None);
     }
 
     #[test]

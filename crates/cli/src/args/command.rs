@@ -22,6 +22,8 @@ pub enum Command {
     Update(UpdateCommand),
     /// Подписка Amnezia: серверы по ключу `vpn://`.
     Subscription(SubscriptionCommand),
+    /// Страна серверов `хост:порт` по базе GeoIP.
+    Geoip(Vec<String>),
 }
 
 /// Команды подписки.
@@ -110,7 +112,7 @@ pub enum RulesCommand {
 }
 
 /// Имена команд этого модуля.
-pub const NAMES: [&str; 7] = [
+pub const NAMES: [&str; 8] = [
     "socks",
     "http",
     "profiles",
@@ -118,6 +120,7 @@ pub const NAMES: [&str; 7] = [
     "doctor",
     "update",
     "subscription",
+    "geoip",
 ];
 
 /// Разбирает команду; первым идёт её имя, общие флаги уже убраны.
@@ -134,8 +137,24 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed<Command>, 
         "doctor" => leaf(lx, help::DOCTOR, Command::Doctor),
         "update" => update(lx).map(|p| p.map(Command::Update)),
         "subscription" => subscription(lx).map(|p| p.map(Command::Subscription)),
+        "geoip" => geoip(lx).map(|p| p.map(Command::Geoip)),
         _ => Err(ArgsError::UnknownCommand(name)),
     }
+}
+
+fn geoip(mut lx: Lexer) -> Result<Parsed<Vec<String>>, ArgsError> {
+    let mut servers = Vec::new();
+    let wanted = walk(&mut lx, unknown_flag, |word| {
+        servers.push(word);
+        Ok(())
+    })?;
+    if wanted {
+        return Ok(Parsed::Print(help::GEOIP));
+    }
+    if servers.is_empty() {
+        return Err(ArgsError::MissingArgument("<СЕРВЕР>"));
+    }
+    Ok(Parsed::Run(servers))
 }
 
 fn subscription(mut lx: Lexer) -> Result<Parsed<SubscriptionCommand>, ArgsError> {
@@ -578,6 +597,18 @@ mod tests {
             run(&["rules", "bogus"]),
             Err(ArgsError::UnknownCommand("bogus".into()))
         );
+    }
+
+    #[test]
+    fn geoip_takes_one_or_more_servers() {
+        assert_eq!(
+            run(&["geoip", "example.com:443", "203.0.113.5:51820"]),
+            Ok(Command::Geoip(vec![
+                "example.com:443".to_owned(),
+                "203.0.113.5:51820".to_owned()
+            ]))
+        );
+        assert_eq!(run(&["geoip"]), Err(ArgsError::MissingArgument("<СЕРВЕР>")));
     }
 
     #[test]

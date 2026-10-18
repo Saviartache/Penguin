@@ -118,6 +118,8 @@ pub struct Strings {
     pub subscription_updated: &'static str,
     /// Журнал: подписка не обновлена (дальше причина).
     pub subscription_failed: &'static str,
+    /// Журнал: страны серверов не определены (дальше причина).
+    pub countries_failed: &'static str,
     /// Заголовок окна «как добавить WireGuard».
     pub wireguard_add: &'static str,
     /// Добавить WireGuard вручную (форма).
@@ -559,6 +561,7 @@ mod tests {
                 table.subscription_refresh,
                 table.subscription_updated,
                 table.subscription_failed,
+                table.countries_failed,
                 table.wireguard_add,
                 table.wireguard_manual,
                 table.wireguard_from_conf,

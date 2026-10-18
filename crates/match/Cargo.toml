@@ -19,8 +19,12 @@ ipnet.workspace = true
 aho-corasick.workspace = true
 regex.workspace = true
 maxminddb = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [features]
 default = []
 # База GeoIP тяжёлая, нужна не всем
-geo = ["dep:maxminddb"]
+geo = ["dep:maxminddb", "dep:serde"]

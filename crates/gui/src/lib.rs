@@ -6,7 +6,9 @@
 
 mod app;
 mod console;
+mod flags;
 mod forms;
+mod geoip;
 mod i18n;
 mod ipc;
 mod screens;

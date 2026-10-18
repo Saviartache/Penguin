@@ -17,7 +17,8 @@ use uikit::widgets::Button;
 
 use crate::app::message::{HomeMessage, Message};
 use crate::app::state::{State, UpdateStatus};
-use crate::console::{self, Line, Picker, Reveal};
+use crate::console::{self, Choice, Line, Picker, Reveal};
+use crate::flags::Flag;
 use crate::screens::tunnel::{Tone, describe, describe_button, describe_service_button};
 
 /// Высота кнопки: единственное действие окна не должно быть легко промахнуть.
@@ -127,7 +128,11 @@ fn config(state: &State) -> Vec<Line> {
 
     let mut lines = vec![
         head,
-        Line::Pick(strings.profile.to_uppercase(), profile.name.clone()),
+        Line::Pick(
+            strings.profile.to_uppercase(),
+            profile.name.clone(),
+            flag(state, profile),
+        ),
     ];
     match state.profile_menu {
         Some(top) => lines.extend(choices(state, top)),
@@ -163,16 +168,22 @@ fn choices(state: &State, top: f32) -> Vec<Line> {
         .map(|at| {
             let profile = &config.profiles[at];
             let chosen = active == Some(&profile.id);
-            Line::Choice(
-                profile.name.clone(),
-                latency(state, &profile.id),
+            Line::Choice(Choice {
+                name: profile.name.clone(),
+                note: latency(state, &profile.id),
                 chosen,
-                at,
-            )
+                index: at,
+                flag: flag(state, profile),
+            })
         })
         .collect();
     lines.resize_with(menu::ROWS, || Line::Blank);
     lines
+}
+
+/// Флаг страны сервера профиля, если она известна.
+fn flag(state: &State, profile: &Profile) -> Option<Flag> {
+    state.servers.countries.flag(profile)
 }
 
 /// Последняя задержка профиля или дефис.
@@ -314,7 +325,14 @@ mod tests {
         let open = lines(&state);
         // Иначе поток ниже сменит место в дереве и начнётся заново.
         assert_eq!(open.len(), closed, "список сдвинул строки под собой");
-        assert!(matches!(open[2], Line::Choice(_, _, true, 0)));
+        assert!(matches!(
+            open[2],
+            Line::Choice(Choice {
+                chosen: true,
+                index: 0,
+                ..
+            })
+        ));
         let _ = view(&state);
     }
 
@@ -506,8 +524,12 @@ mod tests {
             let (label, value) = match line {
                 Line::Pair(label, value)
                 | Line::Toned(label, value, _)
-                | Line::Pick(label, value)
-                | Line::Choice(label, value, ..) => (label.as_str(), value.as_str()),
+                | Line::Pick(label, value, _)
+                | Line::Choice(Choice {
+                    name: label,
+                    note: value,
+                    ..
+                }) => (label.as_str(), value.as_str()),
                 Line::Section(label) => (label.as_str(), ""),
                 Line::Blank | Line::Stream(_) | Line::Space => continue,
             };

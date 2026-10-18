@@ -153,6 +153,23 @@ Options:
     global_options!()
 );
 
+pub(super) const GEOIP: &str = concat!(
+    "Страна серверов по базе GeoIP.
+
+База DB-IP Lite (IP Geolocation by DB-IP, CC BY 4.0) скачивается с GitHub в
+каталог данных пользователя и обновляется раз в месяц. Имя сервера резолвится
+системным резолвером; не найденные в выводе отсутствуют.
+
+Usage: penguin geoip [OPTIONS] <СЕРВЕР>...
+
+Arguments:
+  <СЕРВЕР>...  Адрес `хост:порт` или просто хост
+
+Options:
+",
+    global_options!()
+);
+
 pub(super) const DOCTOR: &str = concat!(
     "Проверка окружения: настройки, профили, права
 

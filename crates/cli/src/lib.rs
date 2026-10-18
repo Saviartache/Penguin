@@ -18,6 +18,9 @@ pub fn run(command: &Command, config_dir: Option<&std::path::Path>, json: bool) 
     if let Command::Update(update) = command {
         return commands::update::run(update, Format::from_flag(json));
     }
+    if let Command::Geoip(servers) = command {
+        return commands::geoip::run(servers, Format::from_flag(json));
+    }
     // Подписка читает общий (чужой) каталог службы лишь когда сама пишет туда
     // настройки; окну (оно от пользователя) к нему не дотянуться, и обновление
     // по подписке в JSON настроек не трогает — поэтому до их чтения.
@@ -54,6 +57,7 @@ pub fn run(command: &Command, config_dir: Option<&std::path::Path>, json: bool) 
         Command::Rules(command) => commands::rules::run(&config, command, format),
         Command::Doctor => commands::doctor::run(&store, &config, format),
         Command::Update(update) => commands::update::run(update, format),
+        Command::Geoip(servers) => commands::geoip::run(servers, format),
         // Разобрана выше, до чтения настроек.
         Command::Subscription(_) => unreachable!("подписка разобрана до чтения настроек"),
     }

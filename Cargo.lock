@@ -3386,6 +3386,7 @@ dependencies = [
  "penguin-dns",
  "penguin-engine",
  "penguin-inbound",
+ "penguin-match",
  "penguin-platform",
  "penguin-process",
  "penguin-router",
@@ -3634,6 +3635,8 @@ dependencies = [
  "penguin-core",
  "penguin-process",
  "regex",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

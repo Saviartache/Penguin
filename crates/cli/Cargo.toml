@@ -19,6 +19,8 @@ penguin-inbound.workspace = true
 penguin-router.workspace = true
 penguin-process.workspace = true
 penguin-dns.workspace = true
+# Страна сервера для флага в окне: та же база и чтение, что у правил GeoIP.
+penguin-match = { workspace = true, features = ["geo"] }
 # Только ради `doctor`: он отвечает на вопрос «почему не работает», а
 # ответ на него — состояние системы, а не клиента.
 penguin-tun.workspace = true

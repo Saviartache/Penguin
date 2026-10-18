@@ -5,10 +5,12 @@ use penguin_core::id::ProfileId;
 use penguin_ipc::schema::{LogLevel, Request, Response};
 
 use crate::app::App;
+use crate::app::countries::Countries;
 use crate::app::message::{IpcMessage, Message, ServersMessage};
 use crate::app::probe_queue::ProbeQueue;
 use crate::app::update::{request, save};
 use crate::forms::server as editor;
+use crate::screens::servers::server_of;
 
 /// Разбирает экран серверов.
 pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
@@ -76,7 +78,40 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
         }
         ServersMessage::SubscriptionRefresh => subscription_refresh(app),
         ServersMessage::SubscriptionRefreshed(result) => subscription_refreshed(app, result),
+        ServersMessage::CountriesLocated(asked, result) => countries_located(app, &asked, result),
     }
+}
+
+/// Спрашивает страну серверов, о которых ещё не спрашивали; флаги — по ответу.
+pub(crate) fn locate_countries(app: &mut App) -> Task<Message> {
+    let state = app.state_mut();
+    let servers = Countries::wanted(&state.config.profiles);
+    let asked = state.servers.countries.unasked(servers);
+    if asked.is_empty() {
+        return Task::none();
+    }
+    Task::perform(crate::geoip::locate(asked.clone()), move |result| {
+        Message::Servers(ServersMessage::CountriesLocated(asked.clone(), result))
+    })
+}
+
+fn countries_located(
+    app: &mut App,
+    asked: &[String],
+    result: Result<std::collections::HashMap<String, String>, String>,
+) -> Task<Message> {
+    let state = app.state_mut();
+    match result {
+        Ok(found) => state.servers.countries.located(found),
+        Err(reason) => {
+            state.servers.countries.failed(asked);
+            state.connection.push_log(
+                LogLevel::Warning,
+                format!("{}: {reason}", crate::i18n::s().countries_failed),
+            );
+        }
+    }
+    Task::none()
 }
 
 /// Открывает форму WireGuard вручную из окна выбора способа.
@@ -339,7 +374,7 @@ fn submit(app: &mut App) -> Task<Message> {
         return Task::none();
     };
     // Неверный черновик не закрывается: причина видна в редакторе.
-    let Ok(profile) = draft.to_profile() else {
+    let Ok(mut profile) = draft.to_profile() else {
         return Task::none();
     };
 
@@ -350,7 +385,13 @@ fn submit(app: &mut App) -> Task<Message> {
         .iter_mut()
         .find(|known| known.id == profile.id)
     {
-        Some(existing) => *existing = profile,
+        Some(existing) => {
+            // Страна источника верна, пока адрес тот же.
+            if server_of(existing) == server_of(&profile) {
+                profile.country = existing.country.take();
+            }
+            *existing = profile;
+        }
         None => state.config.profiles.push(profile),
     }
     state.servers.editor = None;

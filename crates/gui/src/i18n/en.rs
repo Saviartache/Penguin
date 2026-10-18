@@ -71,6 +71,7 @@ pub static STRINGS: Strings = Strings {
     subscription_refresh: "Refresh",
     subscription_updated: "Subscription refreshed, servers",
     subscription_failed: "Subscription not refreshed",
+    countries_failed: "Server countries unknown",
     wireguard_add: "Add WireGuard",
     wireguard_manual: "Manual",
     wireguard_from_conf: "From .conf file",

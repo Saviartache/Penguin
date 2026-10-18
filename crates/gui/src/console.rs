@@ -10,6 +10,8 @@
 
 mod choice;
 
+pub use choice::Choice;
+
 use std::sync::LazyLock;
 
 use iced::mouse::Interaction;
@@ -21,6 +23,8 @@ use iced::{Color, Element, Length, Padding};
 use uikit::layout::{Flex, Sizable, Size, px};
 use uikit::tokens::{ink, type_scale};
 use uikit::widgets::BitStream;
+
+use crate::flags::Flag;
 
 /// Кегль консоли.
 const SIZE: f32 = type_scale::BODY;
@@ -79,10 +83,10 @@ pub enum Line {
     Pair(String, String),
     /// То же, но значение своим цветом — состояние тоннеля.
     Toned(String, String, Color),
-    /// Как [`Line::Pair`], но нажатие на значение шлёт [`Picker::toggle`].
-    Pick(String, String),
-    /// Пункт списка под [`Line::Pick`]: имя, примечание, выбран ли, номер для [`Picker::choose`].
-    Choice(String, String, bool, usize),
+    /// Как [`Line::Pair`], но нажатие на значение шлёт [`Picker::toggle`]; флаг — перед значением.
+    Pick(String, String, Option<Flag>),
+    /// Пункт списка под [`Line::Pick`].
+    Choice(Choice),
     /// Пустая строка той же высоты: держит место короткого списка.
     Blank,
     /// Поток данных: загрузка от нуля до единицы; не больше одного на экран.
@@ -158,7 +162,7 @@ pub fn console<'a, Message: Clone + 'a>(
 /// Сколько знаков «набирается» в строке; поток появляется целиком.
 fn cost(line: &Line) -> usize {
     match line {
-        Line::Pair(label, value) | Line::Toned(label, value, _) | Line::Pick(label, value) => {
+        Line::Pair(label, value) | Line::Toned(label, value, _) | Line::Pick(label, value, _) => {
             count(label) + count(value)
         }
         Line::Section(label) => count(label),
@@ -176,15 +180,17 @@ fn draw<'a, Message: Clone + 'a>(
 ) -> Element<'a, Message> {
     match line {
         Line::Section(label) => section(palette, label, typed),
-        Line::Pair(label, value) => duo(palette, label, value, palette.text, typed, None),
-        Line::Toned(label, value, tone) => duo(palette, label, value, *tone, typed, None),
-        Line::Pick(label, value) => {
-            let toggle = picker.map(|picker| picker.toggle.clone());
-            duo(palette, label, value, palette.text, typed, toggle)
+        Line::Pair(label, value) => duo(palette, label, value, typed, Look::plain(palette.text)),
+        Line::Toned(label, value, tone) => duo(palette, label, value, typed, Look::plain(*tone)),
+        Line::Pick(label, value, flag) => {
+            let look = Look {
+                ink: palette.text,
+                on_press: picker.map(|picker| picker.toggle.clone()),
+                flag: *flag,
+            };
+            duo(palette, label, value, typed, look)
         }
-        Line::Choice(name, note, chosen, index) => {
-            choice::row(palette, name, note, *chosen, *index, picker)
-        }
+        Line::Choice(entry) => choice::row(palette, entry, picker),
         Line::Blank => iced::widget::Space::new().width(Length::Fill).into(),
         Line::Stream(load) => stream(*load),
         Line::Space => iced::widget::Space::new()
@@ -213,14 +219,32 @@ fn section<'a, Message: 'a>(
         .build()
 }
 
-/// Поле слева, значение у правого края; с `on_press` значение нажимается.
+/// Как рисовать значение строки.
+struct Look<Message> {
+    ink: Color,
+    /// Значение нажимается.
+    on_press: Option<Message>,
+    /// Флаг перед значением.
+    flag: Option<Flag>,
+}
+
+impl<Message> Look<Message> {
+    fn plain(ink: Color) -> Self {
+        Self {
+            ink,
+            on_press: None,
+            flag: None,
+        }
+    }
+}
+
+/// Поле слева, значение у правого края.
 fn duo<'a, Message: Clone + 'a>(
     palette: &Palette,
     label: &str,
     value: &str,
-    value_ink: Color,
     typed: Option<usize>,
-    on_press: Option<Message>,
+    look: Look<Message>,
 ) -> Element<'a, Message> {
     let label_ink = ink::level(palette, ink::SECONDARY);
     let value = clip(value, LIMIT);
@@ -240,8 +264,8 @@ fn duo<'a, Message: Clone + 'a>(
         ),
     };
 
-    let value = cell(value_shown, value_ink);
-    let value = match on_press {
+    let value = cell(value_shown, look.ink);
+    let value = match look.on_press {
         // Вид прежний: меняется только курсор.
         Some(message) => mouse_area(value)
             .on_press(message)
@@ -250,13 +274,15 @@ fn duo<'a, Message: Clone + 'a>(
         None => value,
     };
 
-    Flex::row()
+    let mut line = Flex::row()
         .w(Size::FILL)
         .push_auto(cell(label_shown, label_ink))
-        .push(filler(palette, &DOTS, dotted))
-        .push_auto(value)
-        .gap(CELL)
-        .build()
+        .push(filler(palette, &DOTS, dotted));
+    // С точками, а не раньше: перед пустым значением флаг висел бы сам по себе.
+    if let Some(flag) = look.flag.filter(|_| dotted) {
+        line = line.push_auto(crate::flags::slot(Some(flag)));
+    }
+    line.push_auto(value).gap(CELL).build()
 }
 
 /// Поток данных во всю оставшуюся высоту — `BitStream` кита.
@@ -331,8 +357,25 @@ mod tests {
     fn lines() -> Vec<Line> {
         vec![
             Line::Section("КОНФИГУРАЦИЯ".to_owned()),
-            Line::Pick("ПРОФИЛЬ".to_owned(), "203.0.113.245".to_owned()),
-            Line::Choice("home".to_owned(), "91 мс".to_owned(), true, 0),
+            Line::Pick(
+                "ПРОФИЛЬ".to_owned(),
+                "203.0.113.245".to_owned(),
+                Flag::of("jp"),
+            ),
+            Line::Choice(Choice {
+                name: "home".to_owned(),
+                note: "91 мс".to_owned(),
+                chosen: true,
+                index: 0,
+                flag: None,
+            }),
+            Line::Choice(Choice {
+                name: "work".to_owned(),
+                note: "40 мс".to_owned(),
+                chosen: false,
+                index: 1,
+                flag: Flag::of("de"),
+            }),
             Line::Blank,
             Line::Toned("СОСТОЯНИЕ".to_owned(), "ОТКЛЮЧЕНО".to_owned(), Color::WHITE),
             Line::Stream(0.5),

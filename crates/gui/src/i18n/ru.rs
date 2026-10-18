@@ -71,6 +71,7 @@ pub static STRINGS: Strings = Strings {
     subscription_refresh: "Обновить",
     subscription_updated: "Подписка обновлена, серверов",
     subscription_failed: "Подписка не обновлена",
+    countries_failed: "Страны серверов не определены",
     wireguard_add: "Добавить WireGuard",
     wireguard_manual: "Вручную",
     wireguard_from_conf: "Из файла .conf",

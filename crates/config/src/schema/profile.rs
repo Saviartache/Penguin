@@ -21,6 +21,12 @@ pub struct Profile {
     /// Подписка-источник; профиль из неё перезаписывается при обновлении.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription: Option<String>,
+    /// Страна сервера (ISO 3166-1, `JP`), если её назвал источник профиля.
+    ///
+    /// Нужна, когда адрес — общий вход, а не сам сервер (подписка Amnezia):
+    /// GeoIP по такому адресу назовёт страну входа. Без неё страну ищет GeoIP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
 }
 
 impl Profile {
@@ -32,6 +38,7 @@ impl Profile {
             tags: Vec::new(),
             outbound,
             subscription: None,
+            country: None,
         }
     }
 
