@@ -50,6 +50,8 @@ pub static STRINGS: Strings = Strings {
     disconnect: "Disconnect",
     save: "Save",
     probe: "Test",
+    probe_stop: "Stop",
+    ping: "Ping",
     remove: "Remove",
     select_hint: "SELECT: CLICK A ROW",
     edit: "Edit",

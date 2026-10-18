@@ -38,6 +38,9 @@ const LATENCY_WIDTH: usize = 8;
 /// Ширина столбца действия в точках.
 const ACTION_WIDTH: f32 = 76.0;
 
+/// Ширина действия «пинг» в точках: подпись короче.
+const PING_WIDTH: f32 = 56.0;
+
 /// Собирает вкладку: кнопки и панель под ними; прокручивается список внутри панели.
 pub fn view(state: &State) -> Element<'_, Message> {
     Flex::col()
@@ -50,12 +53,16 @@ pub fn view(state: &State) -> Element<'_, Message> {
 }
 
 fn toolbar(state: &State) -> Element<'_, Message> {
-    let mut probe =
-        ui::button(ButtonVariant::Secondary, crate::i18n::s().probe).h(px(BUTTON_HEIGHT));
-    // Повторное нажатие во время прогона игнорируется
-    if !state.servers.probe.is_running() {
-        probe = probe.on_press(Message::Servers(ServersMessage::Probe));
+    let strings = crate::i18n::s();
+    // Во время прогона та же кнопка его останавливает.
+    let probe = if state.servers.probe.is_running() {
+        ui::button(ButtonVariant::Secondary, strings.probe_stop)
+            .on_press(Message::Servers(ServersMessage::ProbeStopped))
+    } else {
+        ui::button(ButtonVariant::Secondary, strings.probe)
+            .on_press(Message::Servers(ServersMessage::Probe))
     }
+    .h(px(BUTTON_HEIGHT));
 
     Flex::row()
         .push_auto(
@@ -103,7 +110,7 @@ fn head(state: &State) -> Element<'_, Message> {
                 .padding(ROW_PADDING)
                 .width(Length::Fill),
         )
-        .push_auto(Space::new().width(Length::Fixed(ACTION_WIDTH)))
+        .push_auto(Space::new().width(Length::Fixed(PING_WIDTH + ACTION_WIDTH)))
         .gap(gap::NONE)
         .build()
 }
@@ -205,6 +212,11 @@ fn row<'a>(
 
     Flex::row()
         .push(select)
+        .push_auto(table::action(
+            crate::i18n::s().ping,
+            PING_WIDTH,
+            Message::Servers(ServersMessage::ProbeOne(id.clone())),
+        ))
         .push_auto(table::action(
             crate::i18n::s().edit,
             ACTION_WIDTH,

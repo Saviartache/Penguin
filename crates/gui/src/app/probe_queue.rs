@@ -16,6 +16,19 @@ impl ProbeQueue {
         self.current = self.pending.pop_front();
     }
 
+    /// Ставит профиль в конец; идущий прогон не сбрасывается. `true` — очередь
+    /// была пуста и профиль стал текущим: его пора спрашивать.
+    pub fn push(&mut self, id: String) -> bool {
+        if self.current.is_none() {
+            self.current = Some(id);
+            return true;
+        }
+        if self.current.as_ref() != Some(&id) && !self.pending.contains(&id) {
+            self.pending.push_back(id);
+        }
+        false
+    }
+
     /// Профиль, ответа по которому ждём.
     pub fn current(&self) -> Option<&str> {
         self.current.as_deref()
@@ -88,6 +101,27 @@ mod tests {
     fn an_empty_run_is_not_running() {
         let mut queue = ProbeQueue::default();
         queue.start(Vec::new());
+        assert!(!queue.is_running());
+    }
+
+    #[test]
+    fn a_single_probe_starts_an_idle_queue() {
+        let mut queue = ProbeQueue::default();
+        assert!(queue.push("a".to_owned()));
+        assert_eq!(queue.current(), Some("a"));
+    }
+
+    #[test]
+    fn a_single_probe_joins_a_running_run_once() {
+        let mut queue = ProbeQueue::default();
+        queue.start(ids(&["a", "b"]));
+        assert!(!queue.push("c".to_owned()));
+        assert!(!queue.push("b".to_owned()));
+        assert!(!queue.push("c".to_owned()));
+
+        assert!(queue.answered("a"));
+        assert!(queue.answered("b"));
+        assert!(queue.answered("c"));
         assert!(!queue.is_running());
     }
 

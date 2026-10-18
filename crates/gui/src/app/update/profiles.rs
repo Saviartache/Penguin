@@ -26,6 +26,18 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
             state.servers.probe.start(ids);
             probe_current(&app.state().servers.probe)
         }
+        ServersMessage::ProbeOne(id) => {
+            if app.state_mut().servers.probe.push(id) {
+                probe_current(&app.state().servers.probe)
+            } else {
+                Task::none()
+            }
+        }
+        // Запрос в полёте не отзывается: его ответ очередь уже не примет.
+        ServersMessage::ProbeStopped => {
+            app.state_mut().servers.probe.cancel();
+            Task::none()
+        }
         ServersMessage::ProbeFailed(profile, message) => probe_failed(app, &profile, message),
         ServersMessage::PickerOpened => {
             app.state_mut().servers.picker = true;

@@ -76,6 +76,10 @@ pub struct Strings {
     pub save: &'static str,
     /// Проверить.
     pub probe: &'static str,
+    /// Остановить идущую проверку.
+    pub probe_stop: &'static str,
+    /// Проверить один сервер — действие в строке.
+    pub ping: &'static str,
     /// Удалить.
     pub remove: &'static str,
     /// Как выбрать профиль — подсказкой у нижнего края списка.
@@ -542,6 +546,8 @@ mod tests {
                 table.disconnect,
                 table.save,
                 table.probe,
+                table.probe_stop,
+                table.ping,
                 table.remove,
                 table.select_hint,
                 table.edit,

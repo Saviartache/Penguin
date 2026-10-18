@@ -50,6 +50,8 @@ pub static STRINGS: Strings = Strings {
     disconnect: "Отключить",
     save: "Сохранить",
     probe: "Проверить",
+    probe_stop: "Остановить",
+    ping: "Пинг",
     remove: "Удалить",
     select_hint: "ВЫБОР: ЩЕЛЧОК ПО СТРОКЕ",
     edit: "Править",
