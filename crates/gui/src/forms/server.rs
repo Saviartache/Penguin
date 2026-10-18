@@ -45,6 +45,8 @@ enum Body {
         spec: &'static ProtocolSpec,
         /// Значения в порядке [`ProtocolSpec::fields`].
         values: Vec<Value>,
+        /// Исходные параметры: то, чего нет в форме (`amnezia`, `reserved`), остаётся.
+        base: serde_json::Map<String, serde_json::Value>,
     },
     /// Протокол окну неизвестен: параметры держатся нетронутыми.
     Foreign {
@@ -78,6 +80,7 @@ impl Draft {
             body: Body::Known {
                 spec,
                 values: spec.fields.iter().map(blank).collect(),
+                base: serde_json::Map::new(),
             },
         }
     }
@@ -94,6 +97,7 @@ impl Draft {
                     .iter()
                     .map(|field| read(field, params))
                     .collect(),
+                base: params.as_object().cloned().unwrap_or_default(),
             },
             None => Body::Foreign {
                 protocol: profile.outbound.protocol.clone(),
@@ -198,7 +202,9 @@ impl Draft {
     /// Собирает профиль; `Err` — текст для показа как есть.
     pub fn to_profile(&self) -> Result<Profile, String> {
         let outbound = match &self.body {
-            Body::Known { spec, values } => RawOutbound::new(spec.id, params(spec, values)?),
+            Body::Known { spec, values, base } => {
+                RawOutbound::new(spec.id, params(spec, values, base.clone())?)
+            }
             Body::Foreign { protocol, params } => RawOutbound::new(protocol, params.clone()),
         };
 
@@ -257,12 +263,26 @@ fn as_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Складывает параметры протокола из набранного.
+/// Складывает параметры протокола из набранного поверх исходных: пути полей
+/// формы переписываются, остальное не трогается.
 ///
 /// Пустое поле пропускается, не пишется `Null`: в TOML пустого значения нет,
 /// профиль перестал бы сохраняться (`unsupported unit type`).
-fn params(spec: &ProtocolSpec, values: &[Value]) -> Result<serde_json::Value, String> {
-    let mut out = serde_json::Map::new();
+fn params(
+    spec: &ProtocolSpec,
+    values: &[Value],
+    mut out: serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    // Сначала все: спутник одного поля не сотрётся следующим.
+    for field in spec.fields {
+        let companions = field.with.iter().map(|(path, _)| *path);
+        for path in std::iter::once(field.path)
+            .chain(field.also.iter().copied())
+            .chain(companions)
+        {
+            clear(&mut out, path);
+        }
+    }
 
     for (field, value) in spec.fields.iter().zip(values) {
         match value {
@@ -326,6 +346,24 @@ fn put(
         }
     }
     current.insert((*last).to_owned(), value);
+}
+
+/// Убирает значение по пути; опустевшие группы уходят следом.
+fn clear(out: &mut serde_json::Map<String, serde_json::Value>, path: &[&str]) {
+    match path {
+        [] => {}
+        [last] => {
+            out.remove(*last);
+        }
+        [group, rest @ ..] => {
+            if let Some(nested) = out.get_mut(*group).and_then(|v| v.as_object_mut()) {
+                clear(nested, rest);
+                if nested.is_empty() {
+                    out.remove(*group);
+                }
+            }
+        }
+    }
 }
 
 /// Имя безымянного профиля: адрес сервера.
@@ -653,6 +691,71 @@ mod tests {
         assert_eq!(saved.name, "Переименован");
         assert_eq!(saved.outbound.protocol, "телепатия");
         assert_eq!(saved.outbound.params, params);
+    }
+
+    fn amnezia() -> Profile {
+        Profile::new(
+            "awg",
+            "AWG",
+            RawOutbound::new(
+                "wireguard",
+                json!({
+                    "server": "1.2.3.4:51820",
+                    "private_key": sample("private_key"),
+                    "server_public_key": sample("server_public_key"),
+                    "preshared_key": sample("private_key"),
+                    "address_ipv4": "10.8.1.2/32",
+                    "mtu": 1280,
+                    "reserved": [1, 2, 3],
+                    "amnezia": { "jc": 4, "jmin": 10, "jmax": 50, "h1": "1" },
+                }),
+            ),
+        )
+    }
+
+    #[test]
+    fn settings_outside_the_form_survive_an_edit() {
+        let mut draft = Draft::from_profile(&amnezia());
+        draft.set_text("mtu", "1300".to_owned());
+
+        let params = draft.to_profile().expect("собирается").outbound.params;
+        assert_eq!(params["amnezia"], amnezia().outbound.params["amnezia"]);
+        assert_eq!(params["reserved"], json!([1, 2, 3]));
+        assert_eq!(params["mtu"], json!("1300"));
+    }
+
+    #[test]
+    fn a_cleared_field_is_removed_from_the_settings() {
+        let mut draft = Draft::from_profile(&amnezia());
+        draft.set_text("preshared_key", String::new());
+
+        let params = draft.to_profile().expect("собирается").outbound.params;
+        assert!(params.get("preshared_key").is_none());
+        assert!(params.get("amnezia").is_some());
+    }
+
+    #[test]
+    fn a_cleared_field_takes_its_companion_and_empty_group_along() {
+        let profile = Profile::new(
+            "home",
+            "Дом",
+            RawOutbound::new(
+                "hysteria2",
+                json!({
+                    "server": "e.com:443",
+                    "auth": "x",
+                    "obfs": { "type": "salamander", "password": "соль" },
+                }),
+            ),
+        );
+        let mut draft = Draft::from_profile(&profile);
+        assert_eq!(draft.text("obfs"), "соль");
+        draft.set_text("obfs", String::new());
+
+        let params = draft.to_profile().expect("собирается").outbound.params;
+        assert!(params.get("obfs").is_none(), "{params}");
+        assert!(params.get("auth").is_none(), "старое имя пароля осталось");
+        assert_eq!(params["password"], json!("x"));
     }
 
     #[test]

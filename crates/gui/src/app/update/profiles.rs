@@ -386,6 +386,9 @@ fn submit(app: &mut App) -> Task<Message> {
         .find(|known| known.id == profile.id)
     {
         Some(existing) => {
+            // Формы у них нет: без переноса правка отвязала бы профиль от подписки.
+            profile.subscription = existing.subscription.take();
+            profile.tags = std::mem::take(&mut existing.tags);
             // Страна источника верна, пока адрес тот же.
             if server_of(existing) == server_of(&profile) {
                 profile.country = existing.country.take();
@@ -636,6 +639,26 @@ mod tests {
             "профиль не должен раздвоиться"
         );
         assert_eq!(app.state().config.profiles[0].name, "Дом (новый)");
+    }
+
+    #[test]
+    fn editing_a_subscription_profile_keeps_it_managed() {
+        let mut app = app_with_profiles(&["home"]);
+        let profile = &mut app.state_mut().config.profiles[0];
+        profile.subscription = Some("amnezia-1".to_owned());
+        profile.tags = vec!["работа".to_owned()];
+
+        let _ = handle(&mut app, ServersMessage::EditorOpened("home".to_owned()));
+        let _ = handle(
+            &mut app,
+            ServersMessage::EditorNameChanged("Дом".to_owned()),
+        );
+        let _ = handle(&mut app, ServersMessage::EditorSubmitted);
+
+        let saved = &app.state().config.profiles[0];
+        assert_eq!(saved.name, "Дом");
+        assert_eq!(saved.subscription.as_deref(), Some("amnezia-1"));
+        assert_eq!(saved.tags, vec!["работа".to_owned()]);
     }
 
     #[test]
