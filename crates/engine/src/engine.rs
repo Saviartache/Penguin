@@ -158,6 +158,9 @@ impl Engine {
         let profile = self.pick_profile(&config, profile.as_ref())?;
         let profile_id = profile.id.clone();
 
+        // До «подключаемся»: увидевший это состояние должен успеть отменить.
+        let abort = CancellationToken::new();
+        *self.connecting.lock() = Some(abort.clone());
         self.state.connecting(profile_id.clone());
         self.events.emit(Event::log(
             LogLevel::Info,
@@ -172,8 +175,6 @@ impl Engine {
             }
         }
 
-        let abort = CancellationToken::new();
-        *self.connecting.lock() = Some(abort.clone());
         let connected = tokio::select! {
             result = self.outbounds.get_or_connect(profile) => Some(result),
             () = abort.cancelled() => None,
@@ -380,10 +381,13 @@ mod tests {
     #[cfg(feature = "wireguard")]
     #[tokio::test]
     async fn disconnect_cancels_a_connect_waiting_for_the_server() {
-        // Сервер, который молчит: рукопожатие ждало бы свой срок.
-        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("сокет");
+        // Сервер, который молчит: рукопожатие ждало бы свой срок. Не на
+        // петле: сокет, привязанный к физическому интерфейсу, до неё не достаёт.
+        let host = penguin_platform::default_route()
+            .map_or(std::net::IpAddr::from([127, 0, 0, 1]), |route| {
+                route.address
+            });
+        let silent = tokio::net::UdpSocket::bind((host, 0)).await.expect("сокет");
         let key = penguin_core::base64::encode(&[7u8; 32]);
         let mut config = RootConfig::default();
         config.profiles.push(Profile::new(
