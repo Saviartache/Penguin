@@ -8,8 +8,8 @@
 
 use std::sync::LazyLock;
 
-use iced::widget::{Space, image};
-use iced::{Element, Length, Rectangle};
+use iced::widget::{Space, container, image};
+use iced::{Element, Length, Padding, Rectangle};
 
 use crate::screens::table::GLYPH;
 
@@ -46,9 +46,6 @@ const GUTTER: u32 = 2;
 /// Высота флага — высота строки: выше — строка таблицы и консоли раздвинется.
 const HEIGHT: f32 = GLYPH;
 
-/// Ширина места под флаг; пустое место той же ширины держит столбцы.
-pub const WIDTH: f32 = HEIGHT * TILE_WIDTH as f32 / TILE_HEIGHT as f32;
-
 static SPRITE: LazyLock<image::Handle> =
     LazyLock::new(|| image::Handle::from_bytes(&include_bytes!("../../../assets/flags.png")[..]));
 
@@ -74,17 +71,37 @@ impl Flag {
     }
 }
 
+/// Флаг на строке консоли: низ по базовой линии, а не по низу строки —
+/// строка без межстрочного запаса, и флаг в её рост читается опущенным.
+const INLINE_HEIGHT: f32 = 9.0;
+
+/// Зазор над флагом на строке консоли (подобрано на экране).
+const INLINE_TOP: f32 = 0.5;
+
 /// Флаг либо пустое место той же ширины.
 pub fn slot<'a, M: 'a>(flag: Option<Flag>) -> Element<'a, M> {
+    sized(flag, HEIGHT)
+}
+
+/// Как [`slot`], но для строки консоли: в рост заглавных, по базовой линии.
+pub fn inline<'a, M: 'a>(flag: Option<Flag>) -> Element<'a, M> {
+    container(sized(flag, INLINE_HEIGHT))
+        .padding(Padding::ZERO.top(INLINE_TOP))
+        .height(Length::Fixed(HEIGHT))
+        .into()
+}
+
+fn sized<'a, M: 'a>(flag: Option<Flag>, height: f32) -> Element<'a, M> {
+    let width = Length::Fixed(height * TILE_WIDTH as f32 / TILE_HEIGHT as f32);
     match flag {
         Some(flag) => image(SPRITE.clone())
             .crop(flag.region())
-            .width(Length::Fixed(WIDTH))
-            .height(Length::Fixed(HEIGHT))
+            .width(width)
+            .height(Length::Fixed(height))
             .into(),
         None => Space::new()
-            .width(Length::Fixed(WIDTH))
-            .height(Length::Fixed(HEIGHT))
+            .width(width)
+            .height(Length::Fixed(height))
             .into(),
     }
 }

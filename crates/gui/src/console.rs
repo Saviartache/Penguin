@@ -280,7 +280,7 @@ fn duo<'a, Message: Clone + 'a>(
         .push(filler(palette, &DOTS, dotted));
     // С точками, а не раньше: перед пустым значением флаг висел бы сам по себе.
     if let Some(flag) = look.flag.filter(|_| dotted) {
-        line = line.push_auto(crate::flags::slot(Some(flag)));
+        line = line.push_auto(crate::flags::inline(Some(flag)));
     }
     line.push_auto(value).gap(CELL).build()
 }

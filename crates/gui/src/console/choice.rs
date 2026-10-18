@@ -45,7 +45,7 @@ pub(super) fn row<'a, Message: Clone + 'a>(
     let line = Flex::row()
         .w(Size::FILL)
         .push_auto(cell(marker.to_string(), tone))
-        .push_auto(crate::flags::slot(entry.flag))
+        .push_auto(crate::flags::inline(entry.flag))
         .push_auto(cell(clip(&entry.name, LIMIT), tone))
         .push(filler(palette, &DOTS, true))
         .push_auto(cell(entry.note.clone(), tone))
