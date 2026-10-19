@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use async_trait::async_trait;
 use bytes::Bytes;
 use penguin_core::id::OutboundId;
+use penguin_core::stats::Rtt;
 
 use crate::error::ProtocolError;
 
@@ -39,6 +40,11 @@ pub trait PacketOutbound: Send + Sync + 'static {
 
     /// Ждёт следующий пакет из тоннеля.
     async fn recv(&self) -> Result<Bytes, ProtocolError>;
+
+    /// Собственный замер задержки; см. [`Outbound::rtt`](crate::outbound::Outbound::rtt).
+    async fn rtt(&self) -> Option<Rtt> {
+        None
+    }
 
     /// Живо ли направление; см. [`Outbound::is_alive`](crate::outbound::Outbound::is_alive).
     fn is_alive(&self) -> bool {

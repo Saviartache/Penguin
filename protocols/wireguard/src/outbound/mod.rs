@@ -7,12 +7,14 @@ mod driver;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use penguin_core::address::Address;
 use penguin_core::id::OutboundId;
+use penguin_core::stats::Rtt;
 use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::packet::{PacketInterface, PacketOutbound};
@@ -31,6 +33,7 @@ const CHANNEL_CAPACITY: usize = 256;
 pub struct WireguardOutbound {
     id: OutboundId,
     interface: PacketInterface,
+    handshake_millis: Arc<AtomicU32>,
     outbound_tx: mpsc::Sender<Bytes>,
     inbound_rx: Mutex<mpsc::Receiver<Bytes>>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
@@ -64,7 +67,7 @@ impl WireguardOutbound {
         let reserved = config.reserved;
         let obfs = config.obfuscation()?;
 
-        let session = deadline::within(
+        let (session, millis) = deadline::within(
             REKEY_ATTEMPT_TIME,
             "рукопожатие WireGuard",
             driver::initial_handshake(&socket, &static_keys, reserved, &obfs),
@@ -84,6 +87,7 @@ impl WireguardOutbound {
 
         let keepalive = (config.keepalive_secs > 0)
             .then(|| Duration::from_secs(u64::from(config.keepalive_secs)));
+        let handshake_millis = Arc::new(AtomicU32::new(millis));
 
         let handle = tokio::spawn(driver::run(driver::Handles {
             socket,
@@ -92,6 +96,7 @@ impl WireguardOutbound {
             obfs,
             keepalive,
             session,
+            handshake_millis: Arc::clone(&handshake_millis),
             outbound_rx,
             inbound_tx,
             shutdown_rx,
@@ -100,6 +105,7 @@ impl WireguardOutbound {
         Ok(Self {
             id,
             interface,
+            handshake_millis,
             outbound_tx,
             inbound_rx: Mutex::new(inbound_rx),
             shutdown_tx: Mutex::new(Some(shutdown_tx)),
@@ -159,6 +165,13 @@ impl PacketOutbound for WireguardOutbound {
             .send(Bytes::copy_from_slice(packet))
             .await
             .map_err(|_| WireguardError::Closed.into())
+    }
+
+    // Задержка — время рукопожатия: узлы AWG не пропускают замер потоком к внешнему хосту.
+    async fn rtt(&self) -> Option<Rtt> {
+        Some(Rtt::from_millis(
+            self.handshake_millis.load(Ordering::Relaxed),
+        ))
     }
 
     async fn recv(&self) -> Result<Bytes, ProtocolError> {

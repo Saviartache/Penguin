@@ -24,6 +24,7 @@ use bytes::Bytes;
 use parking_lot::RwLock;
 use penguin_core::address::{Address, SocketAddress};
 use penguin_core::id::OutboundId;
+use penguin_core::stats::Rtt;
 use penguin_netstack::Datagram;
 use penguin_netstack::config::StackConfig;
 use penguin_netstack::outgoing::{self, ConnectError, Connector};
@@ -191,6 +192,10 @@ impl Outbound for PacketTunnel {
 
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
         Ok(Box::new(self.inner.open_channel()?))
+    }
+
+    async fn rtt(&self) -> Option<Rtt> {
+        self.inner.outbound.rtt().await
     }
 
     fn is_alive(&self) -> bool {
@@ -364,6 +369,16 @@ mod tests {
             // Сервер, до которого не дошло.
             std::future::pending().await
         }
+
+        async fn rtt(&self) -> Option<Rtt> {
+            Some(Rtt::from_millis(42))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_delay_is_the_one_the_direction_measured_itself() {
+        let tunnel = PacketTunnel::new(Silent::new());
+        assert_eq!(tunnel.rtt().await, Some(Rtt::from_millis(42)));
     }
 
     #[tokio::test]

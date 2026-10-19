@@ -4,6 +4,7 @@
 //! датаграммы; без неё путь байт в байт прежний.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -35,6 +36,8 @@ pub(super) struct Handles {
     pub obfs: Option<Obfuscation>,
     pub keepalive: Option<Duration>,
     pub session: Session,
+    /// Время оборота последнего рукопожатия, мс.
+    pub handshake_millis: Arc<AtomicU32>,
     pub outbound_rx: mpsc::Receiver<Bytes>,
     pub inbound_tx: mpsc::Sender<Bytes>,
     pub shutdown_rx: oneshot::Receiver<()>,
@@ -125,22 +128,24 @@ fn classify_incoming(datagram: &mut [u8], obfs: &Option<Obfuscation>) -> (Incomi
 }
 
 /// Рукопожатие с нуля: инициация повторяется, пока сервер не ответит.
+/// Вместе с сеансом — время оборота последней инициации.
 pub(super) async fn initial_handshake(
     socket: &UdpSocket,
     keys: &StaticKeys,
     reserved: [u8; 3],
     obfs: &Option<Obfuscation>,
-) -> WireguardResult<Session> {
+) -> WireguardResult<(Session, u32)> {
     let mut buf = [0u8; RECV_BUFFER_LEN];
     loop {
         let (message, pending) = create_initiation(keys, init_header(reserved, obfs));
         send_initiation_datagram(socket, &message, obfs).await?;
+        let sent_at = Instant::now();
 
         let timeout = REKEY_TIMEOUT + jitter();
         match tokio::time::timeout(timeout, wait_for_response(socket, &mut buf, obfs)).await {
             Ok(Ok((start, end))) => {
                 if let Ok(keys_out) = consume_response(keys, pending, &buf[start..end]) {
-                    return Ok(Session::new(keys_out));
+                    return Ok((Session::new(keys_out), millis_since(sent_at)));
                 }
             }
             Ok(Err(io_error)) => return Err(io_error.into()),
@@ -163,6 +168,10 @@ async fn wait_for_response(
     }
 }
 
+fn millis_since(moment: Instant) -> u32 {
+    u32::try_from(moment.elapsed().as_millis()).unwrap_or(u32::MAX)
+}
+
 /// Сдвиг срока повтора (`REKEY_TIMEOUT_JITTER_MAX_MS`).
 fn jitter() -> Duration {
     Duration::from_millis(random::range(0..REKEY_TIMEOUT_JITTER_MAX_MS))
@@ -177,6 +186,7 @@ pub(super) async fn run(handles: Handles) {
         mut obfs,
         keepalive,
         mut session,
+        handshake_millis,
         mut outbound_rx,
         inbound_tx,
         mut shutdown_rx,
@@ -217,7 +227,7 @@ pub(super) async fn run(handles: Handles) {
 
             incoming = socket.recv(&mut recv_buf) => {
                 let Ok(len) = incoming else { break };
-                if !handle_datagram(
+                match handle_datagram(
                     &mut recv_buf[..len],
                     &mut obfs,
                     &static_keys,
@@ -225,7 +235,9 @@ pub(super) async fn run(handles: Handles) {
                     &mut rekey,
                     &inbound_tx,
                 ).await {
-                    break;
+                    Handled::Continue => {}
+                    Handled::Rekeyed(millis) => handshake_millis.store(millis, Ordering::Relaxed),
+                    Handled::Stop => break,
                 }
             }
 
@@ -265,8 +277,16 @@ fn wake_at(
     due.max(Instant::now() + MIN_WAKE)
 }
 
-/// Разбирает входящую датаграмму; `false` - получатель `recv()` ушёл, задачу пора
-/// остановить. Остальное постороннее отбрасывается молча.
+/// Чем кончился разбор входящей датаграммы.
+enum Handled {
+    Continue,
+    /// Рукопожатие обновлено за столько миллисекунд.
+    Rekeyed(u32),
+    /// Получатель `recv()` ушёл, задачу пора остановить.
+    Stop,
+}
+
+/// Разбирает входящую датаграмму; постороннее отбрасывается молча.
 async fn handle_datagram(
     datagram: &mut [u8],
     obfs: &mut Option<Obfuscation>,
@@ -274,7 +294,7 @@ async fn handle_datagram(
     session: &mut Session,
     rekey: &mut Option<RekeyAttempt>,
     inbound_tx: &mpsc::Sender<Bytes>,
-) -> bool {
+) -> Handled {
     let (incoming, start, end) = classify_incoming(datagram, obfs);
     match incoming {
         Incoming::Transport => {
@@ -283,43 +303,53 @@ async fn handle_datagram(
                 datagram[start..start + 4].copy_from_slice(&[MESSAGE_TRANSPORT_DATA, 0, 0, 0]);
             }
             let Ok(plaintext) = session.open_packet(&mut datagram[start..end]) else {
-                return true;
+                return Handled::Continue;
             };
             if let Some(o) = obfs {
                 o.observe_received(start, plaintext.len());
             }
             // `None` - keepalive сервера (в том числе с добавкой нулей) или не IP.
-            match transport::inner_packet(plaintext) {
-                Some(packet) => inbound_tx
-                    .send(Bytes::copy_from_slice(packet))
-                    .await
-                    .is_ok(),
-                None => true,
+            let Some(packet) = transport::inner_packet(plaintext) else {
+                return Handled::Continue;
+            };
+            match inbound_tx.send(Bytes::copy_from_slice(packet)).await {
+                Ok(()) => Handled::Continue,
+                Err(_) => Handled::Stop,
             }
         }
-        Incoming::Response => {
-            let message = &datagram[start..end];
-            if let Some(attempt) = rekey.take() {
-                match response::parse(message) {
-                    Ok(fields) if fields.receiver_index == attempt.pending.local_index() => {
-                        match consume_response(static_keys, attempt.pending, message) {
-                            Ok(keys) => *session = Session::new(keys),
-                            Err(error) => {
-                                tracing::debug!(%error, "ответ на обновление рукопожатия не принят");
-                            }
-                        }
-                    }
-                    _ => *rekey = Some(attempt),
-                }
-            }
-            true
-        }
+        Incoming::Response => accept_rekey(&datagram[start..end], static_keys, session, rekey)
+            .map_or(Handled::Continue, Handled::Rekeyed),
         Incoming::Cookie => {
             tracing::debug!("сервер прислал cookie-ответ: cookie-протокол не реализован");
-            true
+            Handled::Continue
         }
-        Incoming::Other => true,
+        Incoming::Other => Handled::Continue,
     }
+}
+
+/// Принимает ответ на обновление рукопожатия; `Some` - время оборота, мс.
+fn accept_rekey(
+    message: &[u8],
+    static_keys: &StaticKeys,
+    session: &mut Session,
+    rekey: &mut Option<RekeyAttempt>,
+) -> Option<u32> {
+    let attempt = rekey.take()?;
+    match response::parse(message) {
+        Ok(fields) if fields.receiver_index == attempt.pending.local_index() => {
+            match consume_response(static_keys, attempt.pending, message) {
+                Ok(keys) => {
+                    *session = Session::new(keys);
+                    return Some(millis_since(attempt.last_sent_at));
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "ответ на обновление рукопожатия не принят");
+                }
+            }
+        }
+        _ => *rekey = Some(attempt),
+    }
+    None
 }
 
 /// Отправляет инициацию; `Some` - она ушла.
