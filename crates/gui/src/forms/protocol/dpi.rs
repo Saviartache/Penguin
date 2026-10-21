@@ -23,18 +23,12 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &[],
     from_link: None,
-    // Единственное направление без тоннеля: молчать об этом нельзя.
-    note: Some(|s| s.dpi_no_tunnel),
+    note: None,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_form_says_out_loud_that_there_is_no_tunnel() {
-        assert!(SPEC.note.is_some());
-    }
 
     #[test]
     fn there_is_no_address_to_ask_for() {

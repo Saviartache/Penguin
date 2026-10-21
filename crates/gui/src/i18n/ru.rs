@@ -141,7 +141,6 @@ pub static STRINGS: Strings = Strings {
     flow_example: "xtls-rprx-vision — только с security = reality и transport = tcp; иначе оставьте пустым",
     pingwin_key_example: "как печатает `pingwin-server keygen`",
     desync_strategy: "Обход DPI",
-    dpi_no_tunnel: "Тоннеля нет: соединение идёт прямо к сайту и не шифруется. Помогает там, где адрес сайта доступен, а разговор рвут по имени узла",
     need_server: "Не задан адрес сервера",
     need_password: "Не задан пароль",
     bad_server: "Адрес нужен в виде example.com:443 или [2001:db8::1]:443 (IPv6 — в скобках, без зоны)",
