@@ -148,6 +148,15 @@ impl Engine {
 
     /// Поднимает тоннель; при уже поднятом — не ошибка.
     pub async fn connect(&self, profile: Option<ProfileId>) -> EngineResult<()> {
+        self.connect_inner(profile, false).await
+    }
+
+    /// Автоподключение: повторяет временные ошибки, пока сеть не готова или не отменят.
+    pub async fn autoconnect(&self) -> EngineResult<()> {
+        self.connect_inner(None, true).await
+    }
+
+    async fn connect_inner(&self, profile: Option<ProfileId>, retry: bool) -> EngineResult<()> {
         let mut session = self.session.lock().await;
         if session.is_some() {
             tracing::debug!("тоннель уже поднят");
@@ -167,16 +176,26 @@ impl Engine {
             format!("подключение к профилю «{}»", profile.name),
         ));
 
-        // Без защиты переподключение при поднятом тоннеле уйдёт в сам тоннель.
-        match penguin_platform::default_route() {
-            Ok(outside) => self.dialer.protect_with(outside.interface_index),
-            Err(err) => {
-                tracing::warn!(%err, "путь наружу неизвестен — сокет до сервера не защищён")
-            }
-        }
-
+        let connect = || async {
+            // Сеть могла появиться между попытками.
+            let interface = match penguin_platform::default_route() {
+                Ok(outside) => outside.interface_index,
+                Err(err) => {
+                    tracing::warn!(%err, "путь наружу неизвестен — сокет до сервера не защищён");
+                    0
+                }
+            };
+            self.dialer.protect_with(interface);
+            self.outbounds.get_or_connect(profile).await
+        };
         let connected = tokio::select! {
-            result = self.outbounds.get_or_connect(profile) => Some(result),
+            result = async {
+                if retry {
+                    crate::retry::connect(connect, &self.state, &profile_id).await
+                } else {
+                    connect().await
+                }
+            } => Some(result),
             () = abort.cancelled() => None,
         };
         self.connecting.lock().take();
@@ -191,6 +210,7 @@ impl Engine {
                 return Ok(());
             }
             Some(Err(err)) => {
+                self.dialer.protect_with(0);
                 self.state.failed(err.to_string());
                 return Err(EngineError::Protocol(err));
             }
@@ -381,6 +401,17 @@ mod tests {
     #[cfg(feature = "wireguard")]
     #[tokio::test]
     async fn disconnect_cancels_a_connect_waiting_for_the_server() {
+        assert_connect_is_cancellable(false).await;
+    }
+
+    #[cfg(feature = "wireguard")]
+    #[tokio::test]
+    async fn disconnect_cancels_autoconnect_waiting_for_the_server() {
+        assert_connect_is_cancellable(true).await;
+    }
+
+    #[cfg(feature = "wireguard")]
+    async fn assert_connect_is_cancellable(automatic: bool) {
         // Сервер, который молчит: рукопожатие ждало бы свой срок. Не на
         // петле: сокет, привязанный к физическому интерфейсу, до неё не достаёт.
         let host = penguin_platform::default_route()
@@ -407,7 +438,13 @@ mod tests {
 
         let connecting = tokio::spawn({
             let engine = Arc::clone(&engine);
-            async move { engine.connect(None).await }
+            async move {
+                if automatic {
+                    engine.autoconnect().await
+                } else {
+                    engine.connect(None).await
+                }
+            }
         });
         while !matches!(engine.state(), TunnelState::Connecting { .. }) {
             tokio::task::yield_now().await;

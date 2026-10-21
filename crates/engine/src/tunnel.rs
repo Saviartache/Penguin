@@ -192,6 +192,13 @@ impl TunnelSession {
         let handles = penguin_netstack::spawn(device, stack_config, self.cancel.clone());
         self.spawn_stack_pumps(handles, config);
 
+        #[cfg(windows)]
+        self.inbounds.push(crate::network_name::spawn(
+            index,
+            tun_config.name,
+            self.cancel.clone(),
+        ));
+
         // После стека: сброшенные приложения переподключаются уже в него.
         if config.network.capture_default_route {
             tokio::spawn(crate::takeover::take_over(servers));

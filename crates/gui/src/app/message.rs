@@ -136,6 +136,14 @@ pub enum WindowMessage {
     DragStopped,
     /// Окно передвинули; `Morph` держит центр и должен знать положение.
     Moved(i32, i32),
+    /// Поменялся масштаб или монитор.
+    WorkAreaRequested,
+    /// Перемещение остановилось; старые положения игнорируются.
+    #[cfg(windows)]
+    MoveSettled(i32, i32),
+    /// Рабочая область монитора в логических координатах.
+    #[cfg(windows)]
+    WorkArea(Option<iced::Rectangle>),
 }
 
 /// Связь с демоном.

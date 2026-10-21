@@ -68,3 +68,6 @@ naive = ["dep:penguin-naive"]
 masque = ["dep:penguin-masque"]
 wireguard = ["dep:penguin-wireguard"]
 trusttunnel = ["dep:penguin-trusttunnel"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

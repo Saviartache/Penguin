@@ -21,10 +21,13 @@ pub mod firewall;
 pub mod instance;
 pub mod interface;
 pub mod leftovers;
+pub mod network_name;
 pub mod privilege;
 pub mod route;
 pub mod service;
 pub mod sockets;
+#[cfg(windows)]
+pub mod window;
 
 pub use build::stamp as build_stamp;
 pub use dns_settings::DnsOverride as DnsOverrideHandle;

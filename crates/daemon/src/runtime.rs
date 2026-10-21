@@ -72,15 +72,23 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
     // В фоне, чтобы канал управления открылся сразу
     if autoconnect {
         let engine = Arc::clone(&engine);
+        let cancel = cancel.clone();
         tokio::spawn(async move {
-            if let Err(err) = engine.connect(None).await {
-                tracing::warn!(%err, "автоподключение не удалось");
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {},
+                result = engine.autoconnect() => {
+                    if let Err(err) = result {
+                        tracing::warn!(%err, "автоподключение не удалось");
+                    }
+                }
             }
         });
     }
 
     let server = Server::new(handler);
     let result = server.serve_with_listener(listener, cancel.clone()).await;
+    cancel.cancel();
 
     // Всегда: остатки маршрутов и правил оставляют машину без сети
     if let Err(err) = engine.disconnect().await {

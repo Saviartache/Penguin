@@ -28,7 +28,7 @@ pub fn handle(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::PanelToggled => {
             app.toggle_panel();
-            Task::none()
+            app.refresh_work_area()
         }
         Message::Frame(now) => app.tick(now),
 
@@ -60,11 +60,30 @@ fn handle_window(app: &mut App, message: WindowMessage) -> Task<Message> {
         WindowMessage::Stopped => window::close(app.window()),
         WindowMessage::Moved(x, y) => {
             app.morph_mut().on_moved(x, y);
+            if app.morph_mut().settled() {
+                return crate::app::placement::moved(x, y);
+            }
             Task::none()
         }
+        WindowMessage::WorkAreaRequested => app.refresh_work_area(),
+        #[cfg(windows)]
+        WindowMessage::MoveSettled(x, y) => {
+            let morph = app.morph_mut();
+            if morph.settled() && morph.origin() == Some(iced::Point::new(x as f32, y as f32)) {
+                return app.refresh_work_area();
+            }
+            Task::none()
+        }
+        #[cfg(windows)]
+        WindowMessage::WorkArea(Some(area)) => {
+            let id = app.window();
+            app.morph_mut().constrain_to(id, area)
+        }
+        #[cfg(windows)]
+        WindowMessage::WorkArea(None) => Task::none(),
         WindowMessage::DragStopped => {
             app.chrome_mut().disarm_drag();
-            Task::none()
+            app.refresh_work_area()
         }
     }
 }

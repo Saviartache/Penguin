@@ -7,6 +7,7 @@
 
 pub mod countries;
 pub mod message;
+mod placement;
 pub mod probe_queue;
 pub mod state;
 pub mod update;
@@ -154,6 +155,9 @@ impl App {
                 iced::Event::Window(iced::window::Event::Moved(point)) => Some(Message::Window(
                     message::WindowMessage::Moved(point.x as i32, point.y as i32),
                 )),
+                iced::Event::Window(iced::window::Event::Rescaled(_)) => {
+                    Some(Message::Window(message::WindowMessage::WorkAreaRequested))
+                }
                 _ => None,
             }),
             uikit::tray::events().map(|event| {
@@ -202,7 +206,7 @@ impl App {
         if self.hidden && self.tray.is_none() {
             return self.show();
         }
-        Task::none()
+        self.refresh_work_area()
     }
 
     /// Прячет окно в лоток или сворачивает, если лотка нет.
@@ -221,6 +225,7 @@ impl App {
         Task::batch([
             window::set_mode(self.window, window::Mode::Windowed),
             window::gain_focus(self.window),
+            self.refresh_work_area(),
         ])
     }
 
@@ -251,6 +256,11 @@ impl App {
     /// Размер окна.
     pub fn morph_mut(&mut self) -> &mut Morph {
         &mut self.morph
+    }
+
+    /// Обновляет границы текущего монитора.
+    pub fn refresh_work_area(&self) -> Task<Message> {
+        placement::refresh(self.window)
     }
 
     /// Кадр движения окна.
