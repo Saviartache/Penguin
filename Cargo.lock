@@ -3497,6 +3497,7 @@ dependencies = [
  "penguin-inbound",
  "penguin-juicity",
  "penguin-masque",
+ "penguin-match",
  "penguin-naive",
  "penguin-netstack",
  "penguin-pingwin",

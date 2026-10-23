@@ -67,6 +67,13 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
 
     let autoconnect = config.app.autoconnect;
     let engine = Engine::new(config).context("не удалось собрать движок")?;
+    // Без базы правила по странам молчат, пока окно её не пришлёт
+    let geoip = store.paths().geoip_file();
+    if geoip.exists()
+        && let Err(err) = engine.load_geoip(&geoip)
+    {
+        tracing::warn!(%err, "база GeoIP не загружена");
+    }
     let handler = DaemonHandler::new(Arc::clone(&engine), Arc::new(store), cancel.clone());
 
     // В фоне, чтобы канал управления открылся сразу

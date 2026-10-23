@@ -3,6 +3,7 @@
 //! Единственный владелец тоннеля: настройки, маршрутизатор, направления,
 //! платформа. `disconnect` откатывает всё в обратном порядке.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -10,6 +11,7 @@ use penguin_config::RootConfig;
 use penguin_config::schema::profile::Profile;
 use penguin_core::id::{OutboundId, ProfileId};
 use penguin_core::state::TunnelState;
+use penguin_match::address::GeoIpDatabase;
 use penguin_process::resolver::FlowOwnerResolver;
 use penguin_proto::dialer::Dialer;
 use penguin_router::engine::Router;
@@ -50,6 +52,8 @@ pub struct Engine {
     /// Отмена идущего подключения: рукопожатие держит `session` до конца,
     /// и отключение без этого ждало бы его.
     connecting: parking_lot::Mutex<Option<CancellationToken>>,
+    /// База стран для правил `geo_ip`; приезжает после запуска.
+    geoip: parking_lot::Mutex<Option<GeoIpDatabase>>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -97,6 +101,7 @@ impl Engine {
             events,
             session: Mutex::new(None),
             connecting: parking_lot::Mutex::new(None),
+            geoip: parking_lot::Mutex::new(None),
         }))
     }
 
@@ -128,6 +133,19 @@ impl Engine {
     /// Текущие настройки.
     pub fn config(&self) -> Arc<RootConfig> {
         self.config.load_full()
+    }
+
+    /// Загружает базу GeoIP и пересобирает правила: страны начинают совпадать.
+    pub fn load_geoip(&self, path: &Path) -> EngineResult<()> {
+        let database = GeoIpDatabase::open(path).map_err(EngineError::GeoIp)?;
+        *self.geoip.lock() = Some(database);
+        self.reload((*self.config()).clone())
+    }
+
+    fn compile_context(&self) -> CompileContext {
+        CompileContext {
+            geoip: self.geoip.lock().clone(),
+        }
     }
 
     /// Собирает конвейер обработки соединений.
@@ -300,7 +318,7 @@ impl Engine {
     /// правила ведут иначе, обрываются — приложения тут же откроют их заново.
     pub fn reload(&self, config: RootConfig) -> EngineResult<()> {
         self.router
-            .replace_rules(&config.routing, &CompileContext::default())
+            .replace_rules(&config.routing, &self.compile_context())
             .map_err(EngineError::Router)?;
 
         let revoked = self

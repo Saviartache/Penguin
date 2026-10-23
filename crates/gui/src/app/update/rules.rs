@@ -7,7 +7,7 @@ use iced::Task;
 use penguin_config::export::{Exported, to_surge};
 use penguin_config::import::{Imported, parse_surge};
 use penguin_config::schema::rule::RuleConfig;
-use penguin_ipc::schema::Request;
+use penguin_ipc::schema::{LogLevel, Request};
 
 use crate::app::App;
 use crate::app::message::{Message, SplitTunnelMessage};
@@ -122,7 +122,25 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             }
             Task::none()
         }
+        SplitTunnelMessage::DraftNetworkSelected(network) => {
+            if let Some(draft) = app.state_mut().split_tunnel.editor.as_mut() {
+                draft.network = network;
+            }
+            Task::none()
+        }
         SplitTunnelMessage::DraftSaved => save_draft(app),
+        SplitTunnelMessage::GeoIpSent(result) => {
+            if let Err(reason) = result {
+                // Повторится со следующим сохранением правил.
+                let state = app.state_mut();
+                state.split_tunnel.geoip_sent = false;
+                state.connection.push_log(
+                    LogLevel::Error,
+                    format!("{}: {reason}", crate::i18n::s().geoip_not_sent),
+                );
+            }
+            Task::none()
+        }
         SplitTunnelMessage::ImportRequested => import(app),
         SplitTunnelMessage::Imported(result) => imported(app, result),
         SplitTunnelMessage::ExportRequested => export(app),
@@ -139,6 +157,18 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             save_rules(app)
         }
     }
+}
+
+/// Передаёт службе базу GeoIP, если правилам она нужна; раз за запуск.
+pub fn send_geoip(app: &mut App) -> Task<Message> {
+    let state = app.state_mut();
+    if state.split_tunnel.geoip_sent || !crate::geoip::wanted(&state.config.routing.rules) {
+        return Task::none();
+    }
+    state.split_tunnel.geoip_sent = true;
+    Task::perform(crate::geoip::send_to_service(), |result| {
+        Message::SplitTunnel(SplitTunnelMessage::GeoIpSent(result))
+    })
 }
 
 fn probe(app: &App) -> Task<Message> {

@@ -11,6 +11,7 @@
 
 use iced::Element;
 use iced::theme::Palette;
+use penguin_core::network::Network;
 use penguin_ipc::schema::AppInfo;
 use uikit::layout::{Flex, gap};
 use uikit::tokens::type_scale;
@@ -44,7 +45,6 @@ pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     };
     let catches = Flex::col()
         .push_auto(tabs(draft, open))
-        .push_auto(ui::faint(palette, strings.sections_hint, type_scale::MICRO))
         .push_auto(body)
         .gap(gap::SM)
         .build();
@@ -56,6 +56,7 @@ pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
                 .build(),
         )
         .push_auto(catches)
+        .push_auto(section(palette, strings.traffic, traffic(draft)))
         .push_auto(section(palette, strings.action, actions(draft)))
         .push_auto(problem(state))
         .gap(gap::MD)
@@ -119,6 +120,27 @@ pub fn tab_label(draft: &Draft, section: Section) -> String {
         0 => format!("{name} · {}", strings.empty_means_any),
         count => format!("{name} · {count}"),
     }
+}
+
+/// Вид трафика: любой, TCP или UDP; выбранный — акцентом.
+fn traffic<'a>(draft: &Draft) -> Element<'a, Message> {
+    let choices = [
+        (None, crate::i18n::s().traffic_any),
+        (Some(Network::Tcp), "TCP"),
+        (Some(Network::Udp), "UDP"),
+    ];
+    let mut row = Flex::row();
+    for (network, label) in choices {
+        let variant = if network == draft.network {
+            ButtonVariant::Primary
+        } else {
+            ButtonVariant::Secondary
+        };
+        row = row.push_auto(ui::button(variant, label).on_press(Message::SplitTunnel(
+            SplitTunnelMessage::DraftNetworkSelected(network),
+        )));
+    }
+    row.gap(gap::SM).build()
 }
 
 /// Куда отправить: три кнопки, выбранная — акцентом; справа ответ окна.

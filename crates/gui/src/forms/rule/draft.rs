@@ -2,10 +2,12 @@
 //!
 //! Три раздела — приложения, адреса, порты — означают «и» (этот сайт у этого
 //! приложения; «или» утащило бы весь трафик приложения), внутри раздела — «или».
-//! Пустой раздел — «любые».
+//! Пустой раздел — «любые». Выбор TCP или UDP — ещё одно «и».
 
 use penguin_config::schema::rule::{Condition, Leaf, RuleAction, RuleConfig};
+use penguin_core::network::Network;
 
+use super::host::{HostKind, host_kind, marked_host, to_ascii};
 use crate::forms::addresses::{self, Kind};
 
 /// Что делает группа; свой тип, а не [`RuleAction`]: тому нужен профиль, списку — `Copy`.
@@ -75,6 +77,8 @@ pub struct Draft {
     pub hosts: Vec<String>,
     /// Порты и диапазоны (`443`, `27000-27100`).
     pub ports: Vec<String>,
+    /// Только TCP или только UDP; `None` — любой трафик.
+    pub network: Option<Network>,
     /// Что делать при совпадении.
     pub action: Action,
 }
@@ -110,12 +114,14 @@ impl Draft {
     /// поправили, а не потеряли.
     pub fn add(&mut self, raw: &str) -> String {
         let mut rest = Vec::new();
-        for token in addresses::tokens(raw) {
-            // `=точный.домен` и `*слово*` — только адреса, порта у них нет.
-            if token.starts_with(['=', '*']) {
-                match host_kind(token) {
-                    Some(_) => push_new(&mut self.hosts, token.to_ascii_lowercase()),
-                    None => rest.push(token),
+        for typed in addresses::tokens(raw) {
+            let ascii = to_ascii(typed);
+            let token = ascii.as_str();
+            // Пометки, зона и страна — только адреса, порта у них нет.
+            if let Some(marked) = marked_host(token) {
+                match marked {
+                    Some(value) => push_new(&mut self.hosts, value),
+                    None => rest.push(typed),
                 }
                 continue;
             }
@@ -135,7 +141,7 @@ impl Draft {
             });
             let port_ok = port.is_none_or(|port| addresses::parse(port).unknown.is_empty());
             if (host.is_none() && port.is_none()) || !host_ok || !port_ok {
-                rest.push(token);
+                rest.push(typed);
                 continue;
             }
             if let Some(host) = host {
@@ -156,7 +162,10 @@ impl Draft {
 
     /// Есть ли что сохранять.
     pub fn is_empty(&self) -> bool {
-        self.processes.is_empty() && self.hosts.is_empty() && self.ports.is_empty()
+        self.processes.is_empty()
+            && self.hosts.is_empty()
+            && self.ports.is_empty()
+            && self.network.is_none()
     }
 
     /// Собирает правило; `None` — условий нет, а такое совпало бы со всем.
@@ -167,18 +176,28 @@ impl Draft {
         }
 
         // Значения проверены при добавлении; вид каждого — по записи.
-        let mut by_kind: [Vec<String>; 4] = Default::default();
+        let (mut suffix, mut exact, mut keyword, mut network, mut country) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for host in &self.hosts {
-            if let Some((kind, value)) = host_kind(host) {
-                by_kind[kind as usize].push(value.to_owned());
-            }
+            let Some((kind, value)) = host_kind(host) else {
+                continue;
+            };
+            let bucket = match kind {
+                // Зона — тот же суффикс: `ru` ловит всё под `.ru`.
+                HostKind::Suffix | HostKind::Zone => &mut suffix,
+                HostKind::Exact => &mut exact,
+                HostKind::Keyword => &mut keyword,
+                HostKind::Network => &mut network,
+                HostKind::Country => &mut country,
+            };
+            bucket.push(value.to_owned());
         }
-        let [suffix, exact, keyword, network] = by_kind;
         let hosts: Vec<Leaf> = [
             Leaf::DomainSuffix(suffix),
             Leaf::Domain(exact),
             Leaf::DomainKeyword(keyword),
             Leaf::DestIp(network),
+            Leaf::GeoIp(country),
         ]
         .into_iter()
         .filter(|leaf| !leaf_is_empty(leaf))
@@ -193,7 +212,13 @@ impl Draft {
             ports.push(Leaf::DestPortRange(parsed.ranges));
         }
 
-        let mut sections: Vec<Condition> = [apps, hosts, ports]
+        let traffic: Vec<Leaf> = self
+            .network
+            .map(|network| Leaf::Network(vec![network.as_str().to_owned()]))
+            .into_iter()
+            .collect();
+
+        let mut sections: Vec<Condition> = [apps, hosts, ports, traffic]
             .into_iter()
             .filter_map(any_of)
             .collect();
@@ -219,48 +244,13 @@ impl Draft {
     }
 }
 
-/// Вид записи в разделе адресов. Порядок — номер в раскладке [`Draft::build`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HostKind {
-    /// `example.com` — домен и поддомены.
-    Suffix,
-    /// `=example.com` — только этот домен.
-    Exact,
-    /// `*word*` — домен, в котором есть слово.
-    Keyword,
-    /// Адрес или подсеть.
-    Network,
-}
-
-/// Вид записи и значение без пометок; `None` — не адрес.
-pub fn host_kind(value: &str) -> Option<(HostKind, &str)> {
-    if let Some(name) = value.strip_prefix('=') {
-        return (addresses::classify(name) == Some(Kind::Domain))
-            .then_some((HostKind::Exact, name));
-    }
-    if let Some(word) = value
-        .strip_prefix('*')
-        .and_then(|rest| rest.strip_suffix('*'))
-    {
-        let valid = !word.is_empty()
-            && word
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '.');
-        return valid.then_some((HostKind::Keyword, word));
-    }
-    match addresses::classify(value) {
-        Some(Kind::Domain) => Some((HostKind::Suffix, value)),
-        Some(Kind::Network) => Some((HostKind::Network, value)),
-        _ => None,
-    }
-}
-
 fn leaf_is_empty(leaf: &Leaf) -> bool {
     match leaf {
         Leaf::DomainSuffix(values)
         | Leaf::Domain(values)
         | Leaf::DomainKeyword(values)
-        | Leaf::DestIp(values) => values.is_empty(),
+        | Leaf::DestIp(values)
+        | Leaf::GeoIp(values) => values.is_empty(),
         _ => false,
     }
 }
@@ -409,6 +399,54 @@ mod tests {
                 ]
             }
         );
+    }
+
+    #[test]
+    fn zones_and_countries_become_their_conditions() {
+        let mut draft = draft();
+        assert_eq!(draft.add(".RU .рф ru qq .su:443"), "qq, .su:443");
+        assert_eq!(draft.hosts, [".ru", ".xn--p1ai", "RU"]);
+
+        let rule = draft.build("r1").expect("собирается");
+        assert_eq!(
+            rule.when,
+            Condition::Any {
+                any: vec![
+                    Condition::Leaf(Leaf::DomainSuffix(vec![
+                        "ru".to_owned(),
+                        "xn--p1ai".to_owned()
+                    ])),
+                    Condition::Leaf(Leaf::GeoIp(vec!["RU".to_owned()])),
+                ]
+            }
+        );
+    }
+
+    #[test]
+    fn cyrillic_domains_are_stored_in_ascii() {
+        let mut draft = draft();
+        assert_eq!(draft.add("Яндекс.рф =пример.рф"), "");
+        assert_eq!(
+            draft.hosts,
+            ["xn--d1acpjx3f.xn--p1ai", "=xn--e1afmkfd.xn--p1ai"]
+        );
+    }
+
+    #[test]
+    fn traffic_kind_is_one_more_and() {
+        let mut draft = draft();
+        draft.network = Some(Network::Udp);
+        assert!(!draft.is_empty(), "«весь UDP» — тоже группа");
+        assert_eq!(
+            draft.build("r1").expect("собирается").when,
+            Condition::Leaf(Leaf::Network(vec!["udp".to_owned()]))
+        );
+
+        draft.add("27000-27100");
+        let Condition::All { all } = draft.build("r1").expect("собирается").when else {
+            panic!("вид трафика обязан означать «и»");
+        };
+        assert_eq!(all.len(), 2);
     }
 
     #[test]

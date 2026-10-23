@@ -342,12 +342,18 @@ pub struct Strings {
     pub ports_hint: &'static str,
     /// Пустой раздел не сужает группу.
     pub empty_means_any: &'static str,
-    /// Разделы группы значат «и».
-    pub sections_hint: &'static str,
     /// Пометка `=домен` в списке адресов.
     pub host_exact: &'static str,
     /// Пометка `*слово*` в списке адресов.
     pub host_keyword: &'static str,
+    /// Пометка `.зона` в списке адресов.
+    pub host_zone: &'static str,
+    /// Пометка кода страны в списке адресов.
+    pub host_country: &'static str,
+    /// Любой вид трафика.
+    pub traffic_any: &'static str,
+    /// База GeoIP не дошла до службы.
+    pub geoip_not_sent: &'static str,
     /// В разделе адресов или портов пусто.
     pub values_empty: &'static str,
     /// Набранного в разделе нет.
@@ -663,9 +669,12 @@ mod tests {
                 table.ports_section,
                 table.ports_hint,
                 table.empty_means_any,
-                table.sections_hint,
                 table.host_exact,
                 table.host_keyword,
+                table.host_zone,
+                table.host_country,
+                table.traffic_any,
+                table.geoip_not_sent,
                 table.values_empty,
                 table.values_not_found,
                 table.add_rule,

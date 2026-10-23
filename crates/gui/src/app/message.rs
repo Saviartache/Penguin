@@ -3,6 +3,7 @@
 use penguin_config::import::Imported;
 use penguin_config::schema::profile::Profile;
 use penguin_config::schema::routing::TunnelMode;
+use penguin_core::network::Network;
 use penguin_ipc::schema::{Event, Response};
 
 use crate::forms::rule::{Action as DraftAction, Section as DraftSection};
@@ -290,8 +291,12 @@ pub enum SplitTunnelMessage {
     DraftValueRemoved(String),
     /// Выбрано действие группы.
     DraftActionSelected(DraftAction),
+    /// Выбран вид трафика группы; `None` — любой.
+    DraftNetworkSelected(Option<Network>),
     /// Группа добавлена в список или заменила прежнюю.
     DraftSaved,
+    /// База GeoIP передана службе (или причина отказа).
+    GeoIpSent(Result<(), String>),
     /// Показать окно выбора списка правил.
     ImportRequested,
     /// Разобранный список; `Ok(None)` — окно закрыто без выбора.

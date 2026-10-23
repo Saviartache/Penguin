@@ -220,7 +220,7 @@ mod tests {
             { "id": "r1", "name": "LAN", "when": { "dest_ip": ["10.0.0.0/8"] }, "action": "direct" },
             { "id": "r2", "name": "Steam",
               "when": { "process_path": ["c:/steam/steam.exe"] }, "action": "tunnel" },
-            { "id": "r3", "name": "Руками", "when": { "geo_ip": ["RU"] }, "action": "block" }
+            { "id": "r3", "name": "Руками", "when": { "process_name": ["steam.exe"] }, "action": "block" }
         ]))
         .expect("правила разбираются")
     }

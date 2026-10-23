@@ -43,6 +43,10 @@ pub enum EngineError {
     /// Ошибка ввода-вывода.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// База GeoIP не открылась.
+    #[error("{0}")]
+    GeoIp(String),
 }
 
 impl EngineError {
@@ -53,7 +57,7 @@ impl EngineError {
             Self::Protocol(err) => !err.is_retryable(),
             Self::Tun(err) => err.needs_user_action(),
             Self::Platform(err) => err.needs_privileges(),
-            Self::Dns(_) | Self::Inbound(_) | Self::Io(_) => false,
+            Self::Dns(_) | Self::Inbound(_) | Self::Io(_) | Self::GeoIp(_) => false,
         }
     }
 }

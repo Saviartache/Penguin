@@ -347,6 +347,8 @@ pub struct SplitTunnelState {
     pub pick_error: Option<String>,
     /// Итог последнего импорта или экспорта; показывается над таблицей.
     pub import_report: Option<String>,
+    /// База GeoIP передана службе за этот запуск или передаётся.
+    pub geoip_sent: bool,
 }
 
 /// Экран серверов.

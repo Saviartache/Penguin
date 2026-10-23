@@ -24,10 +24,6 @@ pub enum RouterError {
     /// Условие этой сборкой не поддерживается.
     #[error("условие не поддерживается: {0}")]
     Unsupported(&'static str),
-
-    /// Правило требует GeoIP, а база не загружена.
-    #[error("правило требует базу GeoIP, но она не загружена")]
-    MissingGeoIp,
 }
 
 impl RouterError {

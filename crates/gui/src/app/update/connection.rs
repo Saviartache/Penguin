@@ -65,7 +65,10 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
             state.config = *config;
             state.saved = state.config.clone();
             state.dirty = false;
-            return crate::app::update::profiles::locate_countries(app);
+            return Task::batch([
+                crate::app::update::profiles::locate_countries(app),
+                crate::app::update::rules::send_geoip(app),
+            ]);
         }
         Response::Explanation(explanation) => {
             state.split_tunnel.probe_result = Some(*explanation);

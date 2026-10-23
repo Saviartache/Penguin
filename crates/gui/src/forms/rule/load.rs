@@ -1,10 +1,11 @@
 //! Обратный путь: правило из набора — в черновик формы.
 //!
-//! Форма умеет только «приложения и адреса и порты». Правило, написанное в файле
-//! руками (`not`, вложенные `any`, имя процесса, страна), формой не открывается:
-//! сохранение молча выбросило бы непонятое.
+//! Форма умеет только «приложения и адреса и порты и вид трафика». Правило,
+//! написанное в файле руками (`not`, вложенные `any`, имя процесса), формой не
+//! открывается: сохранение молча выбросило бы непонятое.
 
 use penguin_config::schema::rule::{Condition, Leaf, RuleAction, RuleConfig};
+use penguin_core::network::Network;
 
 use super::draft::{Action, Draft, Section};
 
@@ -24,6 +25,13 @@ pub fn load(index: usize, rule: &RuleConfig) -> Option<Draft> {
 
     let mut seen = Vec::new();
     for part in parts {
+        if let Condition::Leaf(Leaf::Network(names)) = part {
+            if draft.network.is_some() {
+                return None;
+            }
+            draft.network = Some(network_of(names)?);
+            continue;
+        }
         let leaves = leaves_of(part)?;
         let section = section_of(leaves.first()?)?;
         // Два раздела одного вида через «и» форма не покажет.
@@ -47,6 +55,14 @@ fn action_of(action: &RuleAction) -> Option<Action> {
     }
 }
 
+/// Один вид трафика; «TCP или UDP» — это любой, и форма такого не пишет.
+fn network_of(names: &[String]) -> Option<Network> {
+    match names {
+        [name] => name.parse().ok(),
+        _ => None,
+    }
+}
+
 /// Лист или «или» из листьев.
 fn leaves_of(condition: &Condition) -> Option<Vec<&Leaf>> {
     match condition {
@@ -65,9 +81,11 @@ fn leaves_of(condition: &Condition) -> Option<Vec<&Leaf>> {
 fn section_of(leaf: &Leaf) -> Option<Section> {
     match leaf {
         Leaf::ProcessPath(_) => Some(Section::Apps),
-        Leaf::DomainSuffix(_) | Leaf::Domain(_) | Leaf::DomainKeyword(_) | Leaf::DestIp(_) => {
-            Some(Section::Hosts)
-        }
+        Leaf::DomainSuffix(_)
+        | Leaf::Domain(_)
+        | Leaf::DomainKeyword(_)
+        | Leaf::DestIp(_)
+        | Leaf::GeoIp(_) => Some(Section::Hosts),
         Leaf::DestPort(_) | Leaf::DestPortRange(_) => Some(Section::Ports),
         _ => None,
     }
@@ -77,10 +95,18 @@ fn section_of(leaf: &Leaf) -> Option<Section> {
 fn absorb(draft: &mut Draft, leaf: &Leaf) {
     match leaf {
         Leaf::ProcessPath(paths) => draft.processes.extend(paths.iter().cloned()),
-        Leaf::DomainSuffix(values) | Leaf::DestIp(values) => {
-            draft.hosts.extend(values.iter().cloned());
-        }
-        // Пометки вида — те же, что вписывают руками (`draft::host_kind`).
+        Leaf::DestIp(values) => draft.hosts.extend(values.iter().cloned()),
+        // Пометки вида — те же, что вписывают руками (`host::host_kind`).
+        Leaf::DomainSuffix(values) => draft.hosts.extend(values.iter().map(|name| {
+            if name.contains('.') {
+                name.clone()
+            } else {
+                format!(".{name}")
+            }
+        })),
+        Leaf::GeoIp(codes) => draft
+            .hosts
+            .extend(codes.iter().map(|code| code.trim().to_ascii_uppercase())),
         Leaf::Domain(values) => draft
             .hosts
             .extend(values.iter().map(|name| format!("={name}"))),
@@ -115,11 +141,36 @@ mod tests {
             processes: vec!["c:/chrome.exe".to_owned()],
             hosts: vec!["youtube.com".to_owned(), "10.0.0.0/8".to_owned()],
             ports: vec!["443".to_owned(), "8000-9000".to_owned()],
+            network: Some(Network::Tcp),
             action: Action::Direct,
         };
         let built = draft.build("r1").expect("собирается");
 
         assert_eq!(load(2, &built), Some(draft));
+    }
+
+    #[test]
+    fn zones_and_countries_open_with_their_marks() {
+        let written = rule(json!({
+            "id": "r1", "name": "Россия",
+            "when": { "any": [
+                { "domain_suffix": ["ru", "xn--p1ai"] },
+                { "geo_ip": ["ru"] }
+            ] },
+            "action": "direct"
+        }));
+        let draft = load(0, &written).expect("форма открывает");
+        assert_eq!(draft.hosts, [".ru", ".xn--p1ai", "RU"]);
+    }
+
+    #[test]
+    fn traffic_both_ways_is_not_opened() {
+        let written = rule(json!({
+            "id": "r1",
+            "when": { "network": ["tcp", "udp"] },
+            "action": "direct"
+        }));
+        assert!(load(0, &written).is_none());
     }
 
     /// Импорт Surge даёт точные домены и слова — форма открывает их и

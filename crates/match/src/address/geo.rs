@@ -69,13 +69,14 @@ impl<'a> Record<'a> {
 /// Условие «адрес принадлежит одной из стран».
 #[derive(Debug)]
 pub struct GeoIpSet {
-    database: GeoIpDatabase,
+    database: Option<GeoIpDatabase>,
     countries: Vec<String>,
 }
 
 impl GeoIpSet {
-    /// Собирает условие.
-    pub fn new<I, S>(database: GeoIpDatabase, countries: I) -> Self
+    /// Собирает условие; без базы оно не совпадает ни с чем, но набор правил
+    /// собирается: база приезжает к службе позже настроек.
+    pub fn new<I, S>(database: Option<GeoIpDatabase>, countries: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -92,17 +93,20 @@ impl GeoIpSet {
 
 impl Matcher for GeoIpSet {
     fn matches(&self, target: &MatchTarget<'_>) -> bool {
-        let Some(country) = target
-            .destination_ip
-            .and_then(|ip| self.database.country_of(ip))
-        else {
+        let (Some(database), Some(ip)) = (&self.database, target.destination_ip) else {
             return false;
         };
-        self.countries.contains(&country)
+        database
+            .country_of(ip)
+            .is_some_and(|country| self.countries.contains(&country))
     }
 
     fn describe(&self) -> String {
-        format!("страна в [{}]", self.countries.join(", "))
+        let countries = self.countries.join(", ");
+        match self.database {
+            Some(_) => format!("страна в [{countries}]"),
+            None => format!("страна в [{countries}] (база GeoIP не загружена)"),
+        }
     }
 }
 
@@ -133,6 +137,13 @@ mod tests {
             Some("NL")
         );
         assert_eq!(code_of(r#"{"continent":{"code":"EU"}}"#), None);
+    }
+
+    #[test]
+    fn without_a_database_nothing_matches() {
+        let set = GeoIpSet::new(None, ["RU"]);
+        assert!(!set.matches(&crate::test_support::target()));
+        assert!(set.describe().contains("не загружена"));
     }
 
     #[test]

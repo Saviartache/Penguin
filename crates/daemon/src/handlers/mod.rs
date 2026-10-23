@@ -4,6 +4,7 @@
 //! отделены от типов движка, т.к. демон и интерфейс обновляются раздельно.
 
 pub mod diagnostics;
+pub mod geoip;
 pub mod processes;
 pub mod profiles;
 pub mod rules;
@@ -91,6 +92,18 @@ impl Handler for DaemonHandler {
             } => rules::explain(&self.engine, &destination, process.as_deref(), udp),
 
             Request::ListProcesses => processes::list(),
+
+            Request::PutGeoIp {
+                offset,
+                total,
+                data,
+            } => geoip::put(
+                &self.engine,
+                &self.store.paths().geoip_file(),
+                offset,
+                total,
+                &data,
+            ),
 
             // Обрабатывается сервером
             Request::Subscribe => Response::Ok,

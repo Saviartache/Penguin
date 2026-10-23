@@ -62,7 +62,23 @@ pub enum Request {
 
     /// Опустить тоннель и выйти (в отличие от [`Self::Disconnect`]); служба останавливает себя сама.
     Shutdown,
+
+    /// Кусок базы GeoIP: служба не читает каталог пользователя, куда её качает окно.
+    /// Куски идут по порядку; последний заменяет базу службы целиком.
+    PutGeoIp {
+        /// С какого байта кусок; `0` начинает передачу заново.
+        offset: u64,
+        /// Размер всей базы.
+        total: u64,
+        /// Байты куска, не длиннее [`GEOIP_CHUNK`].
+        #[serde(with = "super::hex")]
+        data: Vec<u8>,
+    },
 }
+
+/// Наибольший кусок базы GeoIP: в hex он вдвое длиннее и обязан влезть в
+/// [`crate::codec::MAX_MESSAGE`].
+pub const GEOIP_CHUNK: usize = 256 * 1024;
 
 impl Request {
     /// Меняет ли запрос состояние системы; только такие пишутся в журнал.
@@ -83,6 +99,7 @@ impl Request {
                 | Self::Shutdown
                 | Self::Probe { .. }
                 | Self::ListProcesses
+                | Self::PutGeoIp { .. }
         )
     }
 
@@ -100,6 +117,7 @@ impl Request {
             Self::Probe { .. } => "probe",
             Self::Subscribe => "subscribe",
             Self::Shutdown => "shutdown",
+            Self::PutGeoIp { .. } => "put_geoip",
         }
     }
 }
@@ -152,6 +170,19 @@ mod tests {
         ] {
             assert!(!request.name().is_empty());
         }
+    }
+
+    #[test]
+    fn the_largest_geoip_chunk_fits_one_message() {
+        let request = Request::PutGeoIp {
+            offset: 0,
+            total: GEOIP_CHUNK as u64,
+            data: vec![0xff; GEOIP_CHUNK],
+        };
+        let json = serde_json::to_vec(&request).expect("сериализуется");
+        assert!(json.len() <= crate::codec::MAX_MESSAGE);
+        let back: Request = serde_json::from_slice(&json).expect("разбирается");
+        assert_eq!(back, request);
     }
 
     #[test]

@@ -14,6 +14,7 @@ use uikit::widgets::{ButtonVariant, TextInput};
 
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::state::State;
+use crate::forms::punycode::to_unicode;
 use crate::forms::rule::{Draft, HostKind, Section, host_kind};
 use crate::screens::table;
 use crate::ui;
@@ -80,12 +81,16 @@ pub fn view<'a>(
 
 /// Строка значения с кнопкой «убрать».
 fn row<'a>(palette: &Palette, value: &'a str) -> Element<'a, Message> {
-    // Пометка вида (`=`, `*…*`) — для ввода; в списке вид сказан словами.
+    // Пометка вида (`=`, `*…*`, `.`) — для ввода; в списке вид сказан словами,
+    // а имя `xn--…` — кириллицей, как его вписали.
     let strings = crate::i18n::s();
     let (shown, kind) = match host_kind(value) {
-        Some((HostKind::Exact, name)) => (name, Some(strings.host_exact)),
-        Some((HostKind::Keyword, word)) => (word, Some(strings.host_keyword)),
-        _ => (value, None),
+        Some((HostKind::Exact, name)) => (to_unicode(name), Some(strings.host_exact)),
+        Some((HostKind::Keyword, word)) => (word.to_owned(), Some(strings.host_keyword)),
+        Some((HostKind::Zone, zone)) => (format!(".{}", to_unicode(zone)), Some(strings.host_zone)),
+        Some((HostKind::Country, code)) => (code.to_owned(), Some(strings.host_country)),
+        Some((HostKind::Suffix, name)) => (to_unicode(name), None),
+        _ => (value.to_owned(), None),
     };
 
     let mut line = Flex::row().push_auto(text(shown).size(type_scale::BODY));

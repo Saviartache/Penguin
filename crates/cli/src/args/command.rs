@@ -151,9 +151,6 @@ fn geoip(mut lx: Lexer) -> Result<Parsed<Vec<String>>, ArgsError> {
     if wanted {
         return Ok(Parsed::Print(help::GEOIP));
     }
-    if servers.is_empty() {
-        return Err(ArgsError::MissingArgument("<СЕРВЕР>"));
-    }
     Ok(Parsed::Run(servers))
 }
 
@@ -600,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn geoip_takes_one_or_more_servers() {
+    fn geoip_takes_any_number_of_servers() {
         assert_eq!(
             run(&["geoip", "example.com:443", "203.0.113.5:51820"]),
             Ok(Command::Geoip(vec![
@@ -608,7 +605,7 @@ mod tests {
                 "203.0.113.5:51820".to_owned()
             ]))
         );
-        assert_eq!(run(&["geoip"]), Err(ArgsError::MissingArgument("<СЕРВЕР>")));
+        assert_eq!(run(&["geoip"]), Ok(Command::Geoip(Vec::new())));
     }
 
     #[test]

@@ -15,7 +15,8 @@ workspace = true
 penguin-core.workspace = true
 penguin-config.workspace = true
 penguin-proto.workspace = true
-penguin-router.workspace = true
+penguin-router = { workspace = true, features = ["geo"] }
+penguin-match = { workspace = true, features = ["geo"] }
 penguin-process.workspace = true
 penguin-netstack.workspace = true
 penguin-inbound.workspace = true

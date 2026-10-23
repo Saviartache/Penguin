@@ -3,6 +3,7 @@
 //! конец, удалять и переименовывать нельзя.
 
 pub mod event;
+mod hex;
 pub mod request;
 pub mod response;
 

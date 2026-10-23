@@ -116,11 +116,9 @@ fn compile_leaf(leaf: &Leaf, ctx: &CompileContext) -> RouterResult<Box<dyn Match
 
 #[cfg(feature = "geo")]
 fn compile_geoip(countries: &[String], ctx: &CompileContext) -> RouterResult<Box<dyn Matcher>> {
-    let Some(database) = ctx.geoip.clone() else {
-        return Err(RouterError::MissingGeoIp);
-    };
     Ok(Box::new(penguin_match::address::geo::GeoIpSet::new(
-        database, countries,
+        ctx.geoip.clone(),
+        countries,
     )))
 }
 

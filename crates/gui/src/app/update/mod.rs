@@ -140,9 +140,12 @@ pub fn save_rules(app: &mut App) -> Task<Message> {
 
     app.state_mut().saved = config.clone();
     app.state_mut().dirty = false;
-    request(Request::SetConfig {
-        config: Box::new(config),
-    })
+    Task::batch([
+        request(Request::SetConfig {
+            config: Box::new(config),
+        }),
+        rules::send_geoip(app),
+    ])
 }
 
 /// Отправляет запрос; ошибка связи становится ответом об ошибке.
