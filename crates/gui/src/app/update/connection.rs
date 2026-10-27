@@ -65,7 +65,9 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
             state.config = *config;
             state.saved = state.config.clone();
             state.dirty = false;
+            let autoconnect = autoconnect(state);
             return Task::batch([
+                autoconnect,
                 crate::app::update::profiles::locate_countries(app),
                 crate::app::update::rules::send_geoip(app),
             ]);
@@ -88,6 +90,30 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
         Response::Error { message, .. } => state.connection.push_log(LogLevel::Error, message),
     }
     Task::none()
+}
+
+/// Подключается при запуске окна, если так настроено; один раз за запуск.
+///
+/// Решает окно, а не служба: служба стоит на автозапуске, и, подключаясь сама,
+/// она поднимала бы тоннель при загрузке системы — до того, как программу вообще
+/// запустили.
+fn autoconnect(state: &mut crate::app::state::State) -> Task<Message> {
+    if take_autoconnect(state) {
+        request(Request::Connect { profile: None })
+    } else {
+        Task::none()
+    }
+}
+
+/// Подключаться ли; отмечает автоподключение сработавшим, чтобы второй ответ
+/// с настройками не поднимал тоннель заново.
+fn take_autoconnect(state: &mut crate::app::state::State) -> bool {
+    if state.connection.autoconnected || !state.config.app.autoconnect {
+        return false;
+    }
+    state.connection.autoconnected = true;
+    // Поднятый тоннель — не повод подключаться заново.
+    matches!(state.connection.tunnel, TunnelState::Disconnected)
 }
 
 fn handle_event(app: &mut App, event: Event) -> Task<Message> {
@@ -684,6 +710,30 @@ mod tests {
         let _ = handle_home(&mut app, HomeMessage::ToggleConnection);
         assert!(!app.state().connection.starting);
         assert_eq!(app.state().connection.log.len(), before);
+    }
+
+    #[test]
+    fn autoconnect_fires_once_and_only_when_asked() {
+        let mut state = crate::app::state::State::default();
+        assert!(!state.config.app.autoconnect);
+        assert!(!take_autoconnect(&mut state), "выключенное не подключается");
+
+        state.config.app.autoconnect = true;
+        assert!(take_autoconnect(&mut state));
+        assert!(!take_autoconnect(&mut state), "второй раз за запуск — нет");
+    }
+
+    #[test]
+    fn autoconnect_leaves_a_raised_tunnel_alone() {
+        let mut state = crate::app::state::State::default();
+        state.config.app.autoconnect = true;
+        state.connection.set_tunnel(TunnelState::Connected {
+            profile: penguin_core::id::ProfileId::new("home"),
+            uptime_secs: 1,
+        });
+
+        assert!(!take_autoconnect(&mut state));
+        assert!(state.connection.autoconnected, "попытка уже израсходована");
     }
 
     #[test]

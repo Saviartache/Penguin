@@ -65,7 +65,6 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
     // свой адаптер узнаём по адресу из настроек
     penguin_platform::leftovers::recover(config.network.tun.ipv4);
 
-    let autoconnect = config.app.autoconnect;
     let engine = Engine::new(config).context("не удалось собрать движок")?;
     // Без базы правила по странам молчат, пока окно её не пришлёт
     let geoip = store.paths().geoip_file();
@@ -76,22 +75,8 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
     }
     let handler = DaemonHandler::new(Arc::clone(&engine), Arc::new(store), cancel.clone());
 
-    // В фоне, чтобы канал управления открылся сразу
-    if autoconnect {
-        let engine = Arc::clone(&engine);
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => {},
-                result = engine.autoconnect() => {
-                    if let Err(err) = result {
-                        tracing::warn!(%err, "автоподключение не удалось");
-                    }
-                }
-            }
-        });
-    }
+    // Автоподключение — забота клиента: служба стоит на автозапуске, и, поднимая
+    // тоннель сама, она делала бы это при загрузке системы, до запуска программы.
 
     let server = Server::new(handler);
     let result = server.serve_with_listener(listener, cancel.clone()).await;
