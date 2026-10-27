@@ -32,7 +32,10 @@ pub const TITLE: &str = "Ostriacki Pingwin";
 pub const COMPACT: Size = Size::new(360.0, 400.0);
 
 /// Размер содержимого с раскрытой панелью.
-pub const EXPANDED: Size = Size::new(800.0, 600.0);
+///
+/// Высота — по самому высокому модальному окну (группа правил): в 600 его форма
+/// не влезала, и нижний ряд кнопок сминало до высоты в несколько точек.
+pub const EXPANDED: Size = Size::new(880.0, 660.0);
 
 /// Отступ от края окна до содержимого.
 pub const PAGE_PADDING: f32 = 16.0;
