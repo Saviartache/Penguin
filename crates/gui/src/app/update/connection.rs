@@ -427,10 +427,23 @@ async fn elevated_service(arguments: &'static [&'static str]) -> ServiceOutcome 
     match asked {
         Ok(Ok(true)) => RIGHTS_GRANTED.store(true, Ordering::Release),
         Ok(Ok(false)) => return ServiceOutcome::Refused,
-        Ok(Err(err)) => return ServiceOutcome::Failed(err.to_string()),
+        Ok(Err(err)) => return late_service(err.to_string()).await,
         Err(err) => return ServiceOutcome::Failed(err.to_string()),
     }
     wait_for_service().await
+}
+
+/// Команда с правами упала, но могла успеть запустить службу (та поднялась позже срока):
+/// отвечающая служба — не повод спрашивать пароль второй раз.
+async fn late_service(reason: String) -> ServiceOutcome {
+    match wait_for_service().await {
+        ServiceOutcome::Ready => {
+            tracing::warn!(%reason, "служба поднялась после ошибки команды");
+            RIGHTS_GRANTED.store(true, Ordering::Release);
+            ServiceOutcome::Ready
+        }
+        _ => ServiceOutcome::Failed(reason),
+    }
 }
 
 /// Ждёт ответа службы: канал открывается не мгновенно, а принятое соединение — ещё не ответ.

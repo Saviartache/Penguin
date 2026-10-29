@@ -50,7 +50,15 @@ pub fn start() -> PlatformResult<()> {
     if report()?.is_none() {
         bootstrap()?;
     }
-    run(&["kickstart", TARGET])
+    match command::run(LAUNCHCTL, &["kickstart", TARGET]) {
+        Ok(_) => Ok(()),
+        // Прежнее задание выгрузилось между `print` и `kickstart` (перезапуск после `bootout`).
+        Err(err) if launchd::absent(err.code()) => {
+            bootstrap()?;
+            run(&["kickstart", TARGET])
+        }
+        Err(err) => Err(err.into_error(PlatformError::Service, "service management")),
+    }
 }
 
 /// Выгружает задание штатно; игнорируется только отсутствие.
