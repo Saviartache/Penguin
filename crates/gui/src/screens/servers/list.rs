@@ -6,7 +6,7 @@
 //! выбора, «нет ответа» значит «этот не трогай». Флаг страны — картинка
 //! ([`crate::flags`]); пока страна неизвестна, место под него пустое.
 
-use iced::widget::{Space, button};
+use iced::widget::{Space, button, mouse_area};
 use iced::{Alignment, Element, Length};
 use penguin_config::schema::profile::Profile;
 use penguin_core::id::ProfileId;
@@ -158,7 +158,7 @@ fn found(profile: &Profile, query: &str) -> bool {
     )
 }
 
-/// Строка профиля: сама выбирает, кнопка справа открывает правку.
+/// Строка профиля: сама выбирает, кнопка справа открывает правку, ПКМ удаляет.
 fn row<'a>(
     state: &'a State,
     profile: &'a Profile,
@@ -210,7 +210,7 @@ fn row<'a>(
         select = select.on_press(Message::Servers(ServersMessage::Select(id.clone())));
     }
 
-    Flex::row()
+    let line = Flex::row()
         .push(select)
         .push_auto(table::action(
             crate::i18n::s().ping,
@@ -220,11 +220,16 @@ fn row<'a>(
         .push_auto(table::action(
             crate::i18n::s().edit,
             ACTION_WIDTH,
-            Message::Servers(ServersMessage::EditorOpened(id)),
+            Message::Servers(ServersMessage::EditorOpened(id.clone())),
         ))
         .gap(gap::NONE)
         .align(Alignment::Center)
-        .build()
+        .build();
+
+    // ПКМ удаляет сразу, минуя редактор.
+    mouse_area(line)
+        .on_right_press(Message::Servers(ServersMessage::Removed(id)))
+        .into()
 }
 
 /// Ряд ячеек — общий для шапки и строк, чтобы столбцы не разъезжались.
