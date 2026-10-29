@@ -24,6 +24,9 @@ pub fn pump_data(socket: &mut tcp::Socket<'_>, entry: &mut Entry) {
 
 /// От сокета к движку; задержанный блок идёт первым, иначе в потоке будет дыра.
 fn from_socket(socket: &mut tcp::Socket<'_>, entry: &mut Entry) {
+    let Some(to_engine) = &entry.ends.to_engine else {
+        return;
+    };
     loop {
         let chunk = match entry.to_engine.take() {
             Some(chunk) => chunk,
@@ -38,10 +41,16 @@ fn from_socket(socket: &mut tcp::Socket<'_>, entry: &mut Entry) {
                 }
                 chunk
             }
-            None => break,
+            None => {
+                // Без этого полузакрытое соединение висит в CLOSE_WAIT, а поток к серверу — открытым.
+                if peer_finished(socket.state()) {
+                    entry.ends.to_engine = None;
+                }
+                break;
+            }
         };
 
-        match entry.ends.to_engine.try_send(chunk) {
+        match to_engine.try_send(chunk) {
             Ok(()) => {}
             // Блок остаётся у нас: окно TCP закроется — это и есть обратное давление.
             Err(mpsc::error::TrySendError::Full(chunk)) => {
@@ -51,6 +60,14 @@ fn from_socket(socket: &mut tcp::Socket<'_>, entry: &mut Entry) {
             Err(mpsc::error::TrySendError::Closed(_)) => break,
         }
     }
+}
+
+/// Сторона сокета прислала `FIN`: данных от неё больше не будет.
+fn peer_finished(state: tcp::State) -> bool {
+    matches!(
+        state,
+        tcp::State::CloseWait | tcp::State::LastAck | tcp::State::Closing | tcp::State::TimeWait
+    )
 }
 
 /// От движка к сокету; частичная запись оставляет хвост до следующего оборота.

@@ -41,8 +41,9 @@ pub struct TcpConnection {
 
 /// Концы очередей, остающиеся в цикле опроса.
 pub struct ConnectionEnds {
-    /// Куда цикл кладёт данные, пришедшие от приложения.
-    pub to_engine: mpsc::Sender<Bytes>,
+    /// Куда цикл кладёт данные, пришедшие от приложения; `None` — сторона сокета прислала `FIN`,
+    /// и движок увидел конец потока.
+    pub to_engine: Option<mpsc::Sender<Bytes>>,
     /// Откуда цикл забирает данные для приложения.
     pub from_engine: mpsc::Receiver<Bytes>,
     /// Движок оборвал соединение: стороне сокета уходит `RST`.
@@ -77,7 +78,7 @@ impl TcpConnection {
         (
             connection,
             ConnectionEnds {
-                to_engine,
+                to_engine: Some(to_engine),
                 from_engine,
                 aborted,
             },
@@ -200,6 +201,8 @@ mod tests {
         let (mut connection, ends) = TcpConnection::new(source, destination);
 
         ends.to_engine
+            .as_ref()
+            .expect("очередь открыта")
             .send(Bytes::from_static(b"hello"))
             .await
             .expect("отправлено");
@@ -216,6 +219,8 @@ mod tests {
         let (mut connection, ends) = TcpConnection::new(source, destination);
 
         ends.to_engine
+            .as_ref()
+            .expect("очередь открыта")
             .send(Bytes::from(vec![7u8; 100]))
             .await
             .expect("отправлено");

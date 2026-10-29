@@ -24,24 +24,28 @@ struct Pipe {
     outbox: mpsc::UnboundedSender<BytesMut>,
     inbox: Mutex<mpsc::UnboundedReceiver<BytesMut>>,
     mtu: u16,
+    /// Теряется каждый такой пакет; 0 — без потерь.
+    lose_every: u64,
+    sent: std::sync::atomic::AtomicU64,
 }
 
 /// Труба: то, что один конец отправил, другой получает.
 fn pipe(mtu: u16) -> (Pipe, Pipe) {
+    lossy_pipe(mtu, 0)
+}
+
+/// Труба, теряющая каждый `lose_every`-й пакет в обе стороны.
+fn lossy_pipe(mtu: u16, lose_every: u64) -> (Pipe, Pipe) {
     let (left_tx, left_rx) = mpsc::unbounded_channel();
     let (right_tx, right_rx) = mpsc::unbounded_channel();
-    (
-        Pipe {
-            outbox: right_tx,
-            inbox: Mutex::new(left_rx),
-            mtu,
-        },
-        Pipe {
-            outbox: left_tx,
-            inbox: Mutex::new(right_rx),
-            mtu,
-        },
-    )
+    let end = |outbox, inbox| Pipe {
+        outbox,
+        inbox: Mutex::new(inbox),
+        mtu,
+        lose_every,
+        sent: std::sync::atomic::AtomicU64::new(0),
+    };
+    (end(right_tx, left_rx), end(left_tx, right_rx))
 }
 
 #[async_trait::async_trait]
@@ -64,6 +68,10 @@ impl TunDevice for Pipe {
     }
 
     async fn send(&self, packet: &[u8]) -> TunResult<()> {
+        let sent = self.sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if self.lose_every != 0 && sent.is_multiple_of(self.lose_every) {
+            return Ok(());
+        }
         self.outbox
             .send(BytesMut::from(packet))
             .map_err(|_| TunError::Closed)
@@ -92,7 +100,14 @@ fn target() -> SocketAddr {
 fn both_stacks(
     cancel: &CancellationToken,
 ) -> (outgoing::OutgoingHandles, penguin_netstack::StackHandles) {
-    let (left, right) = pipe(1420);
+    stacks_over(pipe(1420), cancel)
+}
+
+/// Поднимает оба стека на данной трубе.
+fn stacks_over(
+    (left, right): (Pipe, Pipe),
+    cancel: &CancellationToken,
+) -> (outgoing::OutgoingHandles, penguin_netstack::StackHandles) {
     let out = outgoing::spawn(Box::new(left), outgoing_config(), cancel.clone());
     let inbound = penguin_netstack::spawn(
         Box::new(right),
@@ -278,5 +293,64 @@ async fn a_v6_destination_without_a_v6_address_fails_at_once() {
         .expect_err("адреса нет");
 
     assert_eq!(error, outgoing::ConnectError::NoAddress(destination));
+    cancel.cancel();
+}
+
+/// Узнаваемые байты: перестановка или дыра в потоке видна по содержимому.
+fn pattern(stream: usize, len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251 + stream) as u8).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_downloads_survive_packet_loss_intact() {
+    const STREAMS: usize = 6;
+    const SIZE: usize = 4 * 1024 * 1024;
+
+    let cancel = CancellationToken::new();
+    let (out, mut inbound) = stacks_over(lossy_pipe(1420, 97), &cancel);
+
+    let mut readers = Vec::new();
+    for stream in 0..STREAMS {
+        let connector = out.connector.clone();
+        let destination = SocketAddr::new(target().ip(), 1000 + stream as u16);
+        readers.push(tokio::spawn(async move {
+            let mut connection = connector.connect(destination).await.expect("соединение");
+            let mut got = Vec::with_capacity(SIZE);
+            // До конца потока: без переданного `FIN` чтение не кончится.
+            connection.read_to_end(&mut got).await.expect("чтение");
+            got
+        }));
+    }
+
+    let mut writers = Vec::new();
+    for _ in 0..STREAMS {
+        let accepted = tokio::time::timeout(Duration::from_secs(10), inbound.tcp.accept())
+            .await
+            .expect("соединение не принято")
+            .expect("стек остановился");
+        let stream = usize::from(accepted.destination.port() - 1000);
+        let mut connection = accepted.connection;
+        writers.push(tokio::spawn(async move {
+            connection
+                .write_all(&pattern(stream, SIZE))
+                .await
+                .expect("запись");
+            connection.shutdown().await.expect("закрытие");
+            // Держим соединение, пока стек не отдаст хвост.
+            let mut rest = Vec::new();
+            let _ = connection.read_to_end(&mut rest).await;
+        }));
+    }
+
+    // Меньше периода keep-alive (30 с): потерянное обновление окна без проб ждало бы его.
+    for (stream, reader) in readers.into_iter().enumerate() {
+        let got = tokio::time::timeout(Duration::from_secs(15), reader)
+            .await
+            .expect("загрузка встала")
+            .expect("задача упала");
+        assert_eq!(got.len(), SIZE, "поток {stream} оборван");
+        assert!(got == pattern(stream, SIZE), "поток {stream} испорчен");
+    }
+    drop(writers);
     cancel.cancel();
 }

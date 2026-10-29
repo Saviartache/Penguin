@@ -48,7 +48,7 @@ exclude = ["vendor/rust-ui-kit"]
 [workspace.package]
 version = "0.8.11"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/Saviartache/penguin"
 authors = ["Saviartache"]
@@ -116,7 +116,8 @@ h2 = "0.4"
 # Только сервер и тесты: клиентский HTTP/3 свой (`penguin_transport::h3`).
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
-smoltcp = { version = "0.12", default-features = false }
+# 0.13+: пробы нулевого окна (без них потерянное обновление окна стоит загрузку до keep-alive).
+smoltcp = { version = "0.14", default-features = false }
 # Проверка обновлений: блокирующий клиент, TLS — `rustls`/`ring` из дерева.
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 # Уже в дереве через `png`; здесь — разворот deflate в zip и tar.gz.
