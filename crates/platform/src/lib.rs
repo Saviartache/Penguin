@@ -15,6 +15,8 @@ mod com;
 mod command;
 pub mod dialog;
 pub mod dns_settings;
+#[cfg(target_os = "macos")]
+pub mod dock;
 pub mod elevate;
 pub mod error;
 pub mod firewall;

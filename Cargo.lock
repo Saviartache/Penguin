@@ -3713,6 +3713,8 @@ dependencies = [
  "ipnet",
  "libc",
  "nix",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
  "parking_lot",
  "tempfile",
  "thiserror 2.0.20",

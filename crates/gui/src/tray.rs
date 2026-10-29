@@ -27,6 +27,16 @@ pub fn create() -> Option<Tray> {
     }
 }
 
+/// На macOS спрятанное в лоток окно не держит значок в Dock.
+pub fn set_dock_visible(visible: bool) {
+    #[cfg(target_os = "macos")]
+    if let Err(err) = penguin_platform::dock::set_visible(visible) {
+        tracing::warn!(%err, "значок в Dock не переключился");
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = visible;
+}
+
 /// Чёрная маска; macOS красит её сама, остальным — цвет под панель.
 fn icon() -> Option<iced::window::Icon> {
     let mask = iced::window::icon::from_file_data(include_bytes!("../../../assets/tray.png"), None);

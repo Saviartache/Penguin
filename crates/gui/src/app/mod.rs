@@ -209,6 +209,7 @@ impl App {
         if self.hidden && self.tray.is_none() {
             return self.show();
         }
+        crate::tray::set_dock_visible(!self.hidden);
         self.refresh_work_area()
     }
 
@@ -219,12 +220,14 @@ impl App {
         }
 
         self.hidden = true;
+        crate::tray::set_dock_visible(false);
         window::set_mode(self.window, window::Mode::Hidden)
     }
 
     /// Достаёт окно из лотка.
     pub fn show(&mut self) -> Task<Message> {
         self.hidden = false;
+        crate::tray::set_dock_visible(true);
         Task::batch([
             window::set_mode(self.window, window::Mode::Windowed),
             window::gain_focus(self.window),

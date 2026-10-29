@@ -44,5 +44,15 @@ windows-service.workspace = true
 nix = { workspace = true, features = ["net", "user", "socket", "fs"] }
 libc.workspace = true
 
+# Значок в Dock; те же версии уже тянет `tray-icon`.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+] }
+
 [dev-dependencies]
 tempfile = "3"
