@@ -143,11 +143,10 @@ cargo run -p penguin-app -- rules explain steamcontent.com:443 --process steam.e
 
 ## Документация
 
-| Файл | О чём |
+| Где | О чём |
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | правила репозитория: граф зависимостей, раскладка, ошибки |
-| [`protocols/pingwin/PROTOCOL.md`](protocols/pingwin/PROTOCOL.md) | формат провода своего протокола |
-| [`servers/pingwin/docker/README.md`](servers/pingwin/docker/README.md) | как поднять свой сервер одной командой |
+| [`.obsidian-penguin`](.obsidian-penguin/Penguin.md) | база знаний Obsidian: протокол Pingwin, его сервер, проверка interop |
 
 ---
 

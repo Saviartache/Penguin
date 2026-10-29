@@ -1,0 +1,27 @@
+filters:
+  and:
+    - file.ext == "md"
+    - file.name != "Penguin"
+properties:
+  note.type:
+    displayName: Тип
+  note.summary:
+    displayName: Кратко
+  note.code:
+    displayName: Код
+  file.folder:
+    displayName: Раздел
+views:
+  - type: table
+    name: Все заметки
+    order:
+      - file.name
+      - file.folder
+      - type
+      - summary
+      - code
+    sort:
+      - property: file.folder
+        direction: ASC
+      - property: file.name
+        direction: ASC
