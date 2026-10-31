@@ -181,9 +181,10 @@ impl VlessConfig {
                 "путь и `host` заданы у голого потока: выберите `grpc` или `xhttp`",
             ));
         }
-        if self.transport.is_quic() && self.security != Security::Tls {
+        if self.transport.is_quic() && self.security == Security::None {
             return Err(VlessError::config(
-                "`transport = \"xhttp\"` идёт по HTTP/3 и требует `security = \"tls\"`",
+                "`transport = \"xhttp\"` требует `security = \"tls\"` (HTTP/3) \
+                 или `security = \"reality\"` (HTTP/2)",
             ));
         }
         Ok(())
@@ -423,20 +424,23 @@ mod tests {
     }
 
     #[test]
-    fn xhttp_needs_plain_tls() {
-        let over_quic = VlessConfig {
+    fn xhttp_needs_tls_or_reality() {
+        let over_reality = VlessConfig {
             security: Security::Reality,
             reality: Some(reality()),
             transport: Transport::Xhttp,
             ..config()
         };
-        assert!(over_quic.validate().is_err());
+        over_reality
+            .validate()
+            .expect("XHTTP поверх Reality идёт по HTTP/2");
 
-        let over_h2 = VlessConfig {
-            transport: Transport::Grpc,
-            ..over_quic
+        let bare = VlessConfig {
+            security: Security::None,
+            transport: Transport::Xhttp,
+            ..config()
         };
-        over_h2.validate().expect("gRPC поверх Reality законен");
+        assert!(bare.validate().is_err());
     }
 
     #[test]

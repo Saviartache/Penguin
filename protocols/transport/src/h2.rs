@@ -6,9 +6,34 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 use bytes::{Buf, Bytes};
-use h2::client::ResponseFuture;
+use h2::client::{ResponseFuture, SendRequest};
 use h2::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+use crate::deadline;
+use crate::error::{TransportError, TransportResult};
+
+/// Рукопожатие HTTP/2 поверх `io` со сроком; соединение живёт своей задачей.
+pub async fn handshake<S>(io: S) -> TransportResult<SendRequest<Bytes>>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    deadline::handshake("рукопожатие HTTP/2", async {
+        let (send_request, connection) = h2::client::handshake(io)
+            .await
+            .map_err(|e| TransportError::disconnected(format!("рукопожатие HTTP/2: {e}")))?;
+        tokio::spawn(async move {
+            if let Err(err) = connection.await {
+                tracing::debug!(%err, "соединение HTTP/2 завершено");
+            }
+        });
+        send_request
+            .ready()
+            .await
+            .map_err(|e| TransportError::disconnected(e.to_string()))
+    })
+    .await
+}
 
 /// Приводит ошибку `h2` к языку `AsyncRead`/`AsyncWrite`.
 fn to_io_error(err: h2::Error) -> io::Error {

@@ -1,5 +1,5 @@
 //! Перенос потока протокола (как `network` у Xray): `tcp` — голый поток в TLS,
-//! `grpc` — `Tun` по HTTP/2, `xhttp` — `stream-one` по HTTP/3.
+//! `grpc` — `Tun` по HTTP/2, `xhttp` — `stream-one` по HTTP/3 (поверх Reality — HTTP/2).
 
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,7 @@ impl Carrier {
     }
 }
 
-/// Надевает перенос на открытое соединение; для XHTTP (свой QUIC) — ошибка настроек.
+/// Надевает перенос на открытое соединение; XHTTP здесь идёт по HTTP/2 (Reality).
 #[cfg(feature = "h2")]
 pub async fn wrap<S>(
     secure: S,
@@ -55,8 +55,8 @@ where
         Carrier::Grpc => Ok(Box::new(
             crate::grpc::connect(secure, authority, path).await?,
         )),
-        Carrier::Xhttp => Err(crate::TransportError::config(
-            "XHTTP идёт по своему соединению QUIC, а не поверх TCP",
+        Carrier::Xhttp => Ok(Box::new(
+            crate::xhttp::h2::connect(secure, authority, path).await?,
         )),
     }
 }

@@ -9,8 +9,17 @@ use crate::h3::Request;
 /// Длина отступа: умолчание Xray (`GetNormalizedXPaddingBytes`).
 const PADDING: std::ops::RangeInclusive<usize> = 100..=1000;
 
-/// Запрос `stream-one`: один `POST`, тело в обе стороны.
+/// Запрос `stream-one` по HTTP/3: один `POST`, тело в обе стороны.
 pub fn stream_one(authority: &str, path: &str) -> Request {
+    let (target, headers) = parts(authority, path);
+    headers.into_iter().fold(
+        Request::new("POST", authority, target),
+        |request, (name, value)| request.header(name, value),
+    )
+}
+
+/// Путь со строкой запроса и заголовки `stream-one`, общие для HTTP/2 и HTTP/3.
+pub(super) fn parts(authority: &str, path: &str) -> (String, Vec<(&'static str, String)>) {
     let (path, query) = normalize(path);
     let target = match query {
         "" => path.clone(),
@@ -21,14 +30,10 @@ pub fn stream_one(authority: &str, path: &str) -> Request {
     // `ApplyXPaddingToHeader`, `PlacementQueryInHeader`
     let referer = format!("https://{authority}{path}?x_padding={padding}");
 
-    let request = Request::new("POST", authority, target);
-    chrome_fetch_headers()
-        .into_iter()
-        .fold(request, |request, (name, value)| {
-            request.header(name, value)
-        })
-        .header("referer", referer)
-        .header("content-type", "application/grpc")
+    let mut headers = Vec::from(chrome_fetch_headers());
+    headers.push(("referer", referer));
+    headers.push(("content-type", "application/grpc".to_owned()));
+    (target, headers)
 }
 
 /// Путь с `/` в начале и в конце и строка запроса после `?`

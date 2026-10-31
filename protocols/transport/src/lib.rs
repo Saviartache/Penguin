@@ -14,7 +14,7 @@
 //!  carrier   перенос: tcp, grpc, xhttp
 //!  h3        HTTP/3 клиента
 //!  quic      соединение QUIC (quic)
-//!  xhttp     XHTTP по HTTP/3 (quic)
+//!  xhttp     XHTTP по HTTP/3 (quic) и HTTP/2 (h2)
 //!  h2        поток HTTP/2 как поток байт (h2)
 //!  grpc      gRPC по HTTP/2 (h2)
 //! ```
@@ -37,7 +37,6 @@ pub mod kdf;
 pub mod quic;
 pub mod tls;
 pub mod varint;
-#[cfg(feature = "quic")]
 pub mod xhttp;
 
 pub use error::{TransportError, TransportResult};

@@ -80,7 +80,8 @@ impl Connector {
 
         let vision = config.flow() == Some(addons::FLOW_VISION);
         let http_host = config.host()?;
-        let xhttp = config.transport.is_quic().then(|| {
+        // Поверх Reality XHTTP идёт по HTTP/2 через `carrier::wrap`
+        let xhttp = (config.transport.is_quic() && reality.is_none()).then(|| {
             let target = XhttpTarget {
                 host: host.clone(),
                 port,

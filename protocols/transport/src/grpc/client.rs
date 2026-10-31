@@ -6,9 +6,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use super::path::tun_path;
 use super::stream::GrpcStream;
 use crate::browser::CHROME_USER_AGENT;
-use crate::deadline;
 use crate::error::{TransportError, TransportResult};
-use crate::h2::H2Stream;
+use crate::h2::{self, H2Stream};
 
 /// Поток gRPC поверх HTTP/2.
 pub type Grpc = GrpcStream<H2Stream>;
@@ -20,22 +19,7 @@ pub async fn connect<S>(io: S, authority: &str, service_name: &str) -> Transport
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let mut send_request = deadline::handshake("рукопожатие HTTP/2", async {
-        let (send_request, connection) = h2::client::handshake(io)
-            .await
-            .map_err(|e| TransportError::disconnected(format!("рукопожатие HTTP/2: {e}")))?;
-        tokio::spawn(async move {
-            if let Err(err) = connection.await {
-                tracing::debug!(%err, "соединение gRPC завершено");
-            }
-        });
-        send_request
-            .ready()
-            .await
-            .map_err(|e| TransportError::disconnected(e.to_string()))
-    })
-    .await?;
-
+    let mut send_request = h2::handshake(io).await?;
     let request = request(authority, service_name)?;
     let (response, send) = send_request
         .send_request(request, false)
