@@ -12,18 +12,11 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &[],
     from_link: None,
-    // RFC 9484 не назначает DNS внутри тоннеля.
-    note: Some(|s| s.masque_ip_no_dns),
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_form_says_out_loud_that_there_is_no_dns() {
-        assert!(SPEC.note.is_some());
-    }
 
     #[test]
     fn nothing_the_server_hands_out_is_asked_of_the_person() {

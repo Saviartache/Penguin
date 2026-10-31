@@ -27,7 +27,6 @@ pub static HTTP2: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["naive+https://"],
     from_link: Some(from_link),
-    note: None,
 };
 
 /// `CONNECT` поверх HTTP/3 (QUIC). Отдельной записью: сервер слушает на другом порту.
@@ -37,7 +36,6 @@ pub static HTTP3: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["naive+quic://"],
     from_link: Some(from_link),
-    note: None,
 };
 
 /// Как ссылка ложится в поля: `naive+https://имя:пароль@хост:порт?sni=…#имя`

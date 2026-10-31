@@ -10,7 +10,7 @@ const DEFAULT_PORT: u16 = 443;
 
 /// Чем шифруется соединение до сервера. `none` законен, когда TLS снимает сеть
 /// доставки перед сервером. `reality` сверен только между Xray-core и sing-box:
-/// непризнанного клиента сервер молча шлёт на настоящий сайт, об этом `SPEC.note`.
+/// непризнанного клиента сервер молча шлёт на настоящий сайт.
 const SECURITY: &[&str] = &["tls", "none", "reality"];
 
 /// Поля Reality не `.required()`: форма не видит других полей, недостающее ловит
@@ -54,8 +54,6 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["vless://"],
     from_link: Some(from_link),
-    // Строка про reality, но показывается всегда: при выборе сказать нельзя.
-    note: Some(|s| s.reality_unverified),
 };
 
 /// Как ссылка ложится в поля.
@@ -121,11 +119,6 @@ mod tests {
     #[test]
     fn reality_is_offered_now_that_the_handshake_carries_traffic() {
         assert!(SECURITY.contains(&"reality"));
-    }
-
-    #[test]
-    fn the_form_warns_that_reality_was_not_checked_against_a_live_server() {
-        assert!(SPEC.note.is_some());
     }
 
     #[test]

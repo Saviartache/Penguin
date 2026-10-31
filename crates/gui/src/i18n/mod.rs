@@ -310,12 +310,6 @@ pub struct Strings {
     pub keepalive_example: &'static str,
     /// Учётные данные для заголовка `Authorization`.
     pub authorization: &'static str,
-    /// Предупреждение: через MASQUE ходит только UDP.
-    pub masque_udp_only: &'static str,
-    /// Предупреждение: у MASQUE `CONNECT-IP` нет сервера имён внутри тоннеля.
-    pub masque_ip_no_dns: &'static str,
-    /// Предупреждение: VLESS + Reality не проверен о живой сервер.
-    pub reality_unverified: &'static str,
     /// Что вписать в публичный ключ Reality.
     pub reality_public_key_example: &'static str,
     /// Короткий идентификатор Reality.
@@ -362,8 +356,6 @@ pub struct Strings {
     pub alter_id: &'static str,
     /// Значение `alterId` не число.
     pub bad_alter_id: &'static str,
-    /// Предупреждение: шифр `zero` отключает шифрование и заверение данных.
-    pub vmess_zero_warning: &'static str,
 
     // --- правила ---
     /// Куда идёт всё остальное — полем сводки.
@@ -687,7 +679,6 @@ mod tests {
                 table.need_vmess_id,
                 table.alter_id,
                 table.bad_alter_id,
-                table.vmess_zero_warning,
                 table.new_server,
                 table.edit_server,
                 table.server_name,
@@ -731,9 +722,6 @@ mod tests {
                 table.keepalive,
                 table.keepalive_example,
                 table.authorization,
-                table.masque_udp_only,
-                table.masque_ip_no_dns,
-                table.reality_unverified,
                 table.reality_public_key_example,
                 table.reality_short_id,
                 table.reality_short_id_example,

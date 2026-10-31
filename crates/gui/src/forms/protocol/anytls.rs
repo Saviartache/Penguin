@@ -27,7 +27,6 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["anytls://"],
     from_link: Some(from_link),
-    note: None,
 };
 
 /// Как ссылка ложится в поля: `anytls://пароль@хост:порт/?sni=…&insecure=1#имя`.

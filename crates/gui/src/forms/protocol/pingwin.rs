@@ -58,7 +58,6 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["pingwin://"],
     from_link: Some(from_link),
-    note: None,
 };
 
 #[cfg(test)]

@@ -44,7 +44,6 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: PLAIN,
     schemes: &["socks5://", "socks://", "socks5h://"],
     from_link: Some(from_link),
-    note: None,
 };
 
 /// Прокси под TLS. Схемы ссылок нет: `socks5://` занята, договорённости о второй нет.
@@ -54,7 +53,6 @@ pub static TLS: ProtocolSpec = ProtocolSpec {
     fields: SECURE,
     schemes: &[],
     from_link: None,
-    note: None,
 };
 
 /// Как ссылка ложится в поля. Двоеточие в userinfo — разделитель (RFC 1929

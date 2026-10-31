@@ -36,7 +36,6 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["hy2://", "hysteria2://"],
     from_link: Some(from_link),
-    note: None,
 };
 
 /// Как ссылка ложится в поля.

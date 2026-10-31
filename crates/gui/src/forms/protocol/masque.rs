@@ -23,18 +23,11 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &[],
     from_link: None,
-    // TCP через это направление не ходит.
-    note: Some(|s| s.masque_udp_only),
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_form_says_out_loud_that_there_is_no_tcp() {
-        assert!(SPEC.note.is_some());
-    }
 
     #[test]
     fn authorization_is_optional_because_the_rfc_has_no_authentication() {

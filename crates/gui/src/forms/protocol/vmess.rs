@@ -11,7 +11,7 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 const DEFAULT_PORT: u16 = 443;
 
 /// Шифр тела; `auto` — умолчание протокола. `zero` отключает и шифрование, и
-/// границы кусков, потому форма предупреждает ([`ProtocolSpec::note`]).
+/// границы кусков.
 const CIPHERS: &[&str] = &["auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero"];
 
 /// Шифрование до сервера, как у VLESS.
@@ -50,7 +50,6 @@ pub static SPEC: ProtocolSpec = ProtocolSpec {
     fields: FIELDS,
     schemes: &["vmess://"],
     from_link: Some(from_link),
-    note: Some(|s| s.vmess_zero_warning),
 };
 
 /// Как ссылка ложится в поля: `vmess://base64(json)` формата v2rayN
@@ -203,11 +202,6 @@ mod tests {
         });
         let values = parse(&json);
         assert_eq!(value(&values, "alter_id"), Some("16"));
-    }
-
-    #[test]
-    fn the_zero_cipher_is_named_in_the_note() {
-        assert!(SPEC.note.is_some());
     }
 
     #[test]

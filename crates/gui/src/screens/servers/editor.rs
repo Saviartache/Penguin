@@ -25,14 +25,6 @@ const FORM_HEIGHT: f32 = 300.0;
 pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
     // Строки добавляются по одной: пустышка в столбце с зазором — видимая дыра.
     let mut form = Flex::col();
-    // Предупреждение протокола первым: после заполнения читать поздно.
-    if let Some(note) = draft.spec().and_then(|spec| spec.note) {
-        form = form.push_auto(ui::muted(
-            &state.palette,
-            note(crate::i18n::s()),
-            type_scale::MICRO,
-        ));
-    }
     if draft.spec().is_some_and(|spec| spec.takes_links()) {
         form = form.push_auto(link(state));
     }

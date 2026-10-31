@@ -175,8 +175,6 @@ pub struct ProtocolSpec {
     pub schemes: &'static [&'static str],
     /// Как ссылка ложится в поля; обязателен при непустых `schemes` (проверяет тест).
     pub from_link: Option<FromLink>,
-    /// Строка над формой для того, что надо знать до заполнения (шифры SSR не заверяют данные).
-    pub note: Option<Label>,
 }
 
 impl ProtocolSpec {
