@@ -221,31 +221,24 @@ fn check_server_hello(hello: &ServerHello) -> Result<(CipherSuite, [u8; 32]), Re
     Ok((cipher, public))
 }
 
-/// Читает `ServerHello`; возвращает разбор и байты без заголовка записи (для транскрипта).
+/// Читает ровно запись `ServerHello`: следующие записи сервер шлёт тем же пакетом, они
+/// остаются в `io`. Возвращает разбор и байты без заголовка записи (для транскрипта).
 async fn read_server_hello<S>(io: &mut S) -> Result<(ServerHello, Vec<u8>), RealityError>
 where
     S: AsyncRead + Unpin,
 {
-    let mut buffer = Vec::with_capacity(256);
-    loop {
-        if let Some(total) = penguin_utls::server_hello::record_len(&buffer)
-            .map_err(|e| RealityError::Malformed(e.to_string()))?
-            && buffer.len() >= total
-        {
-            let hello = penguin_utls::server_hello::parse(&buffer[..total])
-                .map_err(|e| RealityError::Malformed(e.to_string()))?;
-            return Ok((hello, buffer[5..total].to_vec()));
-        }
+    let malformed = |e: penguin_utls::UtlsError| RealityError::Malformed(e.to_string());
+    let mut record = vec![0u8; 5];
+    io.read_exact(&mut record).await?;
+    let total = penguin_utls::server_hello::record_len(&record)
+        .map_err(malformed)?
+        .unwrap_or(5);
+    record.resize(total, 0);
+    io.read_exact(&mut record[5..]).await?;
 
-        let mut chunk = [0u8; 512];
-        let read = io.read(&mut chunk).await?;
-        if read == 0 {
-            return Err(RealityError::Malformed(
-                "соединение закрылось раньше ServerHello".to_owned(),
-            ));
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-    }
+    let hello = penguin_utls::server_hello::parse(&record).map_err(malformed)?;
+    record.drain(..5);
+    Ok((hello, record))
 }
 
 /// Секунды Unix для `SessionID`; часы до эпохи дают 0.
@@ -264,5 +257,23 @@ mod tests {
     fn the_hello_retry_request_constant_is_sha256_of_its_name() {
         let digest = ring::digest::digest(&ring::digest::SHA256, b"HelloRetryRequest");
         assert_eq!(digest.as_ref(), HELLO_RETRY_REQUEST_RANDOM);
+    }
+
+    /// Сервер шлёт `ServerHello` и `ChangeCipherSpec` одним пакетом: второе не теряется.
+    #[tokio::test]
+    async fn bytes_after_the_server_hello_stay_in_the_stream() {
+        let mut message = vec![2, 0, 0, 38, 0x03, 0x03];
+        message.extend_from_slice(&[7; 32]);
+        message.extend_from_slice(&[0, 0x13, 0x01, 0]);
+        let mut wire = vec![0x16, 0x03, 0x03, 0, message.len() as u8];
+        wire.extend_from_slice(&message);
+        let change_cipher_spec = [0x14, 0x03, 0x03, 0x00, 0x01, 0x01];
+        wire.extend_from_slice(&change_cipher_spec);
+
+        let mut io = wire.as_slice();
+        let (hello, raw) = read_server_hello(&mut io).await.expect("разбирается");
+        assert_eq!(hello.cipher_suite, 0x1301);
+        assert_eq!(raw, message);
+        assert_eq!(io, change_cipher_spec);
     }
 }
