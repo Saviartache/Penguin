@@ -1,14 +1,15 @@
-//! Chrome 120 (`HelloChrome_120`, uTLS `u_parrots.go`, ревизия `23b1dac`).
+//! Chrome 133 (`HelloChrome_133` = `HelloChrome_Auto`, uTLS `u_parrots.go`, ревизия
+//! `aa6edf4b11af` — та, что у Xray-core 26.3.27).
 //!
-//! 120 — последняя версия без постквантового гибрида: ML-KEM в проекте нет.
-//! Перемешиваются все расширения, кроме двух GREASE-якорей (и padding).
-//! Сверено только с исходником uTLS, не с захватом трафика.
+//! `key_share`: GREASE, `X25519MLKEM768`, `X25519`. Без гибрида сервер REALITY с 2026-09
+//! клиента не узнаёт (`XTLS/REALITY` `8cdf7bf9`). Padding нет; перемешиваются все
+//! расширения, кроме двух GREASE-якорей. Сверено только с исходником uTLS.
 
 use crate::client_hello::ExtensionSlot;
 use crate::error::UtlsResult;
 use crate::extension::{ech_grease, fixed, generic, grease_placeholder, key_share, sni};
 use crate::grease::GreaseValues;
-use crate::key_exchange::{self, KeyExchange};
+use crate::key_exchange::{self, GROUP_P256, GROUP_X25519, GROUP_X25519_MLKEM768, KeyExchange};
 use crate::rng::Rng;
 
 /// Шифры, точно в этом порядке. Первый — место GREASE.
@@ -34,22 +35,22 @@ pub const CIPHER_SUITES: &[u16] = &[
 /// Метод сжатия: только `null`.
 pub const COMPRESSION_METHODS: &[u8] = &[0];
 
-const CURVE_X25519: u16 = 29;
-const CURVE_P256: u16 = 23;
 const CURVE_P384: u16 = 24;
-const EXT_APPLICATION_SETTINGS: u16 = 17513;
+/// `ApplicationSettingsExtensionNew` (uTLS `u_common.go`), не IANA.
+const EXT_APPLICATION_SETTINGS: u16 = 17613;
 
 /// Длины нагрузки GREASE ECH по `BoringGREASEECH()`.
 const ECH_GREASE_PAYLOAD_LENS: &[u16] = &[128, 160, 192, 224];
 
 const ECH_GREASE_AEADS: &[u16] = &[ech_grease::AEAD_AES_128_GCM];
 
-/// Собирает расширения и запрашивает пару ключей `X25519` для `key_share`.
+/// Собирает расширения и пары ключей `X25519MLKEM768` и `X25519` для `key_share`.
 pub(crate) fn build(
     rng: &mut impl Rng,
     host: &str,
 ) -> UtlsResult<(Vec<ExtensionSlot>, Vec<KeyExchange>)> {
     let grease = GreaseValues::from_rng(rng);
+    let hybrid = key_exchange::generate_x25519_mlkem768();
     let x25519 = key_exchange::generate_x25519();
 
     let shuffleable = |bytes: Vec<u8>| ExtensionSlot {
@@ -68,7 +69,13 @@ pub(crate) fn build(
         shuffleable(fixed::renegotiation_info()),
         shuffleable(generic::u16_list_u16_len(
             10, // supported_groups
-            &[grease.group, CURVE_X25519, CURVE_P256, CURVE_P384],
+            &[
+                grease.group,
+                GROUP_X25519_MLKEM768,
+                GROUP_X25519,
+                GROUP_P256,
+                CURVE_P384,
+            ],
         )),
         shuffleable(generic::u8_list(11, &[0])), // ec_point_formats: uncompressed
         shuffleable(generic::empty(35)),         // session_ticket, без билета
@@ -100,7 +107,11 @@ pub(crate) fn build(
                 data: &[0],
             },
             key_share::Entry {
-                group: CURVE_X25519,
+                group: hybrid.group,
+                data: &hybrid.public,
+            },
+            key_share::Entry {
+                group: x25519.group,
                 data: &x25519.public,
             },
         ])),
@@ -122,7 +133,7 @@ pub(crate) fn build(
         anchored(grease_placeholder(grease.extension_last, &[0])),
     ];
 
-    Ok((extensions, vec![x25519]))
+    Ok((extensions, vec![hybrid, x25519]))
 }
 
 #[cfg(test)]
@@ -141,9 +152,14 @@ mod tests {
         );
         assert!(
             extensions.last().expect("есть").anchored,
-            "GREASE2 — последнее расширение до padding, который добавляют отдельно"
+            "GREASE2 — последнее расширение"
         );
-        assert_eq!(keys.len(), 1, "Chrome предлагает один настоящий ключ");
+        let groups: Vec<u16> = keys.iter().map(|k| k.group).collect();
+        assert_eq!(
+            groups,
+            [GROUP_X25519_MLKEM768, GROUP_X25519],
+            "гибрид перед X25519"
+        );
     }
 
     #[test]

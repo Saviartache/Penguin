@@ -5,11 +5,12 @@
 //! отвечает `ChangeCipherSpec` и своим `Finished`, выводит прикладные ключи.
 //!
 //! Прикладные секреты выводятся с транскриптом ДО `Finished` клиента, но ПОСЛЕ `Finished`
-//! сервера (RFC 8446 §7.1). `HelloRetryRequest` не поддержан: сервер Reality отвечает `X25519`
-//! сразу, а такой `random` отвергается как `Malformed`.
+//! сервера (RFC 8446 §7.1). Общий секрет — по группе `ServerHello`: `X25519` или гибрид
+//! `X25519MLKEM768`. `HelloRetryRequest` не поддержан: ключи обеих групп уже в `ClientHello`,
+//! а такой `random` отвергается как `Malformed`.
 
 use penguin_core::address::Address;
-use penguin_utls::{ClientHello, ServerHello};
+use penguin_utls::{ClientHello, KeyShare, ServerHello};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::reality::application::RealityStream;
@@ -19,9 +20,6 @@ use crate::reality::error::RealityError;
 use crate::reality::flight::{self, HANDSHAKE_TYPE_FINISHED};
 use crate::reality::record::{CONTENT_TYPE_HANDSHAKE, RecordKey};
 use crate::reality::{auth, key_schedule};
-
-/// Группа `X25519` в `key_share` (RFC 8446 §4.2.7).
-const GROUP_X25519: u16 = 29;
 
 /// `SHA-256("HelloRetryRequest")`: `ServerHello.random` такого вида — это `HelloRetryRequest` (RFC 8446 §4.1.3).
 const HELLO_RETRY_REQUEST_RANDOM: [u8; 32] = [
@@ -38,7 +36,8 @@ struct Negotiated {
     hello: ClientHello,
     auth_key: [u8; 32],
     cipher: CipherSuite,
-    tls_shared_secret: [u8; 32],
+    /// 32 байта X25519 или 64 гибрида ML-KEM ‖ X25519.
+    tls_shared_secret: Vec<u8>,
     /// `ServerHello` без заголовка записи.
     server_hello: Vec<u8>,
 }
@@ -150,15 +149,13 @@ where
         .fingerprint
         .build(&server_name, [0; 32])
         .map_err(|e| RealityError::Config(e.to_string()))?;
-    // Все отпечатки предлагают X25519 первым `key_share`; Reality другой группы не понимает.
-    let x25519 = keys.first().ok_or_else(|| {
-        RealityError::Config("отпечаток не запросил ни одного ключа key_share".to_owned())
-    })?;
-    let not_x25519 = || RealityError::Config("первый ключ ClientHello — не X25519".to_owned());
-
-    let reality_shared_secret = x25519
-        .x25519_diffie_hellman(&public_key)
-        .ok_or_else(not_x25519)?;
+    // Сервер опознаёт по записи `X25519`, если она есть (`XTLS/REALITY` `tls.go`).
+    let reality_shared_secret = keys
+        .iter()
+        .find_map(|key| key.x25519_diffie_hellman(&public_key))
+        .ok_or_else(|| {
+            RealityError::Config("отпечаток не предложил ключа X25519 в key_share".to_owned())
+        })?;
     let auth_key = auth::derive_auth_key(&reality_shared_secret, &hello.random)?;
     let sealed = auth::seal_session_id(
         &auth_key,
@@ -173,10 +170,19 @@ where
     io.flush().await?;
 
     let (server_hello, server_hello_message) = read_server_hello(io).await?;
-    let (cipher, server_public) = check_server_hello(&server_hello)?;
-    let tls_shared_secret = x25519
-        .x25519_diffie_hellman(&server_public)
-        .ok_or_else(not_x25519)?;
+    let (cipher, server_share) = check_server_hello(&server_hello)?;
+    let tls_shared_secret = keys
+        .iter()
+        .find(|key| key.group == server_share.group)
+        .ok_or(RealityError::UnexpectedGroup(server_share.group))?
+        .agree(&server_share.data)
+        .ok_or_else(|| {
+            RealityError::Malformed(format!(
+                "key_share сервера длиной {} не подходит группе {:#06x}",
+                server_share.data.len(),
+                server_share.group
+            ))
+        })?;
 
     Ok(Negotiated {
         hello,
@@ -187,8 +193,8 @@ where
     })
 }
 
-/// Шифр и ключ сервера, если `ServerHello` — TLS 1.3 с `X25519`.
-fn check_server_hello(hello: &ServerHello) -> Result<(CipherSuite, [u8; 32]), RealityError> {
+/// Шифр и `key_share` сервера, если `ServerHello` — TLS 1.3; группу сверяет [`negotiate`].
+fn check_server_hello(hello: &ServerHello) -> Result<(CipherSuite, &KeyShare), RealityError> {
     if hello.random == HELLO_RETRY_REQUEST_RANDOM {
         return Err(RealityError::Malformed(
             "сервер запросил HelloRetryRequest — это не поддержано".to_owned(),
@@ -210,15 +216,7 @@ fn check_server_hello(hello: &ServerHello) -> Result<(CipherSuite, [u8; 32]), Re
         .key_share
         .as_ref()
         .ok_or_else(|| RealityError::Malformed("ServerHello без key_share".to_owned()))?;
-    if key_share.group != GROUP_X25519 {
-        return Err(RealityError::UnexpectedGroup(key_share.group));
-    }
-    let public = key_share
-        .data
-        .as_slice()
-        .try_into()
-        .map_err(|_| RealityError::Malformed("key_share сервера — не 32 байта".to_owned()))?;
-    Ok((cipher, public))
+    Ok((cipher, key_share))
 }
 
 /// Читает ровно запись `ServerHello`: следующие записи сервер шлёт тем же пакетом, они

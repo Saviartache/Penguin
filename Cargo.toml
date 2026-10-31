@@ -149,6 +149,8 @@ md-5 = "0.11"
 getrandom = "0.4"
 # Многоразовый X25519-секрет для Noise IK у WireGuard; `ring` его потребляет.
 x25519-dalek = { version = "3", default-features = false, features = ["static_secrets", "getrandom"] }
+# ML-KEM-768 гибрида `X25519MLKEM768` у Reality: в `ring` нет.
+ml-kem = { version = "0.3", default-features = false }
 # Голый блок AES у Shadowsocks 2022 и VMess.
 aes = "0.9"
 # Конверт шлюза подписки Amnezia: AES-256-CBC и RSA PKCS#1 v1.5.

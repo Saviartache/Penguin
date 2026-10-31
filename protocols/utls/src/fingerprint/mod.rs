@@ -1,4 +1,4 @@
-//! Отпечатки браузера: chrome (GREASE, перемешивание, padding), firefox (ничего
+//! Отпечатки браузера: chrome (GREASE, перемешивание, ML-KEM), firefox (ничего
 //! из этого), safari (GREASE и padding, без перемешивания).
 
 pub mod chrome;
@@ -20,7 +20,7 @@ use crate::rng::{Rng, SystemRng};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Fingerprint {
-    /// Chrome 120 (ноябрь 2023).
+    /// Chrome 133 (февраль 2025), с `X25519MLKEM768`.
     Chrome,
     /// Firefox 120 (ноябрь 2023).
     Firefox,
@@ -34,7 +34,7 @@ impl Fingerprint {
     }
 
     fn uses_padding(self) -> bool {
-        matches!(self, Self::Chrome | Self::Safari)
+        matches!(self, Self::Safari)
     }
 
     /// Собирает `ClientHello`; `session_id` приходит снаружи (см. [`crate::random_session_id`]).

@@ -16,8 +16,8 @@ pub enum RealityError {
     #[error("ответ не по формату Reality: {0}")]
     Malformed(String),
 
-    /// `ServerHello.key_share` — не `X25519`: `HelloRetryRequest` или не Reality.
-    #[error("ServerHello предложил группу {0:#06x} вместо X25519 — Reality с ней не работает")]
+    /// Группа `ServerHello.key_share` не из нашего `ClientHello`: `HelloRetryRequest` или не Reality.
+    #[error("ServerHello выбрал группу {0:#06x}, ключа которой мы не предлагали")]
     UnexpectedGroup(u16),
 
     /// Сервер выбрал версию или шифр за пределами TLS 1.3.

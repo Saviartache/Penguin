@@ -2,24 +2,43 @@
 //!
 //! `P-256` — `ring::agreement` (одно применение). `X25519` — `StaticSecret`:
 //! Reality считает общий секрет с одним скаляром дважды (ключ Reality и ключ
-//! сервера), `agree_ephemeral` для этого не годится.
+//! сервера), `agree_ephemeral` для этого не годится. `X25519MLKEM768` — `ml-kem`
+//! и свой X25519.
 
+use ml_kem::{Ciphertext, Decapsulate, DecapsulationKey768, KeyExport, MlKem768, Seed};
 use ring::agreement::{Algorithm, ECDH_P256, EphemeralPrivateKey};
 use ring::rand::SecureRandom;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
 
 use crate::error::{UtlsError, UtlsResult};
 
+/// Группа `X25519` (RFC 8446 §4.2.7).
+pub const GROUP_X25519: u16 = 29;
+/// Группа `P-256` (RFC 8446 §4.2.7).
+pub const GROUP_P256: u16 = 23;
+/// Гибрид `X25519MLKEM768` (uTLS `common.go`, draft-ietf-tls-ecdhe-mlkem).
+pub const GROUP_X25519_MLKEM768: u16 = 4588;
+
+/// Длина шифротекста ML-KEM-768 в `key_share` сервера (FIPS 203).
+const MLKEM768_CIPHERTEXT_LEN: usize = 1088;
+
 enum Private {
     X25519(X25519Secret),
     P256(EphemeralPrivateKey),
+    /// Свой X25519, не общий с записью `X25519` (uTLS `mlkemEcdhe`, как у Chrome).
+    X25519Mlkem768 {
+        mlkem: Box<DecapsulationKey768>,
+        x25519: X25519Secret,
+    },
 }
 
 /// Пара ключей одной группы `key_share`: публичные байты для провода и
 /// закрытый ключ для будущего рукопожатия.
 pub struct KeyExchange {
+    /// Группа записи `key_share`.
+    pub group: u16,
     /// Байты, которые идут в `key_share.data`: 32 байта для `X25519`, 65
-    /// (несжатая точка, `0x04` + X + Y) для `P-256`.
+    /// (несжатая точка, `0x04` + X + Y) для `P-256`, ключ ML-KEM ‖ X25519 для гибрида.
     pub public: Vec<u8>,
     private: Private,
 }
@@ -36,30 +55,73 @@ impl KeyExchange {
     /// Сырой общий секрет `X25519` (RFC 7748); `None` для не-`X25519`. Ключ не потребляется.
     pub fn x25519_diffie_hellman(&self, peer_public: &[u8; 32]) -> Option<[u8; 32]> {
         match &self.private {
-            Private::X25519(secret) => {
-                let peer = X25519PublicKey::from(*peer_public);
-                Some(*secret.diffie_hellman(&peer).as_bytes())
+            Private::X25519(secret) => Some(x25519(secret, peer_public)),
+            Private::P256(_) | Private::X25519Mlkem768 { .. } => None,
+        }
+    }
+
+    /// Общий секрет TLS 1.3 с `key_share` сервера той же группы: у гибрида ML-KEM ‖ X25519
+    /// (uTLS `handshake_client_tls13.go`). `None` — `P-256` или неверная длина.
+    pub fn agree(&self, server_share: &[u8]) -> Option<Vec<u8>> {
+        match &self.private {
+            Private::X25519(secret) => Some(x25519(secret, server_share.try_into().ok()?).to_vec()),
+            Private::X25519Mlkem768 {
+                mlkem,
+                x25519: secret,
+            } => {
+                if server_share.len() != MLKEM768_CIPHERTEXT_LEN + 32 {
+                    return None;
+                }
+                let (ciphertext, peer) = server_share.split_at(MLKEM768_CIPHERTEXT_LEN);
+                let ciphertext = Ciphertext::<MlKem768>::try_from(ciphertext).ok()?;
+                let mut shared = mlkem.decapsulate(&ciphertext).to_vec();
+                shared.extend_from_slice(&x25519(secret, peer.try_into().ok()?));
+                Some(shared)
             }
             Private::P256(_) => None,
         }
     }
 
-    /// Отдаёт закрытый ключ `P-256`; `None` для `X25519`.
+    /// Отдаёт закрытый ключ `P-256`; `None` для остальных групп.
     pub fn into_p256_private(self) -> Option<EphemeralPrivateKey> {
         match self.private {
             Private::P256(key) => Some(key),
-            Private::X25519(_) => None,
+            Private::X25519(_) | Private::X25519Mlkem768 { .. } => None,
         }
     }
 }
 
-/// Генерирует пару `X25519` (единственная группа Reality).
+fn x25519(secret: &X25519Secret, peer_public: &[u8; 32]) -> [u8; 32] {
+    *secret
+        .diffie_hellman(&X25519PublicKey::from(*peer_public))
+        .as_bytes()
+}
+
+/// Генерирует пару `X25519` (Reality опознаёт клиента по ней).
 pub fn generate_x25519() -> KeyExchange {
     let private = X25519Secret::from(penguin_proto::random::array::<32>());
     let public = X25519PublicKey::from(&private);
     KeyExchange {
+        group: GROUP_X25519,
         public: public.as_bytes().to_vec(),
         private: Private::X25519(private),
+    }
+}
+
+/// Генерирует пару `X25519MLKEM768`: ключ ML-KEM-768 из 64 байт затравки (FIPS 203 `d ‖ z`,
+/// как `mlkem.NewDecapsulationKey768` у uTLS) и свой X25519.
+pub fn generate_x25519_mlkem768() -> KeyExchange {
+    let mlkem = DecapsulationKey768::from_seed(Seed::from(penguin_proto::random::array::<64>()));
+    let x25519 = X25519Secret::from(penguin_proto::random::array::<32>());
+    let mut public = mlkem.encapsulation_key().to_bytes().to_vec();
+    public.extend_from_slice(X25519PublicKey::from(&x25519).as_bytes());
+    KeyExchange {
+        group: GROUP_X25519_MLKEM768,
+        public,
+        private: Private::X25519Mlkem768 {
+            mlkem: Box::new(mlkem),
+            x25519,
+        },
     }
 }
 
@@ -78,6 +140,7 @@ fn generate_p256_with(
         .compute_public_key()
         .map_err(|_| UtlsError::KeyGeneration("не удалось вычислить публичный ключ"))?;
     Ok(KeyExchange {
+        group: GROUP_P256,
         public: public.as_ref().to_vec(),
         private: Private::P256(private),
     })
@@ -100,6 +163,32 @@ mod tests {
         // 0x04, потом X и Y по 32 байта — несжатая точка, RFC 8446 §4.2.8.1.
         assert_eq!(pair.public.len(), 65);
         assert_eq!(pair.public[0], 0x04);
+    }
+
+    /// Без внешнего вектора: сервер — `encapsulate_deterministic` того же `ml-kem` (его KAT
+    /// FIPS 203 — в самом крейте); проверяются раскладка ключа и порядок ML-KEM ‖ X25519.
+    #[test]
+    fn the_hybrid_secret_is_mlkem_then_x25519() {
+        use ml_kem::EncapsulationKey768;
+        use ml_kem::array::Array;
+
+        let client = generate_x25519_mlkem768();
+        assert_eq!(client.public.len(), 1184 + 32);
+        let (mlkem_public, x25519_public) = client.public.split_at(1184);
+
+        let ek = EncapsulationKey768::new(&Array::try_from(mlkem_public).expect("1184 байта"))
+            .expect("ключ ML-KEM верен");
+        let (ciphertext, mlkem_shared) = ek.encapsulate_deterministic(&Array::from([7u8; 32]));
+        let server = X25519Secret::from([9u8; 32]);
+        let x25519_shared = x25519(&server, x25519_public.try_into().expect("32 байта"));
+
+        let mut share = ciphertext.to_vec();
+        share.extend_from_slice(X25519PublicKey::from(&server).as_bytes());
+        let mut expected = mlkem_shared.to_vec();
+        expected.extend_from_slice(&x25519_shared);
+        assert_eq!(client.agree(&share), Some(expected));
+        assert_eq!(client.agree(&share[1..]), None, "длина проверяется");
+        assert!(client.x25519_diffie_hellman(&[0; 32]).is_none());
     }
 
     #[test]
@@ -161,6 +250,7 @@ mod tests {
         ];
 
         let pair = KeyExchange {
+            group: GROUP_X25519,
             public: Vec::new(),
             private: Private::X25519(X25519Secret::from(client_private)),
         };

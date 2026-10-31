@@ -22,5 +22,7 @@ penguin-transport.workspace = true
 ring.workspace = true
 # X25519 с повторным использованием скаляра (Reality).
 x25519-dalek.workspace = true
+# Гибрид `X25519MLKEM768` (Chrome 131+; без него сервер Reality нас не узнаёт).
+ml-kem.workspace = true
 thiserror.workspace = true
 serde.workspace = true
