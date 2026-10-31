@@ -7,7 +7,6 @@ pub mod ech_grease;
 pub mod fixed;
 pub mod generic;
 pub mod key_share;
-pub mod padding;
 pub mod sni;
 
 /// Псевдорасширение GREASE; тело пустое у первого и `[0]` у второго (uTLS `UtlsGREASEExtension`).

@@ -6,7 +6,9 @@
 //! и свой X25519.
 
 use ml_kem::{Ciphertext, Decapsulate, DecapsulationKey768, KeyExport, MlKem768, Seed};
-use ring::agreement::{Algorithm, ECDH_P256, EphemeralPrivateKey};
+use ring::agreement::{
+    Algorithm, ECDH_P256, EphemeralPrivateKey, UnparsedPublicKey, agree_ephemeral,
+};
 use ring::rand::SecureRandom;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
 
@@ -60,11 +62,18 @@ impl KeyExchange {
         }
     }
 
-    /// Общий секрет TLS 1.3 с `key_share` сервера той же группы: у гибрида ML-KEM ‖ X25519
-    /// (uTLS `handshake_client_tls13.go`). `None` — `P-256` или неверная длина.
-    pub fn agree(&self, server_share: &[u8]) -> Option<Vec<u8>> {
-        match &self.private {
-            Private::X25519(secret) => Some(x25519(secret, server_share.try_into().ok()?).to_vec()),
+    /// Общий секрет TLS 1.3 с `key_share` сервера той же группы: у `P-256` — координата X
+    /// (RFC 8446 §7.4.2), у гибрида ML-KEM ‖ X25519 (uTLS `handshake_client_tls13.go`).
+    /// `None` — неверный ключ сервера. Ключ потребляется: `ring` отдаёт `P-256` один раз.
+    pub fn agree(self, server_share: &[u8]) -> Option<Vec<u8>> {
+        match self.private {
+            Private::X25519(secret) => {
+                Some(x25519(&secret, server_share.try_into().ok()?).to_vec())
+            }
+            Private::P256(key) => {
+                let peer = UnparsedPublicKey::new(&ECDH_P256, server_share);
+                agree_ephemeral(key, &peer, <[u8]>::to_vec).ok()
+            }
             Private::X25519Mlkem768 {
                 mlkem,
                 x25519: secret,
@@ -75,19 +84,23 @@ impl KeyExchange {
                 let (ciphertext, peer) = server_share.split_at(MLKEM768_CIPHERTEXT_LEN);
                 let ciphertext = Ciphertext::<MlKem768>::try_from(ciphertext).ok()?;
                 let mut shared = mlkem.decapsulate(&ciphertext).to_vec();
-                shared.extend_from_slice(&x25519(secret, peer.try_into().ok()?));
+                shared.extend_from_slice(&x25519(&secret, peer.try_into().ok()?));
                 Some(shared)
             }
-            Private::P256(_) => None,
         }
     }
 
-    /// Отдаёт закрытый ключ `P-256`; `None` для остальных групп.
-    pub fn into_p256_private(self) -> Option<EphemeralPrivateKey> {
-        match self.private {
-            Private::P256(key) => Some(key),
-            Private::X25519(_) | Private::X25519Mlkem768 { .. } => None,
-        }
+    /// Запись `X25519` на X25519 гибрида (uTLS `ReuseHybridAndClassicalKeyShares`, Firefox);
+    /// `None` не для гибрида.
+    pub fn reused_x25519(&self) -> Option<KeyExchange> {
+        let Private::X25519Mlkem768 { x25519, .. } = &self.private else {
+            return None;
+        };
+        Some(KeyExchange {
+            group: GROUP_X25519,
+            public: self.public[self.public.len() - 32..].to_vec(),
+            private: Private::X25519(x25519.clone()),
+        })
     }
 }
 
@@ -186,9 +199,23 @@ mod tests {
         share.extend_from_slice(X25519PublicKey::from(&server).as_bytes());
         let mut expected = mlkem_shared.to_vec();
         expected.extend_from_slice(&x25519_shared);
-        assert_eq!(client.agree(&share), Some(expected));
-        assert_eq!(client.agree(&share[1..]), None, "длина проверяется");
+
         assert!(client.x25519_diffie_hellman(&[0; 32]).is_none());
+        let reused = client.reused_x25519().expect("гибрид");
+        assert_eq!(reused.public, x25519_public);
+        let server_public = X25519PublicKey::from(&server).to_bytes();
+        assert_eq!(
+            reused.x25519_diffie_hellman(&server_public),
+            Some(x25519_shared)
+        );
+        assert!(reused.reused_x25519().is_none());
+
+        assert_eq!(client.agree(&share), Some(expected));
+        assert_eq!(
+            generate_x25519_mlkem768().agree(&share[1..]),
+            None,
+            "длина проверяется"
+        );
     }
 
     #[test]
@@ -213,16 +240,19 @@ mod tests {
         assert!(pair.x25519_diffie_hellman(&[0; 32]).is_none());
     }
 
+    /// Без внешнего вектора: сервер — тот же `ring`; проверяется обвязка.
     #[test]
-    fn only_p256_keys_hand_over_their_private_key() {
+    fn p256_agrees_on_the_x_coordinate() {
         let rng = ring::rand::SystemRandom::new();
-        assert!(
-            generate_p256(&rng)
-                .expect("генерируется")
-                .into_p256_private()
-                .is_some()
-        );
-        assert!(generate_x25519().into_p256_private().is_none());
+        let client = generate_p256(&rng).expect("генерируется");
+        let server = EphemeralPrivateKey::generate(&ECDH_P256, &rng).expect("генерируется");
+        let server_public = server.compute_public_key().expect("считается");
+        let peer = UnparsedPublicKey::new(&ECDH_P256, client.public.clone());
+        let expected = agree_ephemeral(server, &peer, <[u8]>::to_vec).expect("сходится");
+        assert_eq!(expected.len(), 32);
+        assert_eq!(client.agree(server_public.as_ref()), Some(expected));
+        let broken = generate_p256(&rng).expect("генерируется");
+        assert_eq!(broken.agree(&[4; 65]), None, "точка не на кривой");
     }
 
     /// Общий секрет X25519, вектор из RFC 8448 §3 ("Simple 1-RTT Handshake"):

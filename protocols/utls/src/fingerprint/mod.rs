@@ -1,5 +1,5 @@
-//! Отпечатки браузера: chrome (GREASE, перемешивание, ML-KEM), firefox (ничего
-//! из этого), safari (GREASE и padding, без перемешивания).
+//! Отпечатки браузера, все с `X25519MLKEM768`: chrome (GREASE, перемешивание), firefox
+//! (ничего из этого), safari (GREASE, без перемешивания).
 
 pub mod chrome;
 pub mod firefox;
@@ -20,21 +20,17 @@ use crate::rng::{Rng, SystemRng};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Fingerprint {
-    /// Chrome 133 (февраль 2025), с `X25519MLKEM768`.
+    /// Chrome 133 (февраль 2025).
     Chrome,
-    /// Firefox 120 (ноябрь 2023).
+    /// Firefox 148 (февраль 2026).
     Firefox,
-    /// Safari 16.0 (сентябрь 2022).
+    /// Safari 26.3 (январь 2026).
     Safari,
 }
 
 impl Fingerprint {
     fn shuffles_extensions(self) -> bool {
         matches!(self, Self::Chrome)
-    }
-
-    fn uses_padding(self) -> bool {
-        matches!(self, Self::Safari)
     }
 
     /// Собирает `ClientHello`; `session_id` приходит снаружи (см. [`crate::random_session_id`]).
@@ -99,7 +95,6 @@ impl Fingerprint {
                 extensions,
             },
             self.shuffles_extensions(),
-            self.uses_padding(),
             rng,
         );
 

@@ -1,8 +1,6 @@
-//! Сборка `ClientHello` из частей отпечатка (`crate::fingerprint`): перемешивание
-//! расширений и padding. Padding считается по длине сообщения без него (uTLS
-//! `MarshalClientHelloNoECH`).
+//! Сборка `ClientHello` из частей отпечатка (`crate::fingerprint`) и перемешивание
+//! расширений.
 
-use crate::extension::padding;
 use crate::record;
 use crate::rng::Rng;
 
@@ -22,14 +20,8 @@ pub(crate) struct Fields<'a> {
 }
 
 /// Собирает сообщение `ClientHello` одним проходом, без промежуточных буферов.
-///
-/// `has_padding` — padding по правилу BoringSSL; `shuffle` — перемешать расширения.
-pub(crate) fn assemble(
-    mut fields: Fields<'_>,
-    shuffle: bool,
-    has_padding: bool,
-    rng: &mut impl Rng,
-) -> Vec<u8> {
+/// `shuffle` — перемешать расширения.
+pub(crate) fn assemble(mut fields: Fields<'_>, shuffle: bool, rng: &mut impl Rng) -> Vec<u8> {
     if shuffle {
         shuffle_with_anchors(&mut fields.extensions, rng);
     }
@@ -43,13 +35,7 @@ pub(crate) fn assemble(
         + fields.cipher_suites.len() * 2
         + 1
         + fields.compression_methods.len();
-    let unpadded_len = 4 + head_len + list_overhead(extensions_len);
-    let padding_len = has_padding
-        .then(|| padding::extra_len(unpadded_len + extensions_len))
-        .flatten();
-    let total_extensions = extensions_len + padding_len.map_or(0, |extra| 4 + extra);
-
-    let body_len = head_len + list_overhead(total_extensions) + total_extensions;
+    let body_len = head_len + list_overhead(extensions_len) + extensions_len;
     let mut out = Vec::with_capacity(4 + body_len);
     out.extend_from_slice(&record::handshake_header(
         record::HANDSHAKE_TYPE_CLIENT_HELLO,
@@ -65,13 +51,10 @@ pub(crate) fn assemble(
     }
     out.push(fields.compression_methods.len() as u8);
     out.extend_from_slice(fields.compression_methods);
-    if total_extensions > 0 {
-        out.extend_from_slice(&(total_extensions as u16).to_be_bytes());
+    if extensions_len > 0 {
+        out.extend_from_slice(&(extensions_len as u16).to_be_bytes());
         for slot in &fields.extensions {
             out.extend_from_slice(&slot.bytes);
-        }
-        if let Some(extra) = padding_len {
-            out.extend_from_slice(&padding::encode(extra));
         }
     }
     out
@@ -154,36 +137,15 @@ mod tests {
     }
 
     #[test]
-    fn a_short_hello_is_not_padded() {
-        let bytes = assemble(
-            fields_with_sni("a.io"),
-            false,
-            true,
-            &mut StepRng::new(0, 0),
-        );
-        assert!(
-            bytes.len() < 0x100,
-            "короткий ClientHello не должен получить padding"
-        );
-    }
-
-    #[test]
-    fn padding_brings_the_hello_up_to_exactly_512_bytes() {
-        let host = "a".repeat(300) + ".example.com";
-        let bytes = assemble(fields_with_sni(&host), false, true, &mut StepRng::new(0, 0));
-        assert_eq!(bytes.len(), 0x200, "запись должна выйти ровно на 512 байт");
-    }
-
-    #[test]
-    fn without_has_padding_nothing_is_added_even_in_the_danger_zone() {
-        let host = "a".repeat(300) + ".example.com";
-        let with_padding = assemble(fields_with_sni(&host), false, true, &mut StepRng::new(0, 0));
-        let without_padding = assemble(
-            fields_with_sni(&host),
-            false,
-            false,
-            &mut StepRng::new(0, 0),
-        );
-        assert!(without_padding.len() < with_padding.len());
+    fn the_declared_lengths_match_the_bytes() {
+        let bytes = assemble(fields_with_sni("a.io"), false, &mut StepRng::new(0, 0));
+        let body_len = u32::from_be_bytes([0, bytes[1], bytes[2], bytes[3]]) as usize;
+        assert_eq!(body_len + 4, bytes.len());
+        let sni_len = crate::extension::sni::encode("a.io").len();
+        let list_len = u16::from_be_bytes([
+            bytes[bytes.len() - sni_len - 2],
+            bytes[bytes.len() - sni_len - 1],
+        ]);
+        assert_eq!(usize::from(list_len), sni_len);
     }
 }

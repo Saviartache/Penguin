@@ -5,9 +5,9 @@
 //! отвечает `ChangeCipherSpec` и своим `Finished`, выводит прикладные ключи.
 //!
 //! Прикладные секреты выводятся с транскриптом ДО `Finished` клиента, но ПОСЛЕ `Finished`
-//! сервера (RFC 8446 §7.1). Общий секрет — по группе `ServerHello`: `X25519` или гибрид
-//! `X25519MLKEM768`. `HelloRetryRequest` не поддержан: ключи обеих групп уже в `ClientHello`,
-//! а такой `random` отвергается как `Malformed`.
+//! сервера (RFC 8446 §7.1). Общий секрет — по группе `ServerHello` (её выбирает сайт-прикрытие):
+//! `X25519`, `P-256` или гибрид `X25519MLKEM768`. `HelloRetryRequest` не поддержан: ключи всех
+//! групп уже в `ClientHello`, а такой `random` отвергается как `Malformed`.
 
 use penguin_core::address::Address;
 use penguin_utls::{ClientHello, KeyShare, ServerHello};
@@ -171,8 +171,9 @@ where
 
     let (server_hello, server_hello_message) = read_server_hello(io).await?;
     let (cipher, server_share) = check_server_hello(&server_hello)?;
+    // REALITY повторяет выбор сайта-прикрытия: группа может быть любой из предложенных.
     let tls_shared_secret = keys
-        .iter()
+        .into_iter()
         .find(|key| key.group == server_share.group)
         .ok_or(RealityError::UnexpectedGroup(server_share.group))?
         .agree(&server_share.data)

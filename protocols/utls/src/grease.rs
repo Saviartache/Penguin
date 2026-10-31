@@ -20,7 +20,7 @@ pub struct GreaseValues {
     pub group: u16,
     /// Первое псевдорасширение (перед SNI, пустое тело).
     pub extension_first: u16,
-    /// Второе псевдорасширение (перед `padding`, тело — один нулевой байт).
+    /// Второе псевдорасширение (последнее, тело — один нулевой байт).
     pub extension_last: u16,
     /// Первый элемент `supported_versions`.
     pub version: u16,

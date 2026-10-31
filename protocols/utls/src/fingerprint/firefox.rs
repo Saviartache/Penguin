@@ -1,12 +1,16 @@
-//! Firefox 120 (`HelloFirefox_120`, uTLS `u_parrots.go`, ревизия `23b1dac`).
+//! Firefox 148 (`HelloFirefox_148` = `HelloFirefox_Auto`, uTLS `u_parrots.go`, ревизия
+//! `aa6edf4b11af`).
 //!
-//! NSS: без GREASE и без перемешивания; в `key_share` настоящие X25519 и P-256.
-//! Сверено только с исходником uTLS.
+//! NSS: без GREASE и без перемешивания. `key_share`: `X25519MLKEM768`, `X25519` на том же
+//! X25519 (`ReuseHybridAndClassicalKeyShares`) и `P-256`. Сверено только с исходником uTLS.
+//!
+//! Сервер REALITY повторяет группу сайта-прикрытия; сайт, выбравший `P-256` (так делает
+//! `www.heise.de`), REALITY не держит — Xray 26.10.31 с `firefox` падает там же.
 
 use crate::client_hello::ExtensionSlot;
-use crate::error::UtlsResult;
+use crate::error::{UtlsError, UtlsResult};
 use crate::extension::{ech_grease, fixed, generic, sni};
-use crate::key_exchange::{self, KeyExchange};
+use crate::key_exchange::{self, GROUP_P256, GROUP_X25519, GROUP_X25519_MLKEM768, KeyExchange};
 use crate::rng::Rng;
 
 /// Шифры, точно в этом порядке.
@@ -33,8 +37,6 @@ pub const CIPHER_SUITES: &[u16] = &[
 /// Метод сжатия: только `null`.
 pub const COMPRESSION_METHODS: &[u8] = &[0];
 
-const CURVE_X25519: u16 = 29;
-const CURVE_P256: u16 = 23;
 const CURVE_P384: u16 = 24;
 const CURVE_P521: u16 = 25;
 const GROUP_FFDHE2048: u16 = 0x0100;
@@ -47,13 +49,16 @@ const ECH_GREASE_AEADS: &[u16] = &[
     ech_grease::AEAD_CHACHA20_POLY1305,
 ];
 
-/// Собирает расширения и запрашивает пары ключей `X25519` и `P-256`.
+/// Собирает расширения и пары ключей `X25519MLKEM768`, `X25519` и `P-256`.
 pub(crate) fn build(
     rng: &mut impl Rng,
     host: &str,
 ) -> UtlsResult<(Vec<ExtensionSlot>, Vec<KeyExchange>)> {
     let system_rng = ring::rand::SystemRandom::new();
-    let x25519 = key_exchange::generate_x25519();
+    let hybrid = key_exchange::generate_x25519_mlkem768();
+    let x25519 = hybrid
+        .reused_x25519()
+        .ok_or(UtlsError::KeyGeneration("гибрид без X25519"))?;
     let p256 = key_exchange::generate_p256(&system_rng)?;
 
     let fixed_slot = |bytes: Vec<u8>| ExtensionSlot {
@@ -68,8 +73,9 @@ pub(crate) fn build(
         fixed_slot(generic::u16_list_u16_len(
             10, // supported_groups
             &[
-                CURVE_X25519,
-                CURVE_P256,
+                GROUP_X25519_MLKEM768,
+                GROUP_X25519,
+                GROUP_P256,
                 CURVE_P384,
                 CURVE_P521,
                 GROUP_FFDHE2048,
@@ -77,7 +83,6 @@ pub(crate) fn build(
             ],
         )),
         fixed_slot(generic::u8_list(11, &[0])), // ec_point_formats
-        fixed_slot(generic::empty(35)),         // session_ticket
         fixed_slot(generic::string_list(
             16,
             &[
@@ -95,13 +100,18 @@ pub(crate) fn build(
                 0x0203, // ecdsa_sha1
             ],
         )),
+        fixed_slot(generic::empty(18)), // signed_certificate_timestamp
         fixed_slot(crate::extension::key_share::encode(&[
             crate::extension::key_share::Entry {
-                group: CURVE_X25519,
+                group: hybrid.group,
+                data: &hybrid.public,
+            },
+            crate::extension::key_share::Entry {
+                group: x25519.group,
                 data: &x25519.public,
             },
             crate::extension::key_share::Entry {
-                group: CURVE_P256,
+                group: p256.group,
                 data: &p256.public,
             },
         ])),
@@ -125,8 +135,11 @@ pub(crate) fn build(
                 0x0201, // rsa_pkcs1_sha1
             ],
         )),
-        fixed_slot(generic::u8_list(45, &[1])), // psk_key_exchange_modes
         fixed_slot(fixed::record_size_limit(0x4001)),
+        fixed_slot(generic::u16_list_u8_len(
+            27, // compress_certificate: zlib, brotli, zstd
+            &[0x0001, 0x0002, 0x0003],
+        )),
         fixed_slot(ech_grease::encode(
             rng,
             ECH_GREASE_AEADS,
@@ -134,7 +147,7 @@ pub(crate) fn build(
         )),
     ];
 
-    Ok((extensions, vec![x25519, p256]))
+    Ok((extensions, vec![hybrid, x25519, p256]))
 }
 
 #[cfg(test)]
@@ -150,14 +163,16 @@ mod tests {
         }
         let (extensions, keys) = build(&mut rng, "example.com").expect("собирается");
         assert!(extensions.iter().all(|e| e.anchored), "порядок не меняется");
-        assert_eq!(keys.len(), 2, "Firefox предлагает X25519 и P-256");
+        let groups: Vec<u16> = keys.iter().map(|k| k.group).collect();
+        assert_eq!(groups, [GROUP_X25519_MLKEM768, GROUP_X25519, GROUP_P256]);
     }
 
     #[test]
-    fn the_second_key_is_a_real_p256_point() {
+    fn the_x25519_share_reuses_the_hybrid_one_and_p256_is_a_real_point() {
         let mut rng = StepRng::new(9, 3);
         let (_, keys) = build(&mut rng, "example.com").expect("собирается");
-        assert_eq!(keys[0].public.len(), 32, "первый ключ — X25519");
-        assert_eq!(keys[1].public.len(), 65, "второй — несжатая точка P-256");
+        assert!(keys[0].public.ends_with(&keys[1].public), "тот же X25519");
+        assert_eq!(keys[1].public.len(), 32);
+        assert_eq!(keys[2].public.len(), 65, "несжатая точка P-256");
     }
 }
