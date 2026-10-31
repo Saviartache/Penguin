@@ -1,32 +1,23 @@
-//! Соединение с сервером: QUIC, HTTP/3, опознание (один раз на соединение).
+//! Соединение с сервером по QUIC: HTTP/3, опознание (один раз на соединение).
 
 use std::time::Duration;
 
-use penguin_core::address::{Address, SocketAddress};
+use penguin_core::address::SocketAddress;
 use penguin_proto::dialer::Dialer;
 use penguin_transport::deadline;
 use penguin_transport::h3::{self, Request};
 use penguin_transport::quic::{self, QuicLink};
-use penguin_transport::tls::{ALPN_H3, TlsConfig};
+use penguin_transport::tls::ALPN_H3;
 
+use crate::connection::Target;
 use crate::datagram::PingwinDatagram;
 use crate::error::{PingwinError, PingwinResult};
 use crate::stream::PingwinStream;
 use crate::wire::auth::{self, ClientAuth};
-use crate::wire::keys::{EXPORTER_LABEL, KEY_LEN, PUBLIC_LEN};
+use crate::wire::keys::{EXPORTER_LABEL, KEY_LEN};
 use crate::wire::udp;
 
-/// Всё, что нужно, чтобы поднять соединение.
-pub(crate) struct Target {
-    pub(crate) host: Address,
-    pub(crate) port: u16,
-    pub(crate) server_name: String,
-    pub(crate) tls: TlsConfig,
-    pub(crate) server_public: [u8; PUBLIC_LEN],
-    pub(crate) password: Vec<u8>,
-}
-
-/// Опознанное соединение.
+/// Опознанное соединение HTTP/3.
 pub(crate) struct Session {
     link: QuicLink,
     h3: h3::Connection,
@@ -88,7 +79,7 @@ impl Session {
     pub(crate) async fn open_tcp(&self, target: &SocketAddress) -> PingwinResult<PingwinStream> {
         let authority = target.to_wire();
         let stream = self.h3.send_request(&Request::connect(&authority)).await?;
-        Ok(PingwinStream::new(stream, authority))
+        Ok(PingwinStream::h3(stream, authority))
     }
 
     /// Открывает датаграммный канал; ждёт согласия сервера.

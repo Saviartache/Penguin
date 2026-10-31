@@ -1,4 +1,4 @@
-//! QUIC сервера: сертификат из PEM, ALPN `h3`, датаграммы.
+//! TLS сервера: сертификат из PEM; QUIC с ALPN `h3`, TCP с `h2` и `http/1.1` (прикрытие).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -14,11 +14,17 @@ use crate::config::ServerConfig;
 /// ALPN HTTP/3.
 const ALPN_H3: &[u8] = b"h3";
 
+/// ALPN HTTP/2.
+pub(crate) const ALPN_H2: &[u8] = b"h2";
+
+/// ALPN HTTP/1.1: на нём только сайт.
+const ALPN_HTTP11: &[u8] = b"http/1.1";
+
 /// Сколько молчания терпеть. Клиент шлёт пробу живости раз в десять секунд.
 const IDLE: Duration = Duration::from_secs(60);
 
-/// Настройки QUIC по файлам сертификата.
-pub fn server_config(config: &ServerConfig) -> Result<quinn::ServerConfig> {
+/// TLS 1.3 по файлам сертификата; `alpn` — по предпочтению сервера.
+fn tls_config(config: &ServerConfig, alpn: &[&[u8]]) -> Result<rustls::ServerConfig> {
     let certs = load_certs(&config.cert)?;
     let key = load_key(&config.cert_key)?;
 
@@ -29,8 +35,19 @@ pub fn server_config(config: &ServerConfig) -> Result<quinn::ServerConfig> {
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .context("сертификат не сходится со своим ключом")?;
-    tls.alpn_protocols = vec![ALPN_H3.to_vec()];
+    tls.alpn_protocols = alpn.iter().map(|name| name.to_vec()).collect();
+    Ok(tls)
+}
 
+/// Приём TLS по TCP: HTTP/2, а без него — сайт по HTTP/1.1.
+pub fn tcp_acceptor(config: &ServerConfig) -> Result<tokio_rustls::TlsAcceptor> {
+    let tls = tls_config(config, &[ALPN_H2, ALPN_HTTP11])?;
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(tls)))
+}
+
+/// Настройки QUIC по файлам сертификата.
+pub fn server_config(config: &ServerConfig) -> Result<quinn::ServerConfig> {
+    let tls = tls_config(config, &[ALPN_H3])?;
     let crypto = QuicServerConfig::try_from(tls).context("TLS не годится для QUIC")?;
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     let mut transport = quinn::TransportConfig::default();

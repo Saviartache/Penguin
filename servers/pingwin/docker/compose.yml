@@ -16,10 +16,12 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    # QUIC — это UDP. Внутри контейнера порт непривилегированный, сервер
-    # работает не под `root`; наружу — тот, что спросил `deploy.sh` (`.env`).
+    # QUIC — это UDP; где его режут, клиент идёт по TCP на тот же порт.
+    # Внутри контейнера порт непривилегированный, сервер работает не под
+    # `root`; наружу — тот, что спросил `deploy.sh` (`.env`).
     ports:
       - "${PINGWIN_PORT:-443}:8443/udp"
+      - "${PINGWIN_PORT:-443}:8443/tcp"
     volumes:
       - ./pingwin.toml:/etc/pingwin/pingwin.toml:ro
       - ./certs:/etc/pingwin/certs:ro

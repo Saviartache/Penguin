@@ -23,6 +23,11 @@ use args::{Cli, Command, ServiceCommand};
 use penguin_cli::args::Parsed;
 
 fn main() -> Result<()> {
+    // `ssh` зовёт нас как SSH_ASKPASS с подсказкой в аргументе — до разбора аргументов.
+    if let Some(password) = penguin_cli::askpass::reply() {
+        std::io::stdout().write_all(password.as_bytes())?;
+        return Ok(());
+    }
     let mut cli = match args::from_env() {
         Ok(Parsed::Run(cli)) => cli,
         Ok(Parsed::Print(text)) => {

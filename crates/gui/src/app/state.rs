@@ -376,6 +376,10 @@ pub struct ServersState {
     pub subscription_busy: bool,
     /// Страны серверов для флагов.
     pub countries: crate::app::countries::Countries,
+    /// Окно развёртывания сервера Pingwin поверх редактора; `None` — закрыто.
+    pub deploy: Option<crate::forms::deploy::Deploy>,
+    /// Идущее развёртывание; сброс обрывает поток и убивает процесс.
+    pub deploy_task: Option<iced::task::Handle>,
 }
 
 #[cfg(test)]

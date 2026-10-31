@@ -34,7 +34,14 @@ iced = { workspace = true, features = [
     "tokio",
     "image",
 ] }
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+# `process` и `io-util` — развёртывание сервера: поток строк из `penguin deploy`.
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "process",
+    "io-util",
+] }
 serde_json.workspace = true
 tracing.workspace = true
 # Разбор подсетей в правилах до сохранения.

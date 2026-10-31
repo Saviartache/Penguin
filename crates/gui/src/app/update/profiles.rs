@@ -91,6 +91,7 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
         ServersMessage::SubscriptionRefresh => subscription_refresh(app),
         ServersMessage::SubscriptionRefreshed(result) => subscription_refreshed(app, result),
         ServersMessage::CountriesLocated(asked, result) => countries_located(app, &asked, result),
+        ServersMessage::Deploy(message) => super::deploy::handle(app, message),
     }
 }
 

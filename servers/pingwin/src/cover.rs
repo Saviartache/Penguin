@@ -39,7 +39,11 @@ pub async fn serve(root: Option<&Path>, request: &Request<()>, mut stream: Strea
     }
 }
 
-async fn answer(root: Option<&Path>, request: &Request<()>) -> (StatusCode, &'static str, Bytes) {
+/// Ответ сайта: код, тип содержимого и тело (общий для HTTP/3 и HTTP/2).
+pub(crate) async fn answer<T>(
+    root: Option<&Path>,
+    request: &Request<T>,
+) -> (StatusCode, &'static str, Bytes) {
     let page =
         |status, text: &'static str| (status, "text/html", Bytes::from_static(text.as_bytes()));
     if !matches!(*request.method(), Method::GET | Method::HEAD) {

@@ -11,7 +11,7 @@ tags:
 # Настройки сервера Pingwin
 
 ```toml
-listen   = "0.0.0.0:8443"                        # внутри контейнера; наружу 443/udp
+listen   = "0.0.0.0:8443"                        # внутри контейнера; наружу 443/udp и 443/tcp
 key      = "<закрытый ключ>"
 cert     = "/etc/pingwin/certs/fullchain.pem"
 cert_key = "/etc/pingwin/certs/privkey.pem"
@@ -24,7 +24,7 @@ password = "<длинный случайный пароль>"
 
 | Поле | Что это |
 |---|---|
-| `listen` | адрес внутри контейнера |
+| `listen` | адрес внутри контейнера: UDP (HTTP/3) и TCP (HTTP/2) — [[Перенос по TCP]] |
 | `key` | закрытый X25519 из `keygen` — [[Ключи]] |
 | `cert`, `cert_key` | сертификат Let's Encrypt — [[Соединение]] |
 | `cover` | каталог сайта — [[Прикрытие]] |

@@ -8,7 +8,7 @@ use uikit::layout::{Flex, gap};
 use uikit::tokens::type_scale;
 use uikit::widgets::{Checkbox, Modal, Select, TextInput};
 
-use crate::app::message::{Message, ServersMessage};
+use crate::app::message::{DeployMessage, Message, ServersMessage};
 use crate::app::state::State;
 use crate::forms::protocol::FieldSpec;
 use crate::forms::server::Draft;
@@ -68,6 +68,13 @@ pub fn view<'a>(state: &'a State, draft: &'a Draft) -> Element<'a, Message> {
         )
         .on_close(Message::Servers(ServersMessage::EditorClosed))
         .on_backdrop(Message::Servers(ServersMessage::EditorClosed));
+
+    if crate::app::update::deploy::offers_deploy(draft) {
+        modal = modal.action(
+            crate::i18n::s().deploy_server,
+            Message::Servers(ServersMessage::Deploy(DeployMessage::Opened)),
+        );
+    }
 
     // Удаление — у существующего профиля и последним в ряду.
     if let Some(id) = &draft.id {

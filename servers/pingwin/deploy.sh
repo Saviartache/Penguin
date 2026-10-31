@@ -4,9 +4,11 @@
 #
 #   bash servers/pingwin/deploy.sh
 #
-# Спрашивает, куда ставить, и делает всё остальное сам: ставит Docker, увозит
-# исходники, собирает образ, получает сертификат Let's Encrypt, заводит ключи,
-# поднимает сервер и печатает ссылку-приглашение для клиента.
+# Спрашивает, куда ставить, увозит исходники из этого дерева и запускает на
+# сервере `docker/install.sh`: он ставит Docker, собирает образ, получает
+# сертификат Let's Encrypt, заводит ключи, поднимает сервер и печатает
+# ссылку-приглашение. Тот же `install.sh` зовёт окно клиента («Развернуть
+# сервер»), только исходники сервер качает сам — тег версии клиента с GitHub.
 #
 # Запускать можно сколько угодно раз: скрипт сначала смотрит, что уже стоит на
 # сервере, и на повторном запуске предлагает просто завести ещё одного
@@ -20,6 +22,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+INSTALL="$ROOT/servers/pingwin/docker/install.sh"
 REMOTE_DIR="/opt/pingwin"
 
 CONTEXT=""
@@ -113,25 +116,6 @@ fi
 
 remote() { ssh "${SSH_OPTS[@]}" "$SSH_USER@$SSH_HOST" "$@"; }
 
-# Ссылка собирается на сервере: ключ и пароль лежат только там, и тащить их
-# сюда ради одной строки незачем.
-show_link() {
-    local link
-    link="$(remote "docker run --rm -v $REMOTE_DIR/pingwin.toml:/etc/pingwin/pingwin.toml:ro \
-        pingwin-server:latest link --config /etc/pingwin/pingwin.toml --user '$USER_NAME' \
-        --host '$DOMAIN:$CLIENT_PORT' --name '$PROFILE_NAME'")"
-    [[ -n "$link" ]] || die "ссылка не собралась"
-
-    printf '\n\033[1m▶ Готово\033[0m\n\n'
-    printf '  Вставьте эту ссылку в клиент: «Добавить сервер» → «Ссылка».\n\n'
-    printf '\033[32m%s\033[0m\n\n' "$link"
-    printf '  Что дальше:\n'
-    printf '    журнал       ssh -p %s %s@%s "cd %s && docker compose logs -f pingwin"\n' \
-        "$SSH_PORT" "$SSH_USER" "$SSH_HOST" "$REMOTE_DIR"
-    printf '    ещё человек  запустите скрипт снова — он предложит добавить пользователя\n'
-    printf '    обновить     запустите скрипт снова и откажитесь от добавления\n\n'
-}
-
 bold "Проверяю связь"
 remote 'echo ok' >/dev/null 2>&1 \
     || die "не захожу по SSH на $SSH_USER@$SSH_HOST:$SSH_PORT"
@@ -144,7 +128,6 @@ ok "связь есть: ${SYSTEM:-неизвестная система}"
 # можно завести пользователя и выдать ссылку, ничего не пересобирая.
 bold "Смотрю, что уже стоит"
 MODE="full"
-USERS=""
 if remote "test -s $REMOTE_DIR/pingwin.toml && docker image inspect pingwin-server:latest >/dev/null 2>&1"; then
     USERS="$(remote "sed -n 's/^name = \"\\(.*\\)\"$/\\1/p' $REMOTE_DIR/pingwin.toml")"
     ok "сервер уже развёрнут; пользователи: $(printf '%s' "$USERS" | tr '\n' ' ')"
@@ -159,6 +142,7 @@ fi
 
 # --- каким будет профиль -----------------------------------------------------
 
+CERT_EMAIL=""
 if [[ "$MODE" == "user" ]]; then
     # Порт и имя у работающего сервера уже выбраны: спрашивать их заново
     # значило бы предлагать выдать ссылку, которая никуда не придёт.
@@ -167,7 +151,7 @@ if [[ "$MODE" == "user" ]]; then
     DOMAIN="$(remote "sed -n 's/^PINGWIN_DOMAIN=//p' $REMOTE_DIR/.env 2>/dev/null" || true)"
     CLIENT_PORT="${CLIENT_PORT:-443}"
     [[ -n "$DOMAIN" ]] || die "в $REMOTE_DIR/.env нет PINGWIN_DOMAIN — пройдите развёртывание заново"
-    info "порт $CLIENT_PORT/udp, имя $DOMAIN — как при развёртывании"
+    info "порт $CLIENT_PORT (udp и tcp), имя $DOMAIN — как при развёртывании"
 else
     bold "Каким будет сервер"
     info 'Имя: на него выписывается сертификат, и его увидит DPI. Оно должно'
@@ -175,8 +159,8 @@ else
     info 'быть открыт: через него Let'"'"'s Encrypt проверяет, что имя ваше.'
     DOMAIN="$(ask 'Доменное имя сервера')"
     [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || die "имя «$DOMAIN» не похоже на доменное"
-    info 'Порт: HTTP/3 браузеры ищут на 443/udp — там он и выглядит обычно.'
-    CLIENT_PORT="$(ask 'Порт UDP, на который будут приходить клиенты' '443')"
+    info 'Порт: сайты живут на 443 (HTTP/3 по udp, HTTP/2 по tcp) — там он и выглядит обычно.'
+    CLIENT_PORT="$(ask 'Порт (udp и tcp), на который будут приходить клиенты' '443')"
     CERT_EMAIL="$(ask 'Почта для Let'"'"'s Encrypt (пусто — без неё)' '')"
 fi
 
@@ -187,223 +171,90 @@ USER_NAME="$(ask 'Имя пользователя в профиле' 'client')"
     || die "имя пользователя: латиница, цифры, точка, дефис, подчёркивание"
 PROFILE_NAME="$(ask 'Как назвать профиль в клиенте' "Pingwin $DOMAIN")"
 
-# Пароль машинный: человеческий подбирается, а вводить его руками всё равно
-# не придётся — он уедет в ссылку.
-USER_PASSWORD="$(head -c 24 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
-
-# --- ещё один пользователь ---------------------------------------------------
-
-if [[ "$MODE" == "user" ]]; then
-    bold "Добавляю пользователя"
-    if printf '%s\n' "$USERS" | grep -qxF "$USER_NAME"; then
-        ok "$USER_NAME уже заведён — пароль прежний, ссылка будет та же"
-    else
-        # Дописывание, а не перезапись: файл примонтирован в живой контейнер,
-        # а bind-mount держит inode. Владелец и права при дописывании тоже
-        # остаются прежними.
-        remote "cat >> $REMOTE_DIR/pingwin.toml <<'PINGWIN_USER'
-
-[[users]]
-name = \"$USER_NAME\"
-password = \"$USER_PASSWORD\"
-PINGWIN_USER" || die "не дописал пользователя в $REMOTE_DIR/pingwin.toml"
-        ok "$USER_NAME заведён"
-
-        # Настройки читаются один раз при старте: без перезапуска сервер о
-        # новом пароле не узнает. `up -d` — на случай, если сейчас всё лежит.
-        remote "cd $REMOTE_DIR && docker compose up -d pingwin && docker compose restart pingwin" \
-            >/dev/null 2>&1 \
-            || die "сервер не перезапустился; посмотрите docker compose logs pingwin на сервере"
-        ok "сервер перечитал настройки"
-    fi
-    show_link
-    exit 0
-fi
-
-# --- Docker ------------------------------------------------------------------
-
-bold "Docker"
-if remote 'command -v docker >/dev/null 2>&1'; then
-    ok "уже стоит: $(remote 'docker --version')"
-else
-    info 'ставлю — это пара минут'
-    remote 'set -e
-        export DEBIAN_FRONTEND=noninteractive
-        (command -v apt-get >/dev/null && apt-get update -qq && apt-get install -y -qq curl ca-certificates) >/dev/null 2>&1 || true
-        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-        sh /tmp/get-docker.sh >/tmp/docker-install.log 2>&1' \
-        || die "Docker не поставился; подробности на сервере в /tmp/docker-install.log"
-    ok "поставлен: $(remote 'docker --version')"
-fi
-remote 'docker compose version >/dev/null 2>&1' \
-    || die "нет docker compose — обновите Docker на сервере"
-
-# --- память ------------------------------------------------------------------
-
-bold "Память под сборку"
-MEMORY="$(remote "free -m 2>/dev/null | awk '/^Mem:/ {print \$2}'" 2>/dev/null || echo 0)"
-if [[ "${MEMORY:-0}" -gt 0 && "${MEMORY:-0}" -lt 3000 ]]; then
-    if remote 'swapon --show 2>/dev/null | grep -q .'; then
-        ok "своп уже есть; памяти ${MEMORY} МБ"
-    else
-        info "памяти ${MEMORY} МБ — добавляю 2 ГБ свопа, иначе сборка не доживёт до конца"
-        if remote 'set -e
-            fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
-            grep -q "^/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab' 2>/dev/null
-        then
-            ok "своп добавлен"
-        else
-            info "своп не добавился — пробую собрать так"
-        fi
-    fi
-else
-    ok "памяти ${MEMORY:-?} МБ, свопа не нужно"
-fi
-
 # --- исходники ---------------------------------------------------------------
 
-bold "Везу исходники"
-CONTEXT="$(mktemp -d)"
-bash "$ROOT/servers/pingwin/docker/stage.sh" "$CONTEXT" >/dev/null
-info "$(du -sh "$CONTEXT" | cut -f1) исходников"
+if [[ "$MODE" == "full" ]]; then
+    bold "Везу исходники"
+    CONTEXT="$(mktemp -d)"
+    bash "$ROOT/servers/pingwin/docker/stage.sh" "$CONTEXT" >/dev/null
+    info "$(du -sh "$CONTEXT" | cut -f1) исходников"
 
-# Через tar, а не rsync: его может не быть ни здесь, ни там, а ставить его
-# ради одной выгрузки — лишний шаг в скрипте, который должен просто работать.
-# Старые исходники сносятся, настройки — нет.
-#
-# `cover` не сносится, хотя это тоже привезённое: он примонтирован в живой
-# контейнер, а bind-mount держит **inode**, а не путь. Удалить и создать
-# заново — значит оставить сервер с папкой, которой больше нет, и прикрытие
-# ответит `404` на всё. Файлы внутри tar заменит и так.
-remote "rm -rf $REMOTE_DIR/crates $REMOTE_DIR/protocols $REMOTE_DIR/servers
-        mkdir -p $REMOTE_DIR"
-tar -C "$CONTEXT" -czf - . | remote "tar -C $REMOTE_DIR -xzf -"
-ok "исходники на месте"
+    # Через tar, а не rsync: его может не быть ни здесь, ни там. Старые
+    # исходники сносятся, настройки — нет. `cover` не сносится: он примонтирован
+    # в живой контейнер, а bind-mount держит inode; файлы внутри tar заменит.
+    remote "rm -rf $REMOTE_DIR/crates $REMOTE_DIR/protocols $REMOTE_DIR/servers
+            mkdir -p $REMOTE_DIR"
+    tar -C "$CONTEXT" -czf - . | remote "tar -C $REMOTE_DIR -xzf -"
+    ok "исходники на месте"
+fi
 
-# Порт наружу спрашивается у человека, а файл в репозитории один на всех, —
-# поэтому он приезжает переменной окружения, а не правкой compose.yml.
-#
-# `PINGWIN_DOMAIN` compose не читает: он лежит рядом, чтобы повторный запуск и
-# продление сертификата знали имя и не переспрашивали его.
-remote "printf 'PINGWIN_PORT=%s\nPINGWIN_DOMAIN=%s\n' '$CLIENT_PORT' '$DOMAIN' > $REMOTE_DIR/.env"
+# --- установка на сервере ----------------------------------------------------
 
-# --- сборка ------------------------------------------------------------------
-
-bold "Собираю образ"
-info 'первый раз это минуты: сервер собирается из исходников на месте'
-remote "cd $REMOTE_DIR && docker compose build --quiet" || die "образ не собрался"
-ok "образ готов"
-
-# --- сертификат --------------------------------------------------------------
-
-bold "Сертификат"
-if remote "test -d $REMOTE_DIR/letsencrypt/live/$DOMAIN"; then
-    ok "уже выписан на $DOMAIN"
+# Значения уже проверены; `%q` — на случай пробела в имени профиля.
+ENVIRONMENT="$(printf 'PINGWIN_DOMAIN=%q PINGWIN_PORT=%q PINGWIN_EMAIL=%q PINGWIN_USER=%q PINGWIN_PROFILE=%q PINGWIN_SOURCE=uploaded PINGWIN_MODE=%q' \
+    "$DOMAIN" "$CLIENT_PORT" "$CERT_EMAIL" "$USER_NAME" "$PROFILE_NAME" "$MODE")"
+if [[ "$SSH_USER" == root ]]; then
+    RUN="env $ENVIRONMENT bash -s"
 else
-    if [[ -n "${CERT_EMAIL:-}" ]]; then
-        CERT_CONTACT="--email '$CERT_EMAIL'"
-    else
-        CERT_CONTACT="--register-unsafely-without-email"
-    fi
-    if remote 'command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"'; then
-        remote "ufw allow 80/tcp" >/dev/null 2>&1 && ok "порт 80/tcp открыт в ufw для проверки имени"
-    fi
-    info "прошу Let's Encrypt — он сходит на http://$DOMAIN/"
-    remote "cd $REMOTE_DIR && docker compose run --rm --service-ports certbot certonly \
-        --standalone -d '$DOMAIN' --agree-tos -n $CERT_CONTACT" >/dev/null 2>&1 \
-        || die "сертификат не выписан: $DOMAIN указывает на этот сервер? порт 80/tcp открыт?"
-    ok "выписан на $DOMAIN"
-fi
-remote "bash $REMOTE_DIR/renew.sh" || die "сертификат не разложился для сервера"
-
-# Сертификат живёт 90 дней. Продление — раз в неделю: certbot сам решает,
-# пора ли, а сервер перезапускается, только если файл сменился.
-remote "( crontab -l 2>/dev/null | grep -v pingwin-renew; \
-    echo '17 4 * * 1 bash $REMOTE_DIR/renew.sh >/dev/null 2>&1 # pingwin-renew' ) | crontab -" \
-    && ok "продление раз в неделю — в cron" \
-    || info "cron не настроился: продлевайте руками — bash $REMOTE_DIR/renew.sh"
-
-# --- ключи и настройки -------------------------------------------------------
-
-bold "Ключи и пользователи"
-if remote "test -s $REMOTE_DIR/pingwin.toml"; then
-    ok "настройки уже есть — ключ и пароли не трогаю"
-    info 'иначе разосланные ссылки перестали бы работать'
-    # Настройки сервера поверх TCP: прикрытие было адресом, сертификата не было.
-    if remote "grep -q '^fallback' $REMOTE_DIR/pingwin.toml"; then
-        remote "sed -i 's|^fallback = .*|cert = \"/etc/pingwin/certs/fullchain.pem\"\\ncert_key = \"/etc/pingwin/certs/privkey.pem\"\\ncover = \"/srv/cover\"|' $REMOTE_DIR/pingwin.toml" \
-            || die "не переписал прежние настройки"
-        ok "прежние настройки переведены на HTTP/3"
-    fi
-    USER_NAME="$(remote "sed -n 's/^name = \"\\(.*\\)\"$/\\1/p' $REMOTE_DIR/pingwin.toml | head -1")"
-else
-    SERVER_KEY="$(remote 'docker run --rm pingwin-server:latest keygen' \
-        | sed -n 's/^key = "\(.*\)"$/\1/p')"
-    [[ -n "$SERVER_KEY" ]] || die "ключ не сгенерировался"
-
-    remote "cat > $REMOTE_DIR/pingwin.toml <<'PINGWIN_CONFIG'
-# Настройки сервера Pingwin. Созданы при развёртывании.
-# Ключ и пароли есть только здесь — не копируйте этот файл никуда.
-
-# UDP. Внутри контейнера порт непривилегированный: наружу его публикует
-# compose.yml на том, который спросили при развёртывании.
-listen = \"0.0.0.0:8443\"
-
-key = \"$SERVER_KEY\"
-
-# Сертификат на $DOMAIN; его раскладывает и продлевает renew.sh.
-cert = \"/etc/pingwin/certs/fullchain.pem\"
-cert_key = \"/etc/pingwin/certs/privkey.pem\"
-
-# Сайт, который видит тот, кто не прошёл опознание.
-cover = \"/srv/cover\"
-
-[[users]]
-name = \"$USER_NAME\"
-password = \"$USER_PASSWORD\"
-PINGWIN_CONFIG"
-
-    # Владелец — тот, под кем работает сервер внутри контейнера (Dockerfile,
-    # --uid 10001): иначе файл либо читается всеми на хосте, либо не читается
-    # сервером.
-    remote "chown 10001:10001 $REMOTE_DIR/pingwin.toml && chmod 600 $REMOTE_DIR/pingwin.toml"
-    ok "ключ заведён, пользователь — $USER_NAME"
+    RUN="sudo -n env $ENVIRONMENT bash -s"
 fi
 
-# --- запуск ------------------------------------------------------------------
+# Без `declare -A`: у macOS bash 3.2.
+title() {
+    case "$1" in
+        inspect) echo "Смотрю, что уже стоит" ;;  docker) echo "Docker" ;;
+        memory) echo "Память под сборку" ;;       source) echo "Исходники" ;;
+        build) echo "Собираю образ" ;;            cert) echo "Сертификат" ;;
+        keys) echo "Ключи и пользователи" ;;      start) echo "Поднимаю" ;;
+        firewall) echo "Брандмауэр" ;;            check) echo "Проверяю на сервере" ;;
+        link) echo "Ссылка" ;;                    *) echo "$1" ;;
+    esac
+}
 
-bold "Поднимаю"
-# `--force-recreate`, а не просто `up -d`: сам по себе он пересоздаёт только
-# то, у чего изменился образ, а привезённые файлы примонтированы — и
-# контейнер, оставшийся с прошлого раза, продолжил бы читать прошлые.
-remote "cd $REMOTE_DIR && docker compose up -d --force-recreate --remove-orphans" >/dev/null 2>&1 \
-    || die "не поднялось; посмотрите docker compose logs pingwin на сервере"
-sleep 5
-STATUS="$(remote "cd $REMOTE_DIR && docker compose ps --format '{{.Service}} {{.Status}}'")"
-echo "$STATUS" | sed 's/^/    /'
-echo "$STATUS" | grep -q 'pingwin.*Up' \
-    || die "сервер не запустился; посмотрите docker compose logs pingwin на сервере"
-ok "работает"
+LINK=""
+FAILURE=""
+while IFS= read -r line; do
+    case "$line" in
+        "::step "*) bold "$(title "${line#::step }")" ;;
+        "::ok "*)   ok "${line#::ok }" ;;
+        "::info "*) info "${line#::info }" ;;
+        "::link "*) LINK="${line#::link }" ;;
+        "::fail "*) FAILURE="${line#::fail }" ;;
+    esac
+done < <(remote "$RUN" < "$INSTALL" 2>/dev/null || true)
 
-# --- брандмауэр --------------------------------------------------------------
-
-if remote 'command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"'; then
-    remote "ufw allow $CLIENT_PORT/udp" >/dev/null 2>&1 && ok "порт $CLIENT_PORT/udp открыт в ufw"
-fi
+[[ -z "$FAILURE" ]] || die "$FAILURE"
+[[ -n "$LINK" ]] || die "установка оборвалась; на сервере: cd $REMOTE_DIR && docker compose logs pingwin"
 
 # --- проверка снаружи --------------------------------------------------------
 
-bold "Проверяю снаружи"
-if command -v curl >/dev/null 2>&1 && curl --version | grep -q HTTP3; then
-    if curl -sS --http3-only --max-time 15 -o /dev/null "https://$DOMAIN:$CLIENT_PORT/" 2>/dev/null; then
-        ok "по HTTP/3 отвечает обычный сайт — так и задумано: чужой видит прикрытие"
+if [[ "$MODE" == "full" ]]; then
+    bold "Проверяю снаружи"
+    if command -v curl >/dev/null 2>&1 && curl --version | grep -q HTTP3; then
+        if curl -sS --http3-only --max-time 15 -o /dev/null "https://$DOMAIN:$CLIENT_PORT/" 2>/dev/null; then
+            ok "по HTTP/3 отвечает обычный сайт — так и задумано: чужой видит прикрытие"
+        else
+            info "по HTTP/3 снаружи не ответил; проверьте UDP $CLIENT_PORT у хостера"
+        fi
     else
-        info "по HTTP/3 снаружи не ответил; проверьте UDP $CLIENT_PORT у хостера"
+        info 'curl без HTTP/3 — проверку по UDP пропускаю'
     fi
-else
-    info 'curl без HTTP/3 — проверку снаружи пропускаю'
+    if command -v curl >/dev/null 2>&1; then
+        if curl -sS --http2 --max-time 15 -o /dev/null "https://$DOMAIN:$CLIENT_PORT/" 2>/dev/null; then
+            ok "по HTTP/2 (tcp) отвечает тот же сайт — там, где режут UDP, клиент пойдёт сюда"
+        else
+            info "по HTTP/2 снаружи не ответил; проверьте TCP $CLIENT_PORT у хостера"
+        fi
+    fi
 fi
 
 # --- ссылка ------------------------------------------------------------------
 
-show_link
+printf '\n\033[1m▶ Готово\033[0m\n\n'
+printf '  Вставьте эту ссылку в клиент: «Добавить сервер» → «Ссылка».\n\n'
+printf '\033[32m%s\033[0m\n\n' "$LINK"
+printf '  Что дальше:\n'
+printf '    журнал       ssh -p %s %s@%s "cd %s && docker compose logs -f pingwin"\n' \
+    "$SSH_PORT" "$SSH_USER" "$SSH_HOST" "$REMOTE_DIR"
+printf '    ещё человек  запустите скрипт снова — он предложит добавить пользователя\n'
+printf '    обновить     запустите скрипт снова и откажитесь от добавления\n\n'

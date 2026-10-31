@@ -1,6 +1,7 @@
-//! Направление: одно соединение HTTP/3 на профиль; умершее заменяется на следующем запросе.
+//! Направление: одно соединение на профиль (QUIC или TCP); умершее заменяется на следующем запросе.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use async_trait::async_trait;
 use penguin_core::address::SocketAddress;
@@ -15,8 +16,8 @@ use penguin_proto::stream::ProxyStream;
 use tokio::sync::Mutex;
 
 use crate::config::PingwinConfig;
+use crate::connection::{Connection, Target};
 use crate::error::PingwinResult;
-use crate::session::{Session, Target};
 
 /// Направление Pingwin.
 pub struct PingwinOutbound {
@@ -24,7 +25,9 @@ pub struct PingwinOutbound {
     server: String,
     target: Target,
     dialer: Arc<dyn Dialer>,
-    session: Mutex<Option<Arc<Session>>>,
+    connection: Mutex<Option<Arc<Connection>>>,
+    /// В `auto` прошлый раз поднялся TCP.
+    prefer_tcp: AtomicBool,
 }
 
 impl std::fmt::Debug for PingwinOutbound {
@@ -53,29 +56,45 @@ impl PingwinOutbound {
                 tls: config.tls()?,
                 server_public: config.server_public()?,
                 password: config.password.into_bytes(),
+                transport: config.transport,
             },
             id,
             server: config.server,
             dialer,
-            session: Mutex::new(None),
+            connection: Mutex::new(None),
+            prefer_tcp: AtomicBool::new(false),
         })
     }
 
     /// Поднимает соединение заранее, чтобы «подключено» не было ложью.
     pub async fn warm_up(&self) -> PingwinResult<()> {
-        self.session().await.map(drop)
+        self.connection().await.map(drop)
+    }
+
+    /// Каким переносом поднято соединение: `quic`, `tcp`; `None` — его нет.
+    pub async fn transport(&self) -> Option<&'static str> {
+        let slot = self.connection.lock().await;
+        slot.as_ref()
+            .filter(|connection| connection.is_alive())
+            .map(|connection| connection.name())
     }
 
     /// Живое соединение: прежнее или новое (под замком, чтобы не поднять сотню).
-    async fn session(&self) -> PingwinResult<Arc<Session>> {
-        let mut slot = self.session.lock().await;
-        if let Some(alive) = slot.as_ref().filter(|session| session.is_alive()) {
+    async fn connection(&self) -> PingwinResult<Arc<Connection>> {
+        let mut slot = self.connection.lock().await;
+        if let Some(alive) = slot.as_ref().filter(|connection| connection.is_alive()) {
             return Ok(Arc::clone(alive));
         }
-        let session = Arc::new(Session::establish(&self.target, self.dialer.as_ref()).await?);
-        tracing::debug!(server = %self.server, "соединение pingwin поднято");
-        *slot = Some(Arc::clone(&session));
-        Ok(session)
+        let connection = Arc::new(
+            Connection::establish(&self.target, self.dialer.as_ref(), &self.prefer_tcp).await?,
+        );
+        tracing::debug!(
+            server = %self.server,
+            transport = connection.name(),
+            "соединение pingwin поднято"
+        );
+        *slot = Some(Arc::clone(&connection));
+        Ok(connection)
     }
 }
 
@@ -102,27 +121,31 @@ impl Outbound for PingwinOutbound {
         &self,
         target: &SocketAddress,
     ) -> Result<Box<dyn ProxyStream>, ProtocolError> {
-        let session = self.session().await?;
-        Ok(Box::new(session.open_tcp(target).await?))
+        let connection = self.connection().await?;
+        Ok(connection
+            .open_tcp(target, &self.target, self.dialer.as_ref())
+            .await?)
     }
 
     async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
-        let session = self.session().await?;
-        Ok(Box::new(session.open_udp().await?))
+        let connection = self.connection().await?;
+        Ok(connection
+            .open_udp(&self.target, self.dialer.as_ref())
+            .await?)
     }
 
     async fn rtt(&self) -> Option<Rtt> {
-        let session = self.session.lock().await.clone()?;
-        if !session.is_alive() {
+        let connection = self.connection.lock().await.clone()?;
+        if !connection.is_alive() {
             return None;
         }
-        let millis = u32::try_from(session.rtt().as_millis()).unwrap_or(u32::MAX);
+        let millis = u32::try_from(connection.rtt()?.as_millis()).unwrap_or(u32::MAX);
         Some(Rtt::from_millis(millis))
     }
 
     async fn close(&self) -> Result<(), ProtocolError> {
-        if let Some(session) = self.session.lock().await.take() {
-            session.close().await;
+        if let Some(connection) = self.connection.lock().await.take() {
+            connection.close().await;
         }
         Ok(())
     }

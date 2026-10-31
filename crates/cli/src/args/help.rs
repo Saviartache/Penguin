@@ -153,6 +153,35 @@ Options:
     global_options!()
 );
 
+pub(super) const DEPLOY: &str = concat!(
+    "Развернуть сервер на своей машине по SSH
+
+Usage: penguin deploy [OPTIONS] <COMMAND>
+
+Commands:
+  pingwin  Сервер Pingwin в Docker: сборка, сертификат, ключи, ссылка
+
+Options:
+",
+    global_options!()
+);
+
+pub(super) const DEPLOY_PINGWIN: &str = concat!(
+    "Развернуть сервер Pingwin на машине Linux через системный ssh (OpenSSH 8.4+).
+
+Запрос — JSON на stdin, не в аргументах: пароль не должен попасть в список
+процессов. Поля: host, ssh_port [22], ssh_user [root], password или key_file
+(без них — агент ssh), domain, port [443], email, user [client], profile.
+Пользователю не root нужен sudo без пароля. Сервер собирается из исходников
+той же версии, что у клиента; в конце печатается ссылка pingwin://.
+
+Usage: penguin deploy pingwin [OPTIONS] < запрос.json
+
+Options:
+",
+    global_options!()
+);
+
 pub(super) const GEOIP: &str = concat!(
     "Страна серверов по базе GeoIP.
 

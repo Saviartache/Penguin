@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Сервер протокола Pingwin: HTTP/3, опознание, статическое прикрытие"
+description = "Сервер протокола Pingwin: HTTP/3 и HTTP/2, опознание, статическое прикрытие"
 
 [[bin]]
 name = "pingwin-server"
@@ -26,6 +26,9 @@ h3-quinn.workspace = true
 http.workspace = true
 quinn = { workspace = true, features = ["rustls-ring", "runtime-tokio"] }
 rustls = { workspace = true, features = ["ring", "std"] }
+# Перенос по TCP: HTTP/2 поверх TLS.
+h2.workspace = true
+tokio-rustls.workspace = true
 
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "signal", "fs"] }
 bytes.workspace = true

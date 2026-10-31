@@ -6,6 +6,7 @@ use penguin_config::schema::routing::TunnelMode;
 use penguin_core::network::Network;
 use penguin_ipc::schema::{Event, Response};
 
+use crate::forms::deploy::{Event as DeployEvent, Field as DeployField};
 use crate::forms::rule::{Action as DraftAction, Section as DraftSection};
 
 /// Что произошло в интерфейсе.
@@ -242,6 +243,25 @@ pub enum ServersMessage {
         Vec<String>,
         Result<std::collections::HashMap<String, String>, String>,
     ),
+    /// Окно развёртывания сервера Pingwin.
+    Deploy(DeployMessage),
+}
+
+/// Окно развёртывания сервера Pingwin.
+#[derive(Debug, Clone)]
+pub enum DeployMessage {
+    /// Открыть окно из редактора нового профиля.
+    Opened,
+    /// Изменено поле.
+    Changed(DeployField, String),
+    /// «Развернуть».
+    Started,
+    /// Строка вывода CLI.
+    Event(DeployEvent),
+    /// Процесс завершился: успех или причина.
+    Finished(Result<(), String>),
+    /// «Отмена»: идущее развёртывание убивается, иначе окно закрывается.
+    Cancelled,
 }
 
 /// Раздельное тоннелирование.

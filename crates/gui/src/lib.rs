@@ -6,6 +6,7 @@
 
 mod app;
 mod console;
+mod deploy;
 mod flags;
 mod forms;
 mod geoip;

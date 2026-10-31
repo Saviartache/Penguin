@@ -7,6 +7,10 @@
 use std::path::Path;
 use std::process::Command;
 
+/// Флаг запуска без мелькнувшей консоли у отладочной сборки.
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Запускает это же приложение с аргументами и возвращает его `stdout`.
 pub(crate) fn run_self(args: &[&str]) -> Result<Vec<u8>, String> {
     let executable = std::env::current_exe().map_err(|err| err.to_string())?;
@@ -18,11 +22,7 @@ pub(crate) fn run(executable: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let mut command = Command::new(executable);
     command.args(args);
     #[cfg(windows)]
-    {
-        // Без мелькнувшей консоли у отладочной сборки.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::os::windows::process::CommandExt::creation_flags(&mut command, CREATE_NO_WINDOW);
-    }
+    std::os::windows::process::CommandExt::creation_flags(&mut command, CREATE_NO_WINDOW);
 
     let output = command.output().map_err(|err| err.to_string())?;
     if output.status.success() {
@@ -33,7 +33,7 @@ pub(crate) fn run(executable: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 }
 
 /// Причина отказа: последняя непустая строка `stderr` без «Error: ».
-fn failure(stderr: &[u8], status: std::process::ExitStatus) -> String {
+pub(crate) fn failure(stderr: &[u8], status: std::process::ExitStatus) -> String {
     let text = String::from_utf8_lossy(stderr);
     let line = text
         .lines()

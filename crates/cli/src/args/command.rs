@@ -24,6 +24,15 @@ pub enum Command {
     Subscription(SubscriptionCommand),
     /// Страна серверов `хост:порт` по базе GeoIP.
     Geoip(Vec<String>),
+    /// Развёртывание сервера по SSH.
+    Deploy(DeployCommand),
+}
+
+/// Что развернуть.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeployCommand {
+    /// Сервер Pingwin; запрос — JSON на stdin.
+    Pingwin,
 }
 
 /// Команды подписки.
@@ -112,7 +121,7 @@ pub enum RulesCommand {
 }
 
 /// Имена команд этого модуля.
-pub const NAMES: [&str; 8] = [
+pub const NAMES: [&str; 9] = [
     "socks",
     "http",
     "profiles",
@@ -121,6 +130,7 @@ pub const NAMES: [&str; 8] = [
     "update",
     "subscription",
     "geoip",
+    "deploy",
 ];
 
 /// Разбирает команду; первым идёт её имя, общие флаги уже убраны.
@@ -138,8 +148,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed<Command>, 
         "update" => update(lx).map(|p| p.map(Command::Update)),
         "subscription" => subscription(lx).map(|p| p.map(Command::Subscription)),
         "geoip" => geoip(lx).map(|p| p.map(Command::Geoip)),
+        "deploy" => deploy(lx).map(|p| p.map(Command::Deploy)),
         _ => Err(ArgsError::UnknownCommand(name)),
     }
+}
+
+fn deploy(mut lx: Lexer) -> Result<Parsed<DeployCommand>, ArgsError> {
+    subcommand(&mut lx, "deploy", help::DEPLOY)?.and_then(|name| match name.as_str() {
+        "pingwin" => leaf(lx, help::DEPLOY_PINGWIN, DeployCommand::Pingwin),
+        _ => Err(ArgsError::UnknownCommand(name)),
+    })
 }
 
 fn geoip(mut lx: Lexer) -> Result<Parsed<Vec<String>>, ArgsError> {
@@ -606,6 +624,20 @@ mod tests {
             ]))
         );
         assert_eq!(run(&["geoip"]), Ok(Command::Geoip(Vec::new())));
+    }
+
+    #[test]
+    fn deploy_subcommands() {
+        assert_eq!(
+            run(&["deploy", "pingwin"]),
+            Ok(Command::Deploy(DeployCommand::Pingwin))
+        );
+        assert_eq!(run(&["deploy"]), Err(ArgsError::MissingCommand("deploy")));
+        assert_eq!(
+            run(&["deploy", "pingwin", "--password", "x"]),
+            Err(ArgsError::UnknownOption("--password".into()))
+        );
+        assert!(help(&["deploy", "pingwin", "-h"]).contains("deploy pingwin"));
     }
 
     #[test]

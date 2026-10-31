@@ -1,4 +1,5 @@
 //! Поток `CONNECT`: писать можно сразу, ответ ждёт первое чтение (отказ - его ошибка).
+//! Половины потока — HTTP/3 (`PingwinStream::h3`) или HTTP/2 (`tcp::io`).
 
 use std::future::Future;
 use std::io;
@@ -13,47 +14,59 @@ use crate::error::{PingwinError, PingwinResult};
 /// Сколько тела отказа читать как причину.
 const MAX_REASON: u64 = 1024;
 
-type Waiting = Pin<Box<dyn Future<Output = (RecvStream, PingwinResult<()>)> + Send>>;
+type Waiting<R> = Pin<Box<dyn Future<Output = PingwinResult<R>> + Send>>;
 
 /// Приём: ответ в пути, тело или отказ.
-enum Recv {
-    Waiting(Waiting),
-    Body(RecvStream),
+enum Recv<R> {
+    Waiting(Waiting<R>),
+    Body(R),
     Failed(io::ErrorKind, String),
 }
 
 /// Поток до цели через сервер Pingwin.
-pub struct PingwinStream {
-    send: SendStream,
-    recv: Recv,
+pub struct PingwinStream<W = SendStream, R = RecvStream> {
+    send: W,
+    recv: Recv<R>,
 }
 
-impl std::fmt::Debug for PingwinStream {
+impl<W, R> std::fmt::Debug for PingwinStream<W, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PingwinStream")
-            .field("id", &self.send.id())
-            .finish()
+        f.debug_struct("PingwinStream").finish_non_exhaustive()
     }
 }
 
 impl PingwinStream {
-    pub(crate) fn new(stream: RequestStream, target: String) -> Self {
+    /// Поток HTTP/3: ответ сервера дочитывается при первом чтении.
+    pub(crate) fn h3(stream: RequestStream, target: String) -> Self {
         let (send, mut recv) = stream.split();
-        let waiting: Waiting = Box::pin(async move {
-            let confirmed = confirm(&mut recv, target).await;
-            (recv, confirmed)
-        });
+        Self::new(send, async move {
+            let status = recv.response().await?.status();
+            confirm(status, &mut recv, target).await?;
+            Ok(recv)
+        })
+    }
+}
+
+impl<W, R> PingwinStream<W, R>
+where
+    W: Unpin,
+    R: Unpin,
+{
+    /// Собирает поток из половины записи и ожидания ответа, отдающего половину чтения.
+    pub(crate) fn new(
+        send: W,
+        waiting: impl Future<Output = PingwinResult<R>> + Send + 'static,
+    ) -> Self {
         Self {
             send,
-            recv: Recv::Waiting(waiting),
+            recv: Recv::Waiting(Box::pin(waiting)),
         }
     }
 
-    fn poll_body(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<&mut RecvStream>> {
+    fn poll_body(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<&mut R>> {
         if let Recv::Waiting(waiting) = &mut self.recv {
-            let (recv, confirmed) = ready!(waiting.as_mut().poll(cx));
-            self.recv = match confirmed {
-                Ok(()) => Recv::Body(recv),
+            self.recv = match ready!(waiting.as_mut().poll(cx)) {
+                Ok(recv) => Recv::Body(recv),
                 Err(err) => {
                     let err = io::Error::from(err);
                     Recv::Failed(err.kind(), err.to_string())
@@ -68,9 +81,11 @@ impl PingwinStream {
     }
 }
 
-/// Ждёт ответ; не `2xx` — отказ с причиной из тела.
-async fn confirm(recv: &mut RecvStream, target: String) -> PingwinResult<()> {
-    let status = recv.response().await?.status();
+/// Не `2xx` — отказ с причиной из тела.
+pub(crate) async fn confirm<R>(status: u16, recv: &mut R, target: String) -> PingwinResult<()>
+where
+    R: AsyncRead + Unpin,
+{
     if (200..300).contains(&status) {
         return Ok(());
     }
@@ -89,7 +104,11 @@ async fn confirm(recv: &mut RecvStream, target: String) -> PingwinResult<()> {
     })
 }
 
-impl AsyncRead for PingwinStream {
+impl<W, R> AsyncRead for PingwinStream<W, R>
+where
+    W: Unpin,
+    R: AsyncRead + Unpin,
+{
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -100,7 +119,11 @@ impl AsyncRead for PingwinStream {
     }
 }
 
-impl AsyncWrite for PingwinStream {
+impl<W, R> AsyncWrite for PingwinStream<W, R>
+where
+    W: AsyncWrite + Unpin,
+    R: Unpin,
+{
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

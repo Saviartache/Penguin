@@ -1,7 +1,7 @@
 //! Настройки сервера: где слушать, чей ключ, какой сертификат, кого пускать.
 //!
 //! ```toml
-//! listen   = "0.0.0.0:443"                        # UDP
+//! listen   = "0.0.0.0:443"                        # UDP и TCP
 //! key      = "…"                                  # закрытый ключ, base64; выдаёт `keygen`
 //! cert     = "/etc/pingwin/fullchain.pem"
 //! cert_key = "/etc/pingwin/privkey.pem"
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Адрес и порт UDP, на которых слушать.
+    /// Адрес и порт, на которых слушать: UDP (HTTP/3) и TCP (HTTP/2).
     pub listen: String,
 
     /// Закрытый ключ сервера, тридцать два байта в base64.

@@ -138,6 +138,72 @@ pub struct Strings {
     pub import_conf_failed: &'static str,
     /// Протокол профиля этой сборке неизвестен.
     pub protocol_unknown: &'static str,
+
+    // --- развёртывание сервера Pingwin ---
+    /// Кнопка редактора и заголовок окна развёртывания.
+    pub deploy_server: &'static str,
+    /// Начать развёртывание.
+    pub deploy: &'static str,
+    /// Отмена.
+    pub cancel: &'static str,
+    /// Порт SSH.
+    pub ssh_port: &'static str,
+    /// Пользователь SSH.
+    pub ssh_user: &'static str,
+    /// Пароль SSH.
+    pub ssh_password: &'static str,
+    /// Подсказка в поле пароля SSH: пусто — ключ или агент.
+    pub ssh_password_hint: &'static str,
+    /// Файл ключа SSH.
+    pub ssh_key_file: &'static str,
+    /// Доменное имя сервера.
+    pub deploy_domain: &'static str,
+    /// Подсказка под доменом: имя уже указывает на сервер.
+    pub deploy_domain_hint: &'static str,
+    /// Порт Pingwin.
+    pub deploy_port: &'static str,
+    /// Подсказка в поле порта Pingwin.
+    pub deploy_port_hint: &'static str,
+    /// Почта для Let's Encrypt.
+    pub deploy_email: &'static str,
+    /// Имя пользователя Pingwin.
+    pub deploy_user: &'static str,
+    /// Не задан адрес сервера SSH.
+    pub need_deploy_host: &'static str,
+    /// Не задан домен.
+    pub need_deploy_domain: &'static str,
+    /// Не задан пользователь SSH.
+    pub need_ssh_user: &'static str,
+    /// Не задано имя пользователя Pingwin.
+    pub need_deploy_user: &'static str,
+    /// Порт вне 1..65535.
+    pub bad_port: &'static str,
+    /// Заданы и пароль, и файл ключа.
+    pub password_or_key: &'static str,
+    /// Развёртывание закончилось без ссылки.
+    pub deploy_no_link: &'static str,
+    /// Этапы развёртывания.
+    pub stage_inspect: &'static str,
+    /// Этап: Docker.
+    pub stage_docker: &'static str,
+    /// Этап: память под сборку.
+    pub stage_memory: &'static str,
+    /// Этап: исходники.
+    pub stage_source: &'static str,
+    /// Этап: сборка образа.
+    pub stage_build: &'static str,
+    /// Этап: сертификат.
+    pub stage_cert: &'static str,
+    /// Этап: ключи и пользователи.
+    pub stage_keys: &'static str,
+    /// Этап: запуск.
+    pub stage_start: &'static str,
+    /// Этап: брандмауэр.
+    pub stage_firewall: &'static str,
+    /// Этап: проверка снаружи.
+    pub stage_check: &'static str,
+    /// Этап: ссылка.
+    pub stage_link: &'static str,
     /// Новый сервер.
     pub new_server: &'static str,
     /// Правка сервера.
@@ -579,6 +645,38 @@ mod tests {
                 table.wireguard_configs,
                 table.import_conf_failed,
                 table.protocol_unknown,
+                table.deploy_server,
+                table.deploy,
+                table.cancel,
+                table.ssh_port,
+                table.ssh_user,
+                table.ssh_password,
+                table.ssh_password_hint,
+                table.ssh_key_file,
+                table.deploy_domain,
+                table.deploy_domain_hint,
+                table.deploy_port,
+                table.deploy_port_hint,
+                table.deploy_email,
+                table.deploy_user,
+                table.need_deploy_host,
+                table.need_deploy_domain,
+                table.need_ssh_user,
+                table.need_deploy_user,
+                table.bad_port,
+                table.password_or_key,
+                table.deploy_no_link,
+                table.stage_inspect,
+                table.stage_docker,
+                table.stage_memory,
+                table.stage_source,
+                table.stage_build,
+                table.stage_cert,
+                table.stage_keys,
+                table.stage_start,
+                table.stage_firewall,
+                table.stage_check,
+                table.stage_link,
                 table.username,
                 table.proxy_address,
                 table.socks_address_example,

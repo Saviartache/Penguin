@@ -1,4 +1,4 @@
-//! Параметры: адрес сервера, имя в его сертификате, открытый ключ, пароль.
+//! Параметры: адрес сервера, имя в его сертификате, открытый ключ, пароль, перенос.
 
 use penguin_core::address::Address;
 use penguin_core::endpoint::ServerEndpoint;
@@ -28,6 +28,22 @@ pub struct PingwinConfig {
     /// общедоступным центром.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ca: Option<String>,
+
+    /// Чем идти до сервера.
+    pub transport: Transport,
+}
+
+/// Перенос до сервера.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    /// QUIC с форой, следом TCP; кто первый поднялся, тот и работает.
+    #[default]
+    Auto,
+    /// Только HTTP/3 по UDP.
+    Quic,
+    /// Только HTTP/2 по TCP: там, где UDP режут.
+    Tcp,
 }
 
 impl PingwinConfig {
@@ -103,6 +119,7 @@ impl std::fmt::Debug for PingwinConfig {
             .field("password", &"<скрыт>")
             .field("sni", &self.sni)
             .field("ca", &self.ca)
+            .field("transport", &self.transport)
             .finish()
     }
 }
@@ -186,6 +203,16 @@ mod tests {
             "password": "secret",
             "zero_rtt": true,
         });
+        assert!(serde_json::from_value::<PingwinConfig>(raw).is_err());
+    }
+
+    #[test]
+    fn the_transport_is_auto_unless_named() {
+        assert_eq!(config().transport, Transport::Auto);
+        let raw = json!({ "server": "example.com:443", "transport": "tcp" });
+        let parsed: PingwinConfig = serde_json::from_value(raw).expect("разбирается");
+        assert_eq!(parsed.transport, Transport::Tcp);
+        let raw = json!({ "server": "example.com:443", "transport": "ws" });
         assert!(serde_json::from_value::<PingwinConfig>(raw).is_err());
     }
 

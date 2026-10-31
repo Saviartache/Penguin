@@ -4,6 +4,7 @@
 //! Заголовка и прокрутки вокруг списка нет: прокручивается список в панели, отступ
 //! даёт окно ([`crate::app::PAGE_PADDING`]).
 
+pub mod deploy;
 pub mod editor;
 pub mod list;
 pub mod picker;
@@ -23,6 +24,10 @@ pub fn view(state: &State) -> Element<'_, Message> {
     }
     if state.servers.wireguard {
         return wireguard::view(state);
+    }
+    // Развёртывание открывается из редактора и в него же возвращает.
+    if let Some(deploy) = state.servers.deploy.as_ref() {
+        return deploy::view(state, deploy);
     }
     if let Some(draft) = state.servers.editor.as_ref() {
         return editor::view(state, draft);

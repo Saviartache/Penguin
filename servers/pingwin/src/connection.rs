@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use h3::server::RequestResolver;
-use http::{Method, Request, Response, StatusCode};
+use http::{Method, Response, StatusCode};
 use penguin_pingwin::wire::keys::{EXPORTER_LABEL, KEY_LEN};
 use penguin_pingwin::wire::{auth, udp};
 use tokio::sync::mpsc;
 
+use crate::admission;
 use crate::cover::{self, Stream};
 use crate::relay;
 use crate::server::Server;
@@ -96,8 +97,11 @@ async fn handle(state: Arc<State>, resolver: Resolver) {
             return;
         }
     };
-    if let Some(proof) = admit(&state, &request) {
-        accept(stream, &proof).await;
+    if let Some(admitted) = admission::admit(&state.server, &state.exporter, &request) {
+        if state.user.set(admitted.user.clone()).is_ok() {
+            tracing::info!(peer = %state.peer, user = admitted.user, "клиент опознан");
+        }
+        accept(stream, &admitted.proof).await;
         return;
     }
     let cover = state.server.config.cover.as_deref();
@@ -114,27 +118,6 @@ async fn handle(state: Arc<State>, resolver: Resolver) {
         }
         _ => cover::serve(cover, &request, stream).await,
     }
-}
-
-/// Проверяет опознание; `Some` — значение `pingwin-proof`.
-fn admit(state: &State, request: &Request<()>) -> Option<String> {
-    if request.method() != Method::GET || request.uri().path() != auth::PATH {
-        return None;
-    }
-    let header = request
-        .headers()
-        .get(http::header::AUTHORIZATION)?
-        .to_str()
-        .ok()?;
-    let policy = &state.server.policy;
-    let admitted = auth::verify(header, &state.exporter, &state.server.keys, |user| {
-        policy.password(user)
-    })?;
-    let name = policy.name(&admitted.user).unwrap_or("?");
-    if state.user.set(name.to_owned()).is_ok() {
-        tracing::info!(peer = %state.peer, user = name, "клиент опознан");
-    }
-    Some(admitted.proof)
 }
 
 async fn accept(mut stream: Stream, proof: &str) {

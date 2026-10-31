@@ -37,8 +37,8 @@ pub enum PingwinError {
     #[error("соединение с сервером потеряно: {0}")]
     Disconnected(String),
 
-    /// Датаграмма не помещается в датаграмму QUIC.
-    #[error("датаграмма длиной {0} байт не помещается в QUIC")]
+    /// Датаграмма не помещается в датаграмму QUIC или капсулу.
+    #[error("датаграмма длиной {0} байт не помещается в канал")]
     Oversized(usize),
 
     /// Ошибка общего транспорта (повторяемость уже определена им).
@@ -70,6 +70,12 @@ impl PingwinError {
 impl From<H3Error> for PingwinError {
     fn from(err: H3Error) -> Self {
         Self::Transport(err.into())
+    }
+}
+
+impl From<h2::Error> for PingwinError {
+    fn from(err: h2::Error) -> Self {
+        Self::Disconnected(format!("HTTP/2: {err}"))
     }
 }
 

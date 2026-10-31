@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Протокол Pingwin: прокси поверх HTTP/3 с опознанием ключом X25519"
+description = "Протокол Pingwin: прокси поверх HTTP/3 или HTTP/2 с опознанием ключом X25519"
 
 [lints]
 workspace = true
@@ -14,9 +14,13 @@ workspace = true
 [dependencies]
 penguin-core.workspace = true
 penguin-proto.workspace = true
-penguin-transport = { workspace = true, features = ["quic"] }
+penguin-transport = { workspace = true, features = ["quic", "h2"] }
 
-tokio = { workspace = true, features = ["rt", "io-util", "sync", "time"] }
+# Перенос по TCP, где UDP режут.
+h2.workspace = true
+http.workspace = true
+
+tokio = { workspace = true, features = ["rt", "io-util", "sync", "time", "macros"] }
 async-trait.workspace = true
 bytes.workspace = true
 serde.workspace = true
@@ -29,4 +33,4 @@ ring.workspace = true
 x25519-dalek.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

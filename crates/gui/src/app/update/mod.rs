@@ -1,6 +1,7 @@
 //! Разбор сообщений по областям; работа — в файлах рядом.
 
 pub mod connection;
+pub mod deploy;
 pub mod logs;
 pub mod profiles;
 pub mod release;

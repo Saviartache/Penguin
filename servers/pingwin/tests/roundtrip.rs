@@ -1,5 +1,5 @@
 //! Проверка от края до края: настоящий клиент, настоящий сервер, настоящие
-//! сокеты, QUIC и HTTP/3 на петле.
+//! сокеты, HTTP/3 по QUIC и HTTP/2 по TCP на петле.
 //!
 //! Ключи, токен и датаграммы проверены своими тестами в `protocols/pingwin`.
 //! Здесь — то, чего они увидеть не могут: что клиент и сервер, собранные
@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use penguin_core::address::{Address, SocketAddress};
 use penguin_core::id::OutboundId;
-use penguin_pingwin::config::PingwinConfig;
+use penguin_pingwin::config::{PingwinConfig, Transport};
 use penguin_pingwin::outbound::PingwinOutbound;
 use penguin_pingwin_server::{Server, ServerConfig, User};
 use penguin_proto::dialer::Dialer;
@@ -26,7 +26,7 @@ use penguin_proto::factory::ProtocolFactory;
 use penguin_proto::outbound::Outbound;
 use penguin_transport::h3::{self, Request};
 use penguin_transport::quic;
-use penguin_transport::tls::{ALPN_H3, TlsConfig};
+use penguin_transport::tls::{ALPN_H2, ALPN_H3, TlsClient, TlsConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
@@ -73,9 +73,14 @@ fn cover_dir() -> PathBuf {
 
 /// Поднимает сервер на свободном порту; возвращает адрес и открытый ключ.
 async fn start_server() -> (SocketAddr, String) {
-    let probe = UdpSocket::bind(("127.0.0.1", 0)).await.expect("порт");
-    let addr = probe.local_addr().expect("адрес");
-    drop(probe);
+    // Сервер слушает UDP и TCP на одном порту: нужен свободный в обоих.
+    let addr = loop {
+        let probe = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
+        let addr = probe.local_addr().expect("адрес");
+        if UdpSocket::bind(addr).await.is_ok() {
+            break addr;
+        }
+    };
 
     let keys = penguin_pingwin::StaticKeyPair::generate();
     let config = ServerConfig {
@@ -105,13 +110,17 @@ fn config(server: SocketAddr, key: &str, password: &str) -> PingwinConfig {
         sni: "localhost".to_owned(),
         // Сертификат проверяется по-настоящему: свой корень вместо общего.
         ca: Some(fixture("ca.crt").display().to_string()),
+        transport: Transport::Quic,
     }
 }
 
-fn client(server: SocketAddr, key: &str) -> PingwinOutbound {
+fn client_over(server: SocketAddr, key: &str, transport: Transport) -> PingwinOutbound {
     PingwinOutbound::new(
         OutboundId::new("test"),
-        config(server, key, "secret"),
+        PingwinConfig {
+            transport,
+            ..config(server, key, "secret")
+        },
         Arc::new(Direct),
     )
     .expect("направление собирается")
@@ -186,11 +195,33 @@ fn target(addr: SocketAddr) -> SocketAddress {
     SocketAddress::ip(addr.ip(), addr.port())
 }
 
-#[tokio::test]
-async fn a_stream_carries_bytes_both_ways() {
+/// Проверка по обоим переносам: `<имя>::quic` и `<имя>::tcp`.
+macro_rules! both {
+    ($(#[$attr:meta])* $name:ident) => {
+        mod $name {
+            use super::*;
+
+            $(#[$attr])*
+            async fn quic() {
+                super::$name(Transport::Quic).await;
+            }
+
+            $(#[$attr])*
+            async fn tcp() {
+                super::$name(Transport::Tcp).await;
+            }
+        }
+    };
+}
+
+both!(
+    #[tokio::test]
+    a_stream_carries_bytes_both_ways
+);
+async fn a_stream_carries_bytes_both_ways(transport: Transport) {
     let echo = start_echo().await;
     let (server, key) = start_server().await;
-    let client = client(server, &key);
+    let client = client_over(server, &key, transport);
 
     let mut stream = client.connect_tcp(&target(echo)).await.expect("поток");
     let hello = "привет".as_bytes();
@@ -208,11 +239,14 @@ async fn a_stream_carries_bytes_both_ways() {
     client.close().await.expect("закрылось");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn many_streams_at_once_share_one_connection() {
+both!(
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    many_streams_at_once_share_one_connection
+);
+async fn many_streams_at_once_share_one_connection(transport: Transport) {
     let echo = start_echo().await;
     let (server, key) = start_server().await;
-    let client = Arc::new(client(server, &key));
+    let client = Arc::new(client_over(server, &key, transport));
 
     let mut tasks = Vec::new();
     for index in 0u8..8 {
@@ -233,13 +267,16 @@ async fn many_streams_at_once_share_one_connection() {
     }
 }
 
-/// Скорость одного потока на петле: печатается, а не проверяется порогом.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn how_fast_one_stream_goes_on_loopback() {
+// Скорость одного потока на петле: печатается, а не проверяется порогом.
+both!(
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    how_fast_one_stream_goes_on_loopback
+);
+async fn how_fast_one_stream_goes_on_loopback(transport: Transport) {
     const BYTES: usize = 64 * 1024 * 1024;
     let sink = start_sink().await;
     let (server, key) = start_server().await;
-    let client = client(server, &key);
+    let client = client_over(server, &key, transport);
 
     let mut stream = client.connect_tcp(&target(sink)).await.expect("поток");
     let chunk = vec![0x5Au8; 256 * 1024];
@@ -251,19 +288,22 @@ async fn how_fast_one_stream_goes_on_loopback() {
     }
     stream.flush().await.expect("сбросилось");
     let speed = sent as f64 / started.elapsed().as_secs_f64() / 1_000_000.0;
-    println!("    отдача на петле: {speed:.0} МБ/с");
+    println!("    отдача на петле ({transport:?}): {speed:.0} МБ/с");
     assert!(
         speed > 1.0,
         "меньше мегабайта в секунду на петле — это поломка"
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn how_fast_one_stream_downloads_on_loopback() {
+both!(
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    how_fast_one_stream_downloads_on_loopback
+);
+async fn how_fast_one_stream_downloads_on_loopback(transport: Transport) {
     const BYTES: usize = 64 * 1024 * 1024;
     let source = start_source(BYTES).await;
     let (server, key) = start_server().await;
-    let client = client(server, &key);
+    let client = client_over(server, &key, transport);
 
     let mut stream = client.connect_tcp(&target(source)).await.expect("поток");
     stream.write_all(b"go").await.expect("записалось");
@@ -278,31 +318,47 @@ async fn how_fast_one_stream_downloads_on_loopback() {
     }
     let speed = got as f64 / started.elapsed().as_secs_f64() / 1_000_000.0;
     println!(
-        "    скачивание на петле: {speed:.0} МБ/с ({} МБ)",
+        "    скачивание на петле ({transport:?}): {speed:.0} МБ/с ({} МБ)",
         got / 1_000_000
     );
     assert_eq!(got, BYTES);
 }
 
-#[tokio::test]
-async fn the_latency_comes_from_quic() {
+both!(
+    #[tokio::test]
+    the_latency_is_measured
+);
+async fn the_latency_is_measured(transport: Transport) {
     let (server, key) = start_server().await;
-    let client = client(server, &key);
+    let client = client_over(server, &key, transport);
     assert!(client.rtt().await.is_none(), "соединения ещё нет");
 
     client.warm_up().await.expect("подключились");
-    let rtt = client.rtt().await.expect("QUIC знает оборот");
+    // У HTTP/2 оборот — первый пинг: он уходит сразу после рукопожатия.
+    let rtt = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match client.rtt().await {
+                Some(rtt) => return rtt,
+                None => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("оборот не измерился");
     assert!(
         rtt.millis < 1000,
         "петля не может отвечать секунду: {rtt:?}"
     );
 }
 
-#[tokio::test]
-async fn a_datagram_goes_out_and_comes_back() {
+both!(
+    #[tokio::test]
+    a_datagram_goes_out_and_comes_back
+);
+async fn a_datagram_goes_out_and_comes_back(transport: Transport) {
     let echo = start_udp_echo().await;
     let (server, key) = start_server().await;
-    let client = client(server, &key);
+    let client = client_over(server, &key, transport);
 
     let channel = client.bind_udp().await.expect("канал открылся");
     channel
@@ -318,10 +374,13 @@ async fn a_datagram_goes_out_and_comes_back() {
     channel.close().await.expect("закрылся");
 }
 
-#[tokio::test]
-async fn an_unreachable_target_says_so_on_the_first_read() {
+both!(
+    #[tokio::test]
+    an_unreachable_target_says_so_on_the_first_read
+);
+async fn an_unreachable_target_says_so_on_the_first_read(transport: Transport) {
     let (server, key) = start_server().await;
-    let client = client(server, &key);
+    let client = client_over(server, &key, transport);
 
     let closed = TcpListener::bind(("127.0.0.1", 0)).await.expect("порт");
     let addr = closed.local_addr().expect("адрес");
@@ -342,12 +401,18 @@ async fn an_unreachable_target_says_so_on_the_first_read() {
     assert!(stream.read(&mut answer).await.is_err());
 }
 
-#[tokio::test]
-async fn a_wrong_password_is_an_auth_rejection() {
+both!(
+    #[tokio::test]
+    a_wrong_password_is_an_auth_rejection
+);
+async fn a_wrong_password_is_an_auth_rejection(transport: Transport) {
     let (server, key) = start_server().await;
     let client = PingwinOutbound::new(
         OutboundId::new("test"),
-        config(server, &key, "другой"),
+        PingwinConfig {
+            transport,
+            ..config(server, &key, "другой")
+        },
         Arc::new(Direct),
     )
     .expect("направление собирается");
@@ -355,28 +420,196 @@ async fn a_wrong_password_is_an_auth_rejection() {
     assert!(matches!(err, ProtocolError::AuthRejected), "{err}");
 }
 
-#[tokio::test]
-async fn a_server_with_another_key_is_an_auth_rejection() {
+both!(
+    #[tokio::test]
+    a_server_with_another_key_is_an_auth_rejection
+);
+async fn a_server_with_another_key_is_an_auth_rejection(transport: Transport) {
     let (server, _key) = start_server().await;
     let other = penguin_core::base64::encode(&penguin_pingwin::StaticKeyPair::generate().public);
-    let client = client(server, &other);
+    let client = client_over(server, &other, transport);
     let err = ProtocolError::from(client.warm_up().await.expect_err("сервер не тот"));
     assert!(matches!(err, ProtocolError::AuthRejected), "{err}");
 }
 
-#[tokio::test]
-async fn a_certificate_for_another_name_does_not_connect() {
+both!(
+    #[tokio::test]
+    a_certificate_for_another_name_does_not_connect
+);
+async fn a_certificate_for_another_name_does_not_connect(transport: Transport) {
     let (server, key) = start_server().await;
     let client = PingwinOutbound::new(
         OutboundId::new("test"),
         PingwinConfig {
             sni: "other.example.com".to_owned(),
+            transport,
             ..config(server, &key, "secret")
         },
         Arc::new(Direct),
     )
     .expect("направление собирается");
     assert!(client.warm_up().await.is_err());
+}
+
+#[tokio::test]
+async fn auto_takes_quic_when_udp_passes() {
+    let (server, key) = start_server().await;
+    let client = client_over(server, &key, Transport::Auto);
+    client.warm_up().await.expect("подключились");
+    assert_eq!(client.transport().await, Some("quic"));
+}
+
+/// Выход, у которого UDP режут: как у мобильного оператора.
+struct NoUdp;
+
+#[async_trait]
+impl Dialer for NoUdp {
+    async fn dial_tcp(&self, addr: SocketAddr) -> Result<TcpStream, ProtocolError> {
+        Direct.dial_tcp(addr).await
+    }
+
+    async fn bind_udp(&self, _local: SocketAddr) -> Result<UdpSocket, ProtocolError> {
+        Err(ProtocolError::Connect("UDP режут".to_owned()))
+    }
+
+    async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, ProtocolError> {
+        Direct.resolve(host).await
+    }
+}
+
+#[tokio::test]
+async fn auto_falls_back_to_tcp_when_udp_is_cut() {
+    let echo = start_echo().await;
+    let (server, key) = start_server().await;
+    let client = PingwinOutbound::new(
+        OutboundId::new("test"),
+        PingwinConfig {
+            transport: Transport::Auto,
+            ..config(server, &key, "secret")
+        },
+        Arc::new(NoUdp),
+    )
+    .expect("направление собирается");
+
+    let mut stream = client.connect_tcp(&target(echo)).await.expect("поток");
+    assert_eq!(client.transport().await, Some("tcp"));
+    stream.write_all(b"ping").await.expect("записалось");
+    let mut answer = [0u8; 4];
+    stream.read_exact(&mut answer).await.expect("прочиталось");
+    assert_eq!(&answer, b"ping");
+}
+
+/// Клиент HTTP/1.1 (`curl --http1.1`): ответ целиком текстом.
+async fn http1(server: SocketAddr, request: &str) -> String {
+    let tls = TlsConfig {
+        sni: Some("localhost".to_owned()),
+        ca: Some(fixture("ca.crt").display().to_string()),
+        ..TlsConfig::default()
+    };
+    let tcp = TcpStream::connect(server).await.expect("TCP");
+    let mut io = TlsClient::new(&tls, &Address::Ip(server.ip()), &[b"http/1.1"])
+        .expect("TLS")
+        .connect(tcp)
+        .await
+        .expect("рукопожатие TLS");
+    io.write_all(request.as_bytes()).await.expect("записалось");
+    let mut answer = String::new();
+    io.read_to_string(&mut answer).await.expect("прочиталось");
+    answer
+}
+
+#[tokio::test]
+async fn a_stranger_over_http1_sees_the_same_site() {
+    let (server, _key) = start_server().await;
+
+    let page = http1(server, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+    assert!(page.starts_with("HTTP/1.1 200 OK\r\n"), "{page}");
+    assert!(page.ends_with("\r\n\r\n<h1>cover</h1>"), "{page}");
+
+    let missing = http1(server, "GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+    assert!(missing.starts_with("HTTP/1.1 404 "), "{missing}");
+
+    let proxy = http1(server, "CONNECT 127.0.0.1:22 HTTP/1.1\r\n\r\n").await;
+    assert!(proxy.starts_with("HTTP/1.1 405 "), "{proxy}");
+}
+
+/// Обычный клиент HTTP/2 по TCP без опознания.
+async fn probe_tcp(server: SocketAddr) -> h2::client::SendRequest<Bytes> {
+    let tls = TlsConfig {
+        sni: Some("localhost".to_owned()),
+        ca: Some(fixture("ca.crt").display().to_string()),
+        ..TlsConfig::default()
+    };
+    let tcp = TcpStream::connect(server).await.expect("TCP");
+    let io = TlsClient::new(&tls, &Address::Ip(server.ip()), &[ALPN_H2])
+        .expect("TLS")
+        .connect(tcp)
+        .await
+        .expect("рукопожатие TLS");
+    let (send, connection) = h2::client::handshake(io).await.expect("HTTP/2");
+    tokio::spawn(connection);
+    send
+}
+
+async fn status_over_tcp(send: &h2::client::SendRequest<Bytes>, request: http::Request<()>) -> u16 {
+    let (response, _) = send
+        .clone()
+        .ready()
+        .await
+        .expect("готов")
+        .send_request(request, true)
+        .expect("запрос");
+    response.await.expect("ответ").status().as_u16()
+}
+
+#[tokio::test]
+async fn a_stranger_over_tcp_sees_the_same_site() {
+    let (server, _key) = start_server().await;
+    let send = probe_tcp(server).await;
+
+    let get = |path: &str| {
+        http::Request::get(format!("https://localhost{path}"))
+            .body(())
+            .expect("запрос")
+    };
+    let (response, _) = send
+        .clone()
+        .ready()
+        .await
+        .expect("готов")
+        .send_request(get("/"), true)
+        .expect("запрос");
+    let response = response.await.expect("ответ");
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    let mut page = Vec::new();
+    while let Some(chunk) = body.data().await {
+        page.extend_from_slice(&chunk.expect("тело"));
+    }
+    assert_eq!(page, b"<h1>cover</h1>");
+
+    let forged = http::Request::get("https://localhost/")
+        .header("authorization", "Pingwin AAAA")
+        .body(())
+        .expect("запрос");
+    assert_eq!(status_over_tcp(&send, forged).await, 200);
+    assert_eq!(status_over_tcp(&send, get("/nope")).await, 404);
+
+    // CONNECT без опознания — тоже сайт, а не прокси.
+    let echo = start_echo().await;
+    let connect = http::Request::builder()
+        .method(http::Method::CONNECT)
+        .uri(echo.to_string())
+        .body(())
+        .expect("запрос");
+    let (response, _) = send
+        .clone()
+        .ready()
+        .await
+        .expect("готов")
+        .send_request(connect, false)
+        .expect("запрос");
+    assert_eq!(response.await.expect("ответ").status(), 405);
 }
 
 /// Обычный клиент HTTP/3 на соединении без опознания.

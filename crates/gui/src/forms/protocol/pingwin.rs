@@ -7,6 +7,9 @@ use crate::forms::protocol::spec::{FieldSpec, ProtocolSpec};
 /// Порт, если в ссылке его не указали.
 const DEFAULT_PORT: u16 = 443;
 
+/// Чем идти: `auto` пробует QUIC и уходит на TCP, где режут UDP.
+const TRANSPORTS: &[&str] = &["auto", "quic", "tcp"];
+
 static FIELDS: &[FieldSpec] = &[
     FieldSpec::text("server", &["server"], |s| s.server_address)
         .example(|s| s.server_address_example)
@@ -18,6 +21,7 @@ static FIELDS: &[FieldSpec] = &[
         .required(|s| s.need_server_public_key),
     FieldSpec::secret("password", &["password"], |s| s.password).required(|s| s.need_password),
     FieldSpec::text("sni", &["sni"], |s| s.sni).example(|s| s.sni_example),
+    FieldSpec::choice("transport", &["transport"], |s| s.transport, TRANSPORTS),
 ];
 
 /// Как ссылка-приглашение ложится в поля:
@@ -110,6 +114,16 @@ mod tests {
             .expect("поле есть");
         assert!(key.required.is_some());
         assert_eq!(key.path, &["key"], "ключ ложится в настройки не туда");
+    }
+
+    #[test]
+    fn a_new_profile_goes_by_whichever_transport_works() {
+        let transport = FIELDS
+            .iter()
+            .find(|field| field.key == "transport")
+            .expect("поле есть");
+        assert!(transport.is_choice());
+        assert_eq!(transport.default_text(), "auto");
     }
 
     #[test]
