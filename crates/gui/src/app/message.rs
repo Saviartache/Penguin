@@ -273,8 +273,10 @@ pub enum SplitTunnelMessage {
     SearchChanged(String),
     /// Правило включено или выключено.
     RuleToggled(usize, bool),
-    /// Правило переставлено: откуда, куда.
+    /// Правило переставлено: откуда, куда; с Shift — до края списка.
     RuleMoved(usize, usize),
+    /// Нажат или отпущен Shift.
+    ShiftChanged(bool),
     /// Правило удалено.
     RuleRemoved(usize),
     /// Открыть окно проверки.

@@ -3,7 +3,7 @@
 //! Правки копятся в окне и уезжают демону только по «Сохранить»: иначе каждый
 //! щелчок перезаписывал бы файл и пересобирал набор.
 
-use iced::Task;
+use iced::{Task, window};
 use penguin_config::export::{Exported, to_surge};
 use penguin_config::import::{Imported, parse_surge};
 use penguin_config::schema::rule::RuleConfig;
@@ -13,6 +13,7 @@ use crate::app::App;
 use crate::app::message::{Message, SplitTunnelMessage};
 use crate::app::update::{request, save_rules};
 use crate::forms::rule;
+use crate::screens::rules::list;
 
 /// Имя файла, предлагаемое окном сохранения.
 const EXPORT_FILE_NAME: &str = "penguin-rules.conf";
@@ -27,10 +28,9 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             }
             Task::none()
         }
-        SplitTunnelMessage::RuleMoved(from, to) => {
-            if move_rule(&mut app.state_mut().config.routing.rules, from, to) {
-                app.state_mut().dirty = true;
-            }
+        SplitTunnelMessage::RuleMoved(from, to) => moved(app, from, to),
+        SplitTunnelMessage::ShiftChanged(held) => {
+            app.state_mut().split_tunnel.shift = held;
             Task::none()
         }
         SplitTunnelMessage::SearchChanged(value) => {
@@ -381,11 +381,46 @@ fn move_rule(rules: &mut [RuleConfig], from: usize, to: usize) -> bool {
     if from == to || from >= rules.len() || to >= rules.len() {
         return false;
     }
-    let (first, second) = (rules[from].priority, rules[to].priority);
-    rules.swap(from, to);
-    rules[from].priority = first;
-    rules[to].priority = second;
+    let priorities: Vec<i32> = rules.iter().map(|rule| rule.priority).collect();
+    if from < to {
+        rules[from..=to].rotate_left(1);
+    } else {
+        rules[to..=from].rotate_right(1);
+    }
+    for (rule, priority) in rules.iter_mut().zip(priorities) {
+        rule.priority = priority;
+    }
     true
+}
+
+/// Переставляет правило: на соседнее место курсор едет за стрелкой, с Shift —
+/// сразу к краю списка.
+fn moved(app: &mut App, from: usize, to: usize) -> Task<Message> {
+    let state = app.state_mut();
+    let shift = state.split_tunnel.shift;
+    let rules = &mut state.config.routing.rules;
+    let target = match (shift, to < from) {
+        (false, _) => to,
+        (true, true) => 0,
+        (true, false) => rules.len().saturating_sub(1),
+    };
+    if !move_rule(rules, from, target) {
+        return Task::none();
+    }
+    state.dirty = true;
+
+    // При поиске сосед может быть скрыт — тогда строка на экране не сдвинулась.
+    let neighbor_shown = list::found(&rules[from], &state.split_tunnel.search);
+    if shift || !neighbor_shown {
+        return Task::none();
+    }
+    let dy = (target as f32 - from as f32) * list::ROW_PITCH;
+    window::scale_factor(app.window()).then(move |scale| {
+        if let Err(error) = penguin_platform::cursor::shift(dy, scale) {
+            tracing::debug!(%error, "курсор не сдвинулся за правилом");
+        }
+        Task::none()
+    })
 }
 
 /// Спрашивает список запущенных приложений.
@@ -618,6 +653,28 @@ mod tests {
         assert_eq!(rules[0].id, "r2");
         assert_eq!(rules[0].priority, -100, "приоритет ушёл вместе с правилом");
         assert!(app.state().dirty);
+    }
+
+    #[test]
+    fn shift_moves_a_rule_to_the_edge() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "priority": 3, "when": { "dest_port": [1] }, "action": "direct" },
+            { "id": "r2", "priority": 2, "when": { "dest_port": [2] }, "action": "direct" },
+            { "id": "r3", "priority": 1, "when": { "dest_port": [3] }, "action": "direct" }
+        ]));
+        let _ = handle(&mut app, SplitTunnelMessage::ShiftChanged(true));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleMoved(2, 1));
+
+        let order = |app: &App| {
+            let rules = &app.state().config.routing.rules;
+            let ids: Vec<&str> = rules.iter().map(|rule| rule.id.as_str()).collect();
+            let priorities: Vec<i32> = rules.iter().map(|rule| rule.priority).collect();
+            (ids.join(","), priorities)
+        };
+        assert_eq!(order(&app), ("r3,r1,r2".to_owned(), vec![3, 2, 1]));
+
+        let _ = handle(&mut app, SplitTunnelMessage::RuleMoved(0, 1));
+        assert_eq!(order(&app), ("r1,r2,r3".to_owned(), vec![3, 2, 1]));
     }
 
     #[test]

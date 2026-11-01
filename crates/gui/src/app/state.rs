@@ -351,6 +351,8 @@ pub struct SplitTunnelState {
     pub import_report: Option<String>,
     /// База GeoIP передана службе за этот запуск или передаётся.
     pub geoip_sent: bool,
+    /// Зажат Shift: стрелка переносит правило до края.
+    pub shift: bool,
 }
 
 /// Экран серверов.

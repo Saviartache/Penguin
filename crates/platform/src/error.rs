@@ -36,6 +36,10 @@ pub enum PlatformError {
     #[error("окно выбора файла: {0}")]
     Dialog(String),
 
+    /// Не удалось сдвинуть курсор.
+    #[error("курсор: {0}")]
+    Cursor(String),
+
     /// Не удалось управлять службой.
     #[error("служба: {0}")]
     Service(String),

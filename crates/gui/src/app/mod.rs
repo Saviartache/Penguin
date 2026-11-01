@@ -140,6 +140,11 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut streams = vec![
             iced::event::listen_with(|event, status, window_id| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
+                    Some(Message::SplitTunnel(
+                        message::SplitTunnelMessage::ShiftChanged(modifiers.shift()),
+                    ))
+                }
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(
                     Message::Window(message::WindowMessage::CursorMoved(position)),
                 ),

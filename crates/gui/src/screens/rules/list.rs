@@ -48,6 +48,13 @@ const GLYPH_WIDTH: f32 = 30.0;
 /// Место под кнопки строки — его же оставляет шапка.
 const ACTIONS_WIDTH: f32 = TOGGLE_WIDTH + GLYPH_WIDTH * 3.0;
 
+/// Высота строки: знак без интерлиньяжа и отступы. Задана числом — на неё
+/// сдвигается курсор за переставленным правилом.
+const ROW_HEIGHT: f32 = table::GLYPH + ROW_PADDING.top + ROW_PADDING.bottom;
+
+/// Шаг между строками в логических точках.
+pub const ROW_PITCH: f32 = ROW_HEIGHT + ROW_GAP;
+
 /// Выше.
 const UP: &str = "↑";
 
@@ -193,7 +200,7 @@ fn rows(state: &State) -> Element<'_, Message> {
 }
 
 /// Подходит ли правило под поиск: по имени, условию и действию.
-fn found(rule: &RuleConfig, query: &str) -> bool {
+pub fn found(rule: &RuleConfig, query: &str) -> bool {
     if query.trim().is_empty() {
         return true;
     }
@@ -281,6 +288,7 @@ fn row<'a>(
             GLYPH_WIDTH,
             Message::SplitTunnel(SplitTunnelMessage::RuleRemoved(index)),
         ))
+        .h(px(ROW_HEIGHT))
         .gap(gap::NONE)
         .align(Alignment::Center)
         .build()
