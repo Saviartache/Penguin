@@ -128,11 +128,15 @@ impl Dialer for SystemDialer {
             SocketAddr::V6(_) => TcpSocket::new_v6(),
         }?;
 
-        if let Some(local) = self.local_for(addr) {
-            socket.bind(local)?;
+        // Loopback в тоннель не уходит, а привязку к интерфейсу Windows ему запрещает
+        // (WSAEADDRNOTAVAIL): так протокол `i2p` ходит к i2pd.
+        if !addr.ip().is_loopback() {
+            if let Some(local) = self.local_for(addr) {
+                socket.bind(local)?;
+            }
+            // До `connect`: маршрут выбирается в нём.
+            self.protect(&socket, addr.is_ipv6());
         }
-        // До `connect`: маршрут выбирается в нём.
-        self.protect(&socket, addr.is_ipv6());
 
         let stream = socket.connect(addr).await?;
         let _ = stream.set_nodelay(true);
@@ -300,6 +304,19 @@ mod tests {
 
     fn dialer() -> SystemDialer {
         SystemDialer::new(Arc::new(SystemResolver))
+    }
+
+    // Как у i2pd на Windows: привязка к адресу интерфейса и `127.0.0.1` — WSAEADDRNOTAVAIL.
+    #[tokio::test]
+    async fn loopback_is_dialed_without_protection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("порт");
+        let addr = listener.local_addr().expect("адрес");
+        let dialer = dialer().bound_to(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+        dialer.protect_with(u32::MAX);
+
+        dialer.dial_tcp(addr).await.expect("loopback мимо привязки");
     }
 
     #[test]
