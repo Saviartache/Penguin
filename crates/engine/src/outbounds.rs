@@ -161,6 +161,12 @@ impl OutboundPool {
         self.active.read().get(id).cloned()
     }
 
+    /// Кладёт готовое направление в пул мимо реестра.
+    #[cfg(test)]
+    pub(crate) fn insert(&self, outbound: Arc<dyn Outbound>) {
+        self.active.write().insert(outbound.id(), outbound);
+    }
+
     /// Прямой выход: есть всегда.
     pub fn direct(&self) -> Arc<dyn Outbound> {
         self.get(&OutboundId::direct())

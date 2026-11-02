@@ -231,22 +231,14 @@ impl InboundHandler for Pipeline {
         };
 
         let outbound = self.outbounds.revive(outbound).await?;
-        // Иначе датаграммы (и DNS) терялись бы молча.
-        let (channel, id) = if outbound.capabilities().udp {
-            (
-                outbound.bind_udp().await?,
-                Self::outbound_id(&verdict.decision),
-            )
-        } else {
-            tracing::warn!(
-                outbound = %outbound.id(),
-                "направление не поддерживает UDP — датаграммы пойдут напрямую"
-            );
-            (
-                self.outbounds.direct().bind_udp().await?,
-                OutboundId::direct(),
-            )
-        };
+        // Напрямую нельзя: QUIC браузера показал бы сайту настоящий адрес. Отказ
+        // уводит приложение на TCP; DNS сюда не доходит, его отвечает перехват.
+        if !outbound.capabilities().udp {
+            tracing::debug!(outbound = %outbound.id(), "направление без UDP — датаграмма отклонена");
+            return Err(ProtocolError::Unsupported("UDP"));
+        }
+        let channel = outbound.bind_udp().await?;
+        let id = Self::outbound_id(&verdict.decision);
         let metered = MeteredDatagram::new(channel, Arc::clone(&self.metrics), &id);
         let lease = self.flows.register(flow, verdict.decision);
         Ok(Box::new(RevocableDatagram::new(Box::new(metered), lease)))
@@ -378,6 +370,47 @@ mod tests {
         let pipeline = pipeline(TunnelMode::Tunnel);
         let opened = pipeline.open_tcp(&request(&addr.to_string())).await;
         assert!(matches!(opened, Err(ProtocolError::Unreachable(_))));
+    }
+
+    /// Направление без UDP, как `i2p`.
+    struct TcpOnly;
+
+    #[async_trait::async_trait]
+    impl Outbound for TcpOnly {
+        fn id(&self) -> OutboundId {
+            OutboundId::new("home")
+        }
+
+        fn protocol(&self) -> &'static str {
+            "tcp-only"
+        }
+
+        fn capabilities(&self) -> penguin_proto::capabilities::Capabilities {
+            penguin_proto::capabilities::Capabilities::default()
+        }
+
+        async fn connect_tcp(
+            &self,
+            _target: &SocketAddress,
+        ) -> Result<Box<dyn penguin_proto::stream::ProxyStream>, ProtocolError> {
+            Err(ProtocolError::Unsupported("TCP"))
+        }
+
+        async fn bind_udp(&self) -> Result<Box<dyn ProxyDatagram>, ProtocolError> {
+            Err(ProtocolError::Unsupported("UDP"))
+        }
+    }
+
+    // QUIC браузера мимо тоннеля показывал сайту настоящий адрес.
+    #[tokio::test]
+    async fn udp_without_support_is_refused_not_sent_direct() {
+        let pipeline = pipeline(TunnelMode::Tunnel);
+        pipeline.outbounds.insert(Arc::new(TcpOnly));
+
+        let mut quic = request("203.0.113.7:443");
+        quic.network = Network::Udp;
+        let opened = pipeline.open_udp(&quic).await;
+        assert!(matches!(opened, Err(ProtocolError::Unsupported("UDP"))));
     }
 
     #[tokio::test]
