@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-anytls"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3391,7 +3391,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-app"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "penguin-cli",
@@ -3406,7 +3406,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-cli"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "penguin-config",
@@ -3431,7 +3431,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-config"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "penguin-core",
  "serde",
@@ -3442,7 +3442,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-core"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -3451,7 +3451,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-daemon"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3478,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-dns"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -3496,7 +3496,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-dpi"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3511,7 +3511,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-engine"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3555,7 +3555,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-gui"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "iced",
  "ipnet",
@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-hysteria2"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "blake2",
@@ -3593,7 +3593,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-i2p"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "penguin-core",
@@ -3608,7 +3608,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-i2pd"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "penguin-core",
@@ -3624,7 +3624,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-inbound"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3638,7 +3638,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-ipc"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "nix",
@@ -3655,7 +3655,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-juicity"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3673,7 +3673,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-masque"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3690,7 +3690,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-match"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "aho-corasick",
  "ipnet",
@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-naive"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3722,7 +3722,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-netstack"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3737,7 +3737,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-pingwin"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3757,7 +3757,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-pingwin-server"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3783,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-platform"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "ipnet",
  "libc",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-process"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "libc",
  "parking_lot",
@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-proto"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3826,7 +3826,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-router"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "arc-swap",
  "parking_lot",
@@ -3841,7 +3841,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-shadowsocks"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "aes",
  "async-trait",
@@ -3861,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-socks5"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3877,7 +3877,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-subscription"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "aes",
  "cbc",
@@ -3897,7 +3897,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-transport"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3922,7 +3922,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-trojan"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3938,7 +3938,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-trusttunnel"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3957,7 +3957,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-tuic"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3976,7 +3976,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-tun"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3992,7 +3992,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-update"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "flate2",
  "serde",
@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-utls"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "ml-kem",
  "penguin-core",
@@ -4018,7 +4018,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-vless"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4036,7 +4036,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-vmess"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "aes",
  "async-trait",
@@ -4057,7 +4057,7 @@ dependencies = [
 
 [[package]]
 name = "penguin-wireguard"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "async-trait",
  "blake2",
