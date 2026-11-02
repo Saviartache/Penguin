@@ -154,6 +154,20 @@ impl Engine {
         let _ = home;
     }
 
+    /// Ходит ли профиль через i2pd: ответ через I2P идёт секундами, а без
+    /// поднятого i2pd направлению не к чему подключиться.
+    pub fn uses_i2pd(&self, profile: &Profile) -> bool {
+        #[cfg(feature = "i2p")]
+        {
+            crate::i2pd::needs_i2pd(profile)
+        }
+        #[cfg(not(feature = "i2p"))]
+        {
+            let _ = profile;
+            false
+        }
+    }
+
     /// Ставит i2pd, если файл совпал с закреплённым выпуском.
     pub fn install_i2pd(&self, bytes: &[u8]) -> EngineResult<()> {
         #[cfg(feature = "i2p")]

@@ -203,6 +203,7 @@ pub static STRINGS: Strings = Strings {
     i2pd_not_sent: "i2pd не установлен в службу",
     i2pd_downloading: "Скачивание i2pd…",
     i2pd_installed: "i2pd установлен в службу",
+    i2p_probe_after_connect: "Задержка I2P меряется после подключения: до него i2pd не запущен",
     i2p_outproxy: "Outproxy (его владелец видит весь трафик без HTTPS)",
     i2p_outproxy_example: "пусто — vdipaav5…b32.i2p",
     values_empty: "Пусто — подходят любые. Впишите значение и нажмите Enter.",

@@ -203,6 +203,7 @@ pub static STRINGS: Strings = Strings {
     i2pd_not_sent: "i2pd was not installed into the service",
     i2pd_downloading: "Downloading i2pd…",
     i2pd_installed: "i2pd installed into the service",
+    i2p_probe_after_connect: "I2P latency is measured once connected: i2pd is not running before that",
     i2p_outproxy: "Outproxy (its operator sees all non-HTTPS traffic)",
     i2p_outproxy_example: "empty — vdipaav5…b32.i2p",
     values_empty: "Empty — any will do. Type a value and press Enter.",

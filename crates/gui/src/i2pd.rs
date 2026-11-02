@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use penguin_config::schema::profile::Profile;
+use penguin_core::state::TunnelState;
 use penguin_ipc::schema::request::GEOIP_CHUNK;
 use penguin_ipc::schema::{Request, Response};
 
@@ -15,6 +16,12 @@ pub(crate) fn wanted(profiles: &[Profile]) -> bool {
     profiles
         .iter()
         .any(|profile| profile.outbound.protocol == PROTOCOL)
+}
+
+/// Мерить ли задержку сейчас: i2pd у службы работает, только пока профиль I2P подключён.
+pub(crate) fn probe_now(profile: &Profile, tunnel: &TunnelState) -> bool {
+    profile.outbound.protocol != PROTOCOL
+        || matches!(tunnel, TunnelState::Connected { profile: active, .. } if *active == profile.id)
 }
 
 /// Скачивает i2pd (если его нет) и передаёт службе.
@@ -70,6 +77,21 @@ mod tests {
         let socks = Profile::new("s", "S", RawOutbound::new("socks5", json!({})));
         assert!(wanted(&[socks.clone(), i2p]));
         assert!(!wanted(&[socks]));
+    }
+
+    #[test]
+    fn i2p_is_probed_only_while_connected() {
+        let i2p = Profile::new("i2p", "I2P", RawOutbound::new("i2p", json!({})));
+        let socks = Profile::new("s", "S", RawOutbound::new("socks5", json!({})));
+        let connected = |id: &str| TunnelState::Connected {
+            profile: penguin_core::id::ProfileId::new(id),
+            uptime_secs: 1,
+        };
+
+        assert!(probe_now(&socks, &TunnelState::Disconnected));
+        assert!(!probe_now(&i2p, &TunnelState::Disconnected));
+        assert!(!probe_now(&i2p, &connected("s")));
+        assert!(probe_now(&i2p, &connected("i2p")));
     }
 
     #[test]

@@ -10,6 +10,11 @@ use penguin_proto::outbound::Outbound;
 
 use crate::events::{Event, EventBus, LogLevel};
 
+/// Ходит ли профиль через i2pd.
+pub(crate) fn needs_i2pd(profile: &Profile) -> bool {
+    profile.outbound.protocol == penguin_i2p::PROTOCOL
+}
+
 /// i2pd службы; каталог задаёт она же ([`crate::Engine::use_i2pd`]).
 #[derive(Debug, Default)]
 pub(crate) struct I2pd(OnceLock<Sidecar>);
@@ -27,7 +32,7 @@ impl I2pd {
         direct: Arc<dyn Outbound>,
         events: &EventBus,
     ) -> Result<(), ProtocolError> {
-        if profile.outbound.protocol != penguin_i2p::PROTOCOL {
+        if !needs_i2pd(profile) {
             return Ok(());
         }
         let sidecar = self.sidecar().map_err(to_protocol)?;

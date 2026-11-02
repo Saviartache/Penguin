@@ -22,12 +22,34 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
         ServersMessage::Select(id) => select(app, &id),
         ServersMessage::Probe => {
             let state = app.state_mut();
-            let ids = state.config.profiles.iter().map(|p| p.id.to_string());
+            let tunnel = &state.connection.tunnel;
+            let ids: Vec<String> = state
+                .config
+                .profiles
+                .iter()
+                .filter(|profile| crate::i2pd::probe_now(profile, tunnel))
+                .map(|profile| profile.id.to_string())
+                .collect();
             state.servers.probe.start(ids);
             probe_current(&app.state().servers.probe)
         }
         ServersMessage::ProbeOne(id) => {
-            if app.state_mut().servers.probe.push(id) {
+            let state = app.state_mut();
+            let tunnel = &state.connection.tunnel;
+            let ready = state
+                .config
+                .profiles
+                .iter()
+                .find(|profile| profile.id.as_str() == id)
+                .is_none_or(|profile| crate::i2pd::probe_now(profile, tunnel));
+            if !ready {
+                state.connection.push_log(
+                    LogLevel::Info,
+                    crate::i18n::s().i2p_probe_after_connect.to_owned(),
+                );
+                return Task::none();
+            }
+            if state.servers.probe.push(id) {
                 probe_current(&app.state().servers.probe)
             } else {
                 Task::none()

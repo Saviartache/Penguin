@@ -51,7 +51,13 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Сколько всего на один профиль: рукопожатие и замер.
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Через I2P ответ идёт секундами: поток до outproxy и дальше до цели.
+const I2P_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+const I2P_PROBE_DEADLINE: Duration = Duration::from_secs(40);
+
 const NO_ANSWER: &str = "сервер не ответил";
+
+const NOT_CONNECTED_I2P: &str = "задержка I2P меряется после подключения";
 
 /// Проверяет задержку до профилей.
 ///
@@ -89,7 +95,18 @@ async fn probe_one(
     let id = OutboundId::from(profile.id.clone());
     let was_pooled = engine.outbounds().get(&id).is_some();
 
-    let outcome = within(PROBE_DEADLINE, measure(engine, profile)).await;
+    // i2pd поднимается только с тоннелем: без него замерять нечего.
+    let slow = engine.uses_i2pd(profile);
+    if slow && !was_pooled {
+        return failed(name, NOT_CONNECTED_I2P.to_owned());
+    }
+    let (timeout, deadline) = if slow {
+        (I2P_PROBE_TIMEOUT, I2P_PROBE_DEADLINE)
+    } else {
+        (PROBE_TIMEOUT, PROBE_DEADLINE)
+    };
+
+    let outcome = within(deadline, measure(engine, profile, timeout)).await;
 
     // Направление, поднятое ради замера, не копится в пуле
     if !was_pooled {
@@ -128,6 +145,7 @@ async fn within(
 async fn measure(
     engine: &Arc<Engine>,
     profile: &penguin_config::schema::profile::Profile,
+    timeout: Duration,
 ) -> Result<u32, String> {
     let outbound = engine
         .outbounds()
@@ -139,7 +157,7 @@ async fn measure(
         .parse()
         .unwrap_or_else(|_| SocketAddress::domain("cp.cloudflare.com", 80));
 
-    match probe::probe(outbound.as_ref(), &target, PROBE_TIMEOUT).await {
+    match probe::probe(outbound.as_ref(), &target, timeout).await {
         probe::ProbeResult::Alive(rtt) => Ok(rtt.millis),
         probe::ProbeResult::Timeout => Err(NO_ANSWER.to_owned()),
         probe::ProbeResult::Rejected(message) => Err(message),
@@ -209,6 +227,20 @@ mod tests {
     #[tokio::test]
     async fn probing_without_profiles_says_so() {
         assert!(probe_profiles(&engine(), None).await.is_error());
+    }
+
+    // До подключения i2pd не запущен: замер упёрся бы в закрытый порт.
+    #[cfg(feature = "i2p")]
+    #[tokio::test]
+    async fn i2p_is_not_probed_before_it_is_connected() {
+        let profile = penguin_config::schema::profile::Profile::new(
+            "i2p",
+            "I2P",
+            penguin_config::schema::outbound::RawOutbound::new("i2p", serde_json::json!({})),
+        );
+        let result = probe_one(&engine(), &profile).await;
+        assert_eq!(result.rtt_millis, None);
+        assert_eq!(result.error.as_deref(), Some(NOT_CONNECTED_I2P));
     }
 
     #[tokio::test]
