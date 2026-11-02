@@ -189,6 +189,7 @@ fn translate(event: penguin_engine::Event) -> Option<Event> {
             decision,
             rule,
         },
+        Inner::Progress { message } => Event::Progress { message },
         Inner::RulesReloaded { count } => Event::RulesReloaded { count },
         // Видна по смене состояния
         Inner::ProfileChanged { .. } => return None,

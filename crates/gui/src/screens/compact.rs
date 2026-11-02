@@ -220,6 +220,8 @@ fn status(state: &State) -> Line {
     // Остановка первой: «Подключено» закрывающемуся окну — вранье.
     let (label, tone) = if connection.stopping {
         (crate::i18n::s().daemon_stopping.to_owned(), Tone::Busy)
+    } else if let Some(step) = connection.step() {
+        (step.to_owned(), Tone::Busy)
     } else if connection.online {
         describe(&connection.tunnel_now())
     } else if connection.starting {

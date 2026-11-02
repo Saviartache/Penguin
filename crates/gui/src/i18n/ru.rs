@@ -201,6 +201,8 @@ pub static STRINGS: Strings = Strings {
     traffic_any: "Любой",
     geoip_not_sent: "База GeoIP не передана службе",
     i2pd_not_sent: "i2pd не установлен в службу",
+    i2pd_downloading: "Скачивание i2pd…",
+    i2pd_installed: "i2pd установлен в службу",
     i2p_outproxy: "Outproxy (его владелец видит весь трафик без HTTPS)",
     i2p_outproxy_example: "пусто — vdipaav5…b32.i2p",
     values_empty: "Пусто — подходят любые. Впишите значение и нажмите Enter.",

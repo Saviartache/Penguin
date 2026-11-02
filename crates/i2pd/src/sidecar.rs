@@ -14,6 +14,7 @@ use crate::bypass::{self, Admitted};
 use crate::conf::{self, HTTP_PROXY};
 use crate::error::{I2pdError, I2pdResult};
 use crate::install;
+use crate::progress::{self, Line, Progress};
 
 /// Сколько ждать HTTP-прокси: i2pd открывает его только после reseed, а тот
 /// при отказе узла ждёт 30 с до следующего круга.
@@ -59,8 +60,13 @@ impl Sidecar {
         install::install(&self.home, bytes)
     }
 
-    /// Запускает i2pd, если он не работает; `direct` — выход мимо тоннеля.
-    pub async fn start(&self, direct: Arc<dyn Outbound>) -> I2pdResult<()> {
+    /// Запускает i2pd, если он не работает; `direct` — выход мимо тоннеля,
+    /// `report` получает шаги запуска.
+    pub async fn start(
+        &self,
+        direct: Arc<dyn Outbound>,
+        report: &(dyn Fn(Progress) + Send + Sync),
+    ) -> I2pdResult<()> {
         let mut running = self.running.lock().await;
         if let Some(current) = running.as_mut() {
             if matches!(current.child.try_wait(), Ok(None)) {
@@ -87,6 +93,12 @@ impl Sidecar {
         let config = data.join("i2pd.conf");
         std::fs::write(&config, conf::render(via)).map_err(|err| I2pdError::io(&config, err))?;
         let log = data.join("i2pd.log");
+        // Журнал на запуск: `loglevel = info` иначе рос бы без конца.
+        if let Err(err) = std::fs::remove_file(&log)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(I2pdError::io(&log, err));
+        }
 
         // `kill_on_drop`: отменённый запуск не оставит процесса.
         let mut child = command(&binary, &data, &config, &log, account)
@@ -96,8 +108,11 @@ impl Sidecar {
             admitted.set(pid);
         }
         tracing::info!(pid = child.id(), bypass = %via, "i2pd запущен");
+        report(Progress::Starting);
 
-        wait_ready(&mut child, &log).await?;
+        let mut tail = LogTail::new(&log);
+        wait_ready(&mut child, &mut tail, report).await?;
+        report(Progress::Ready(tail.routers));
         *running = Some(Running {
             child,
             _bypass: bypass,
@@ -153,17 +168,65 @@ fn command(binary: &Path, data: &Path, config: &Path, log: &Path, account: Accou
     command
 }
 
-/// Ждёт, пока HTTP-прокси примет соединение, или выхода процесса.
-async fn wait_ready(child: &mut Child, log: &Path) -> I2pdResult<()> {
+/// Ждёт, пока HTTP-прокси примет соединение, или выхода процесса; пересказывает журнал.
+async fn wait_ready(
+    child: &mut Child,
+    tail: &mut LogTail,
+    report: &(dyn Fn(Progress) + Send + Sync),
+) -> I2pdResult<()> {
+    let log = tail.path.clone();
     let deadline = tokio::time::Instant::now() + READY;
     while tokio::time::Instant::now() < deadline {
+        tail.read(report);
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(I2pdError::Exited(status.to_string(), log.to_path_buf()));
+            return Err(I2pdError::Exited(status.to_string(), log));
         }
         if TcpStream::connect(HTTP_PROXY).await.is_ok() {
+            tail.read(report);
             return Ok(());
         }
         tokio::time::sleep(POLL).await;
     }
-    Err(I2pdError::NotReady(READY.as_secs(), log.to_path_buf()))
+    Err(I2pdError::NotReady(READY.as_secs(), log))
+}
+
+/// Новые строки журнала i2pd с прошлого чтения.
+struct LogTail {
+    path: PathBuf,
+    /// Сколько байт уже разобрано (до последнего перевода строки).
+    offset: usize,
+    /// Узлов добавлено в базу.
+    routers: usize,
+}
+
+impl LogTail {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            offset: 0,
+            routers: 0,
+        }
+    }
+
+    /// Разбирает дописанное; недописанная строка ждёт следующего раза.
+    fn read(&mut self, report: &(dyn Fn(Progress) + Send + Sync)) {
+        // Файла ещё нет — i2pd не успел его открыть.
+        let Ok(bytes) = std::fs::read(&self.path) else {
+            return;
+        };
+        let Some(fresh) = bytes.get(self.offset..) else {
+            return;
+        };
+        let Some(end) = fresh.iter().rposition(|byte| *byte == b'\n') else {
+            return;
+        };
+        for line in String::from_utf8_lossy(&fresh[..end]).lines() {
+            match progress::parse(line) {
+                Some(Line::Step(step)) => report(step),
+                Some(Line::Router) => self.routers += 1,
+                None => {}
+            }
+        }
+        self.offset += end + 1;
+    }
 }

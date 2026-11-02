@@ -1,0 +1,46 @@
+# Узлы I2P для первого запуска i2pd (reseed) — в релиз `i2p-reseed`.
+#
+# Серверы reseed в РФ заблокированы, GitHub — нет: i2pd берёт `i2pseeds.su3`
+# отсюда (`crates/i2pd/src/conf.rs`). Узлы меняются, поэтому раз в сутки.
+name: i2p-reseed
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: i2p-reseed
+
+jobs:
+  reseed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: su3
+        run: |
+          # Список — `reseed.urls` i2pd 3.0.0; первый ответивший.
+          for host in reseed2.i2p.net reseed.stormycloud.org i2p.novg.net reseed.onion.im \
+            reseed-fr.i2pd.xyz reseed.sahil.world www2.mk16.de coconut.incognet.io; do
+            # Серверы отвечают только «wget» (так ходит и i2pd).
+            if curl -fsSL --max-time 60 -A "Wget/1.11.4" -o i2pseeds.su3 "https://$host/i2pseeds.su3" \
+              && [ "$(head -c 6 i2pseeds.su3)" = "I2Psu3" ]; then
+              echo "узлы с $host: $(stat -c %s i2pseeds.su3) байт"
+              exit 0
+            fi
+          done
+          echo "ни один сервер reseed не ответил"
+          exit 1
+
+      - name: выпуск
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Предвыпуск: «последним» остаётся Penguin, автообновление смотрит туда.
+          gh release view i2p-reseed > /dev/null 2>&1 || gh release create i2p-reseed \
+            --prerelease --latest=false --title "Узлы I2P (reseed)" \
+            --notes "i2pseeds.su3 с серверов reseed I2P, обновляется раз в сутки. Берёт i2pd протокола I2P при первом запуске."
+          gh release upload i2p-reseed i2pseeds.su3 --clobber

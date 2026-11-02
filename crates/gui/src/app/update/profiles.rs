@@ -92,14 +92,20 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
         ServersMessage::SubscriptionRefreshed(result) => subscription_refreshed(app, result),
         ServersMessage::CountriesLocated(asked, result) => countries_located(app, &asked, result),
         ServersMessage::I2pdSent(result) => {
-            if let Err(reason) = result {
-                // Повторится со следующими настройками от службы.
-                let state = app.state_mut();
-                state.servers.i2pd_sent = false;
-                state.connection.push_log(
-                    LogLevel::Error,
-                    format!("{}: {reason}", crate::i18n::s().i2pd_not_sent),
-                );
+            let state = app.state_mut();
+            state.connection.installing_i2pd = false;
+            match result {
+                Ok(()) => state
+                    .connection
+                    .push_log(LogLevel::Info, crate::i18n::s().i2pd_installed.to_owned()),
+                Err(reason) => {
+                    // Повторится со следующими настройками от службы.
+                    state.servers.i2pd_sent = false;
+                    state.connection.push_log(
+                        LogLevel::Error,
+                        format!("{}: {reason}", crate::i18n::s().i2pd_not_sent),
+                    );
+                }
             }
             Task::none()
         }
@@ -114,6 +120,10 @@ pub(crate) fn send_i2pd(app: &mut App) -> Task<Message> {
         return Task::none();
     }
     state.servers.i2pd_sent = true;
+    state.connection.installing_i2pd = true;
+    state
+        .connection
+        .push_log(LogLevel::Info, crate::i18n::s().i2pd_downloading.to_owned());
     Task::perform(crate::i2pd::send_to_service(), |result| {
         Message::Servers(ServersMessage::I2pdSent(result))
     })

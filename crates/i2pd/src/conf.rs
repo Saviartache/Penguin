@@ -6,6 +6,13 @@ use std::net::SocketAddr;
 pub const HTTP_PROXY: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 4444);
 
+/// Узлы для первого запуска: серверы reseed в РФ заблокированы, GitHub — нет.
+/// Файл кладёт `.github/workflows/i2p-reseed.yml`.
+pub const RESEED: &str = concat!(
+    env!("CARGO_PKG_REPOSITORY"),
+    "/releases/download/i2p-reseed/i2pseeds.su3"
+);
+
 /// Настройки i2pd; `bypass` — SOCKS5 мимо тоннеля.
 ///
 /// SSU2 выключен: через прокси i2pd возит его только по `UDP ASSOCIATE`, а NTCP2
@@ -16,7 +23,8 @@ pub fn render(bypass: SocketAddr) -> String {
     format!(
         "\
 log = file
-loglevel = warn
+# Ход reseed пишется на info; журнал служба заводит заново на каждый запуск.
+loglevel = info
 ipv4 = true
 ipv6 = false
 notransit = true
@@ -48,6 +56,9 @@ enabled = false
 enabled = false
 
 [reseed]
+file = {RESEED}
+# GitHub отдаёт файл релиза перенаправлением.
+followredirect = true
 proxy = {proxy}
 
 [addressbook]
@@ -66,5 +77,16 @@ mod tests {
         assert_eq!(conf.matches("proxy = socks://127.0.0.1:50123\n").count(), 2);
         assert!(conf.contains("[ssu2]\nenabled = false"));
         assert!(conf.contains("port = 4444"));
+    }
+
+    #[test]
+    fn nodes_come_from_this_repository() {
+        assert_eq!(
+            RESEED,
+            "https://github.com/Saviartache/penguin/releases/download/i2p-reseed/i2pseeds.su3"
+        );
+        assert!(
+            render("127.0.0.1:1".parse().expect("адрес")).contains(&format!("file = {RESEED}\n"))
+        );
     }
 }

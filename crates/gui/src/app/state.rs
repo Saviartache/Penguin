@@ -160,6 +160,10 @@ pub struct Connection {
     pub reloading: bool,
     /// Автоподключение этого запуска уже сработало.
     pub autoconnected: bool,
+    /// Шаг долгого подключения от службы; гаснет со сменой состояния.
+    pub progress: Option<String>,
+    /// Окно качает i2pd и передаёт его службе.
+    pub installing_i2pd: bool,
     /// Точка отсчёта времени работы: демон шлёт состояние только при смене.
     since: Option<Instant>,
     /// Счётчики.
@@ -200,7 +204,32 @@ impl Connection {
             }
             _ => None,
         };
+        // Тот же шаг переживает лишь повтор того же подключения.
+        if !matches!(
+            (&self.tunnel, &state),
+            (
+                TunnelState::Connecting { .. },
+                TunnelState::Reconnecting { .. }
+            ) | (
+                TunnelState::Reconnecting { .. },
+                TunnelState::Reconnecting { .. }
+            )
+        ) {
+            self.progress = None;
+        }
         self.tunnel = state;
+    }
+
+    /// Что показать вместо «Подключение»: скачивание i2pd или шаг службы.
+    pub fn step(&self) -> Option<&str> {
+        if self.installing_i2pd {
+            return Some(crate::i18n::s().i2pd_downloading);
+        }
+        let busy = matches!(
+            self.tunnel,
+            TunnelState::Connecting { .. } | TunnelState::Reconnecting { .. }
+        );
+        self.progress.as_deref().filter(|_| busy)
     }
 
     /// Состояние тоннеля с досчитанным временем работы.

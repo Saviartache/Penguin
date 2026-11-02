@@ -233,7 +233,7 @@ impl Engine {
             self.dialer.protect_with(interface);
             #[cfg(feature = "i2p")]
             self.i2pd
-                .start_for(profile, self.outbounds.direct())
+                .start_for(profile, self.outbounds.direct(), &self.events)
                 .await?;
             self.outbounds.get_or_connect(profile).await
         };

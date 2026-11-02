@@ -133,6 +133,10 @@ fn handle_event(app: &mut App, event: Event) -> Task<Message> {
             connections,
         } => connection.apply_throughput(rate, total, connections),
         Event::Log { level, message } => connection.push_log(level, message),
+        Event::Progress { message } => {
+            connection.push_log(LogLevel::Info, message.clone());
+            connection.progress = Some(message);
+        }
         Event::Decision {
             target,
             process,

@@ -4,9 +4,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use penguin_config::schema::profile::Profile;
-use penguin_i2pd::{I2pdError, Sidecar};
+use penguin_i2pd::{I2pdError, Progress, Sidecar};
 use penguin_proto::error::ProtocolError;
 use penguin_proto::outbound::Outbound;
+
+use crate::events::{Event, EventBus, LogLevel};
 
 /// i2pd службы; каталог задаёт она же ([`crate::Engine::use_i2pd`]).
 #[derive(Debug, Default)]
@@ -23,12 +25,21 @@ impl I2pd {
         &self,
         profile: &Profile,
         direct: Arc<dyn Outbound>,
+        events: &EventBus,
     ) -> Result<(), ProtocolError> {
         if profile.outbound.protocol != penguin_i2p::PROTOCOL {
             return Ok(());
         }
         let sidecar = self.sidecar().map_err(to_protocol)?;
-        sidecar.start(direct).await.map_err(to_protocol)
+        let report = |step: Progress| {
+            let message = step.message();
+            if step.is_warning() {
+                events.emit(Event::log(LogLevel::Warning, message));
+            } else {
+                events.emit(Event::Progress { message });
+            }
+        };
+        sidecar.start(direct, &report).await.map_err(to_protocol)
     }
 
     /// Останавливает i2pd, если он запущен.

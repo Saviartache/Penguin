@@ -23,9 +23,11 @@ pub mod bypass;
 pub mod conf;
 pub mod error;
 pub mod install;
+pub mod progress;
 pub mod release;
 pub mod sidecar;
 
 pub use error::{I2pdError, I2pdResult};
+pub use progress::Progress;
 pub use release::Build;
 pub use sidecar::Sidecar;

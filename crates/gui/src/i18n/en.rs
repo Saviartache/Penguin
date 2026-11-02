@@ -201,6 +201,8 @@ pub static STRINGS: Strings = Strings {
     traffic_any: "Any",
     geoip_not_sent: "GeoIP database was not sent to the service",
     i2pd_not_sent: "i2pd was not installed into the service",
+    i2pd_downloading: "Downloading i2pd…",
+    i2pd_installed: "i2pd installed into the service",
     i2p_outproxy: "Outproxy (its operator sees all non-HTTPS traffic)",
     i2p_outproxy_example: "empty — vdipaav5…b32.i2p",
     values_empty: "Empty — any will do. Type a value and press Enter.",

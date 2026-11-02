@@ -414,6 +414,10 @@ pub struct Strings {
     pub geoip_not_sent: &'static str,
     /// i2pd не дошёл до службы.
     pub i2pd_not_sent: &'static str,
+    /// Окно качает i2pd и передаёт службе.
+    pub i2pd_downloading: &'static str,
+    /// i2pd дошёл до службы.
+    pub i2pd_installed: &'static str,
     /// Поле outproxy I2P: подпись говорит, кто видит трафик.
     pub i2p_outproxy: &'static str,
     /// Подсказка в поле outproxy: пусто — умолчание протокола.
@@ -768,6 +772,8 @@ mod tests {
                 table.traffic_any,
                 table.geoip_not_sent,
                 table.i2pd_not_sent,
+                table.i2pd_downloading,
+                table.i2pd_installed,
                 table.i2p_outproxy,
                 table.i2p_outproxy_example,
                 table.values_empty,
