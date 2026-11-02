@@ -12,6 +12,8 @@ pub mod direct;
 pub mod engine;
 pub mod error;
 pub mod events;
+#[cfg(feature = "i2p")]
+mod i2pd;
 pub mod metrics;
 #[cfg(windows)]
 mod network_name;

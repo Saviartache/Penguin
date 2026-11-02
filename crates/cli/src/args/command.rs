@@ -26,6 +26,15 @@ pub enum Command {
     Geoip(Vec<String>),
     /// Развёртывание сервера по SSH.
     Deploy(DeployCommand),
+    /// i2pd для протокола I2P.
+    I2pd(I2pdCommand),
+}
+
+/// Команды i2pd.
+#[derive(Debug, PartialEq, Eq)]
+pub enum I2pdCommand {
+    /// Скачать закреплённый выпуск в каталог пользователя.
+    Install,
 }
 
 /// Что развернуть.
@@ -121,7 +130,7 @@ pub enum RulesCommand {
 }
 
 /// Имена команд этого модуля.
-pub const NAMES: [&str; 9] = [
+pub const NAMES: [&str; 10] = [
     "socks",
     "http",
     "profiles",
@@ -131,6 +140,7 @@ pub const NAMES: [&str; 9] = [
     "subscription",
     "geoip",
     "deploy",
+    "i2pd",
 ];
 
 /// Разбирает команду; первым идёт её имя, общие флаги уже убраны.
@@ -149,8 +159,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed<Command>, 
         "subscription" => subscription(lx).map(|p| p.map(Command::Subscription)),
         "geoip" => geoip(lx).map(|p| p.map(Command::Geoip)),
         "deploy" => deploy(lx).map(|p| p.map(Command::Deploy)),
+        "i2pd" => i2pd(lx).map(|p| p.map(Command::I2pd)),
         _ => Err(ArgsError::UnknownCommand(name)),
     }
+}
+
+fn i2pd(mut lx: Lexer) -> Result<Parsed<I2pdCommand>, ArgsError> {
+    subcommand(&mut lx, "i2pd", help::I2PD)?.and_then(|name| match name.as_str() {
+        "install" => leaf(lx, help::I2PD_INSTALL, I2pdCommand::Install),
+        _ => Err(ArgsError::UnknownCommand(name)),
+    })
 }
 
 fn deploy(mut lx: Lexer) -> Result<Parsed<DeployCommand>, ArgsError> {
@@ -624,6 +642,15 @@ mod tests {
             ]))
         );
         assert_eq!(run(&["geoip"]), Ok(Command::Geoip(Vec::new())));
+    }
+
+    #[test]
+    fn i2pd_install_is_a_leaf() {
+        assert_eq!(
+            run(&["i2pd", "install"]),
+            Ok(Command::I2pd(I2pdCommand::Install))
+        );
+        assert!(run(&["i2pd", "remove"]).is_err());
     }
 
     #[test]

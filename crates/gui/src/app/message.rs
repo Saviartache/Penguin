@@ -243,6 +243,8 @@ pub enum ServersMessage {
         Vec<String>,
         Result<std::collections::HashMap<String, String>, String>,
     ),
+    /// i2pd передан службе (или причина отказа).
+    I2pdSent(Result<(), String>),
     /// Окно развёртывания сервера Pingwin.
     Deploy(DeployMessage),
 }

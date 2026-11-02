@@ -91,8 +91,32 @@ pub fn handle(app: &mut App, message: ServersMessage) -> Task<Message> {
         ServersMessage::SubscriptionRefresh => subscription_refresh(app),
         ServersMessage::SubscriptionRefreshed(result) => subscription_refreshed(app, result),
         ServersMessage::CountriesLocated(asked, result) => countries_located(app, &asked, result),
+        ServersMessage::I2pdSent(result) => {
+            if let Err(reason) = result {
+                // Повторится со следующими настройками от службы.
+                let state = app.state_mut();
+                state.servers.i2pd_sent = false;
+                state.connection.push_log(
+                    LogLevel::Error,
+                    format!("{}: {reason}", crate::i18n::s().i2pd_not_sent),
+                );
+            }
+            Task::none()
+        }
         ServersMessage::Deploy(message) => super::deploy::handle(app, message),
     }
+}
+
+/// Передаёт службе i2pd, если есть профиль I2P; раз за запуск.
+pub(crate) fn send_i2pd(app: &mut App) -> Task<Message> {
+    let state = app.state_mut();
+    if state.servers.i2pd_sent || !crate::i2pd::wanted(&state.config.profiles) {
+        return Task::none();
+    }
+    state.servers.i2pd_sent = true;
+    Task::perform(crate::i2pd::send_to_service(), |result| {
+        Message::Servers(ServersMessage::I2pdSent(result))
+    })
 }
 
 /// Спрашивает страну серверов, о которых ещё не спрашивали; флаги — по ответу.

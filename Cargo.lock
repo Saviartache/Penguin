@@ -3413,6 +3413,7 @@ dependencies = [
  "penguin-core",
  "penguin-dns",
  "penguin-engine",
+ "penguin-i2pd",
  "penguin-inbound",
  "penguin-match",
  "penguin-platform",
@@ -3522,6 +3523,8 @@ dependencies = [
  "penguin-dns",
  "penguin-dpi",
  "penguin-hysteria2",
+ "penguin-i2p",
+ "penguin-i2pd",
  "penguin-inbound",
  "penguin-juicity",
  "penguin-masque",
@@ -3585,6 +3588,37 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "penguin-i2p"
+version = "1.1.4"
+dependencies = [
+ "async-trait",
+ "penguin-core",
+ "penguin-proto",
+ "penguin-transport",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "penguin-i2pd"
+version = "1.1.4"
+dependencies = [
+ "async-trait",
+ "penguin-core",
+ "penguin-inbound",
+ "penguin-process",
+ "penguin-proto",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 

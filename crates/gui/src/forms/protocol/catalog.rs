@@ -2,7 +2,7 @@
 
 use crate::forms::protocol::spec::ProtocolSpec;
 use crate::forms::protocol::{
-    anytls, dpi, hysteria2, juicity, masque, masque_ip, naive, pingwin, shadowsocks, socks5,
+    anytls, dpi, hysteria2, i2p, juicity, masque, masque_ip, naive, pingwin, shadowsocks, socks5,
     trojan, trusttunnel, tuic, vless, vmess, wireguard,
 };
 
@@ -28,6 +28,8 @@ pub static ALL: &[&ProtocolSpec] = &[
     &masque_ip::SPEC,
     &socks5::TLS,
     &socks5::SPEC,
+    // Медленный запасной выход: сервера нет, трафик идёт через сеть I2P.
+    &i2p::SPEC,
 ];
 
 /// Протокол формы, когда его не выбирали: тесты и пустое состояние.
@@ -107,8 +109,9 @@ mod tests {
     #[test]
     fn every_protocol_that_has_a_server_asks_for_its_address() {
         // Адрес показывается в списке профилей (`screens::servers::server_of`).
-        // У режима DPI сервера нет: соединение идёт прямо к сайту.
-        for spec in ALL.iter().filter(|spec| spec.id != dpi::SPEC.id) {
+        // У режима DPI сервера нет: соединение идёт прямо к сайту; у I2P — через сеть I2P.
+        let serverless = [dpi::SPEC.id, i2p::SPEC.id];
+        for spec in ALL.iter().filter(|spec| !serverless.contains(&spec.id)) {
             let server = spec
                 .fields
                 .iter()

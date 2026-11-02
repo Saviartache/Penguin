@@ -132,6 +132,7 @@ pub fn save(app: &mut App) -> Task<Message> {
             config: Box::new(config),
         }),
         profiles::locate_countries(app),
+        profiles::send_i2pd(app),
     ])
 }
 

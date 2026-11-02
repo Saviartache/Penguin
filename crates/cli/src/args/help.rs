@@ -200,6 +200,33 @@ Options:
     global_options!()
 );
 
+pub(super) const I2PD: &str = concat!(
+    "i2pd для протокола I2P
+
+Usage: penguin i2pd [OPTIONS] <COMMAND>
+
+Commands:
+  install  Скачать закреплённый выпуск i2pd и сверить SHA-256
+
+Options:
+",
+    global_options!()
+);
+
+pub(super) const I2PD_INSTALL: &str = concat!(
+    "Скачать закреплённый выпуск i2pd и сверить SHA-256.
+
+Файл берётся из релиза этого репозитория на GitHub и кладётся в каталог данных
+пользователя; уже скачанный и совпавший не качается заново. Службе его передаёт
+окно, и она запускает только файл с той же суммой.
+
+Usage: penguin i2pd install [OPTIONS]
+
+Options:
+",
+    global_options!()
+);
+
 pub(super) const DOCTOR: &str = concat!(
     "Проверка окружения: настройки, профили, права
 

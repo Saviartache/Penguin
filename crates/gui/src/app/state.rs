@@ -378,6 +378,8 @@ pub struct ServersState {
     pub subscription_busy: bool,
     /// Страны серверов для флагов.
     pub countries: crate::app::countries::Countries,
+    /// i2pd передан службе за этот запуск или передаётся.
+    pub i2pd_sent: bool,
     /// Окно развёртывания сервера Pingwin поверх редактора; `None` — закрыто.
     pub deploy: Option<crate::forms::deploy::Deploy>,
     /// Идущее развёртывание; сброс обрывает поток и убивает процесс.

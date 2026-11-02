@@ -1,0 +1,128 @@
+# Статический i2pd для протокола I2P: в Penguin он не входит, окно качает его
+# из этого релиза (`crates/i2pd`).
+#
+#   тег `i2pd-<версия>`  собирает тег `<версия>` PurpleI2P/i2pd и создаёт релиз
+#   ручной запуск        только собирает; файлы лежат в артефактах прогона
+#
+# Сборка — скриптами самого i2pd (`contrib/static`), как его собственный CI.
+# Суммы из `SHA256SUMS` релиза переносятся в `crates/i2pd/src/release.rs`:
+# служба запускает только файл, совпавший с ними.
+name: i2pd
+
+on:
+  push:
+    tags: ["i2pd-*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Тег PurpleI2P/i2pd
+        required: true
+        default: "3.0.0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: i2pd-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERSION: ${{ inputs.version || github.ref_type == 'tag' && github.ref_name }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, runner: ubuntu-latest, system: linux }
+          - { name: macos-arm64, runner: macos-15, system: macos, arch: arm64 }
+          - { name: macos-x64, runner: macos-15-intel, system: macos, arch: x86_64 }
+          - { name: windows-x64, runner: windows-latest, system: windows }
+    steps:
+      - name: версия
+        run: echo "VERSION=${VERSION#i2pd-}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
+        with:
+          repository: PurpleI2P/i2pd
+          ref: ${{ env.VERSION }}
+
+      - name: linux
+        if: matrix.system == 'linux'
+        run: |
+          docker run --rm -v "$PWD":/src -w /src alpine:3.22 sh contrib/static/build-musl.sh
+          file i2pd | grep 'statically linked'
+          mv i2pd "i2pd-${{ matrix.name }}"
+
+      - name: macos
+        if: matrix.system == 'macos'
+        env:
+          ARCHS: ${{ matrix.arch }}
+        run: |
+          sh contrib/static/build-macos.sh
+          lipo -archs i2pd | grep -w "$ARCHS"
+          # Только системные библиотеки: на чужой машине Homebrew нет.
+          test -z "$(otool -L i2pd | grep -E '^[[:space:]]' | grep -vE '^[[:space:]]+(/usr/lib/|/System/Library/)')"
+          mv i2pd "i2pd-${{ matrix.name }}"
+
+      - uses: msys2/setup-msys2@v2
+        if: matrix.system == 'windows'
+        with:
+          msystem: MINGW64
+          install: >-
+            base-devel mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-boost mingw-w64-x86_64-openssl mingw-w64-x86_64-zlib
+          update: true
+
+      - name: windows
+        if: matrix.system == 'windows'
+        shell: msys2 {0}
+        run: |
+          cmake -S build -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DWITH_STATIC=ON
+          cmake --build out
+          # Служба запускает его на машине без MSYS2.
+          if objdump -p out/i2pd.exe | grep -iE 'DLL Name: (lib|zlib)'; then exit 1; fi
+          mv out/i2pd.exe "i2pd-${{ matrix.name }}.exe"
+
+      # Сборка Windows — оконное приложение (`WIN32_APP`): в прогоне ему не на что вывести.
+      - name: запуск
+        if: matrix.system != 'windows'
+        run: |
+          bin=$(ls i2pd-${{ matrix.name }}*)
+          chmod +x "$bin"
+          "./$bin" --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: i2pd-${{ matrix.name }}*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: builds
+          merge-multiple: true
+
+      - name: выпуск
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          (cd builds && sha256sum -- i2pd-* > SHA256SUMS && cat SHA256SUMS)
+          # Не «последний выпуск»: им остаётся Penguin, автообновление смотрит туда.
+          gh release create "$GITHUB_REF_NAME" builds/* --latest=false \
+            --title "i2pd ${GITHUB_REF_NAME#i2pd-}" \
+            --notes "Статический i2pd ${GITHUB_REF_NAME#i2pd-} (PurpleI2P/i2pd) для протокола I2P. Лицензия BSD-3-Clause."

@@ -22,7 +22,7 @@ mod version;
 pub use error::{UpdateError, UpdateResult};
 pub use flow::install_archive;
 #[cfg(feature = "net")]
-pub use online::{check, install, repository_url};
+pub use online::{check, download_release_asset, install, repository_url};
 pub use release::{Available, CheckReport, find_update};
 pub use replace::{remove_leftovers, replace_executable};
 pub use target::{Format, Target};

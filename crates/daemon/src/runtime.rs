@@ -66,6 +66,7 @@ async fn run_inner(paths: Option<Paths>, cancel: CancellationToken) -> Result<()
     penguin_platform::leftovers::recover(config.network.tun.ipv4);
 
     let engine = Engine::new(config).context("не удалось собрать движок")?;
+    engine.use_i2pd(store.paths().i2pd_dir());
     // Без базы правила по странам молчат, пока окно её не пришлёт
     let geoip = store.paths().geoip_file();
     if geoip.exists()

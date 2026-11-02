@@ -31,6 +31,14 @@ pub fn check() -> UpdateResult<Option<Available>> {
     find_update(&json, &Version::current(), &target)
 }
 
+/// Скачивает файл `asset` релиза `tag` этого репозитория; сверяет его зовущий.
+pub fn download_release_asset(tag: &str, asset: &str, limit: u64) -> UpdateResult<Vec<u8>> {
+    net::get(
+        &format!("{}/releases/download/{tag}/{asset}", repository_url()),
+        limit,
+    )
+}
+
 /// Скачивает выпуск, сверяет сумму и подменяет `executable`.
 pub fn install(available: &Available, executable: &Path) -> UpdateResult<()> {
     let target = Target::current().ok_or(UpdateError::UnsupportedTarget)?;

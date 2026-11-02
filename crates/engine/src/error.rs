@@ -47,6 +47,11 @@ pub enum EngineError {
     /// База GeoIP не открылась.
     #[error("{0}")]
     GeoIp(String),
+
+    /// i2pd не поставлен.
+    #[cfg(feature = "i2p")]
+    #[error(transparent)]
+    I2pd(#[from] penguin_i2pd::I2pdError),
 }
 
 impl EngineError {
@@ -58,6 +63,9 @@ impl EngineError {
             Self::Tun(err) => err.needs_user_action(),
             Self::Platform(err) => err.needs_privileges(),
             Self::Dns(_) | Self::Inbound(_) | Self::Io(_) | Self::GeoIp(_) => false,
+            // Установка: файл чужой или не той системы.
+            #[cfg(feature = "i2p")]
+            Self::I2pd(_) => true,
         }
     }
 }

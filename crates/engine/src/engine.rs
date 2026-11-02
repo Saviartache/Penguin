@@ -54,6 +54,8 @@ pub struct Engine {
     connecting: parking_lot::Mutex<Option<CancellationToken>>,
     /// База стран для правил `geo_ip`; приезжает после запуска.
     geoip: parking_lot::Mutex<Option<GeoIpDatabase>>,
+    #[cfg(feature = "i2p")]
+    i2pd: crate::i2pd::I2pd,
 }
 
 impl std::fmt::Debug for Engine {
@@ -102,6 +104,8 @@ impl Engine {
             session: Mutex::new(None),
             connecting: parking_lot::Mutex::new(None),
             geoip: parking_lot::Mutex::new(None),
+            #[cfg(feature = "i2p")]
+            i2pd: crate::i2pd::I2pd::default(),
         }))
     }
 
@@ -140,6 +144,29 @@ impl Engine {
         let database = GeoIpDatabase::open(path).map_err(EngineError::GeoIp)?;
         *self.geoip.lock() = Some(database);
         self.reload((*self.config()).clone())
+    }
+
+    /// Каталог i2pd службы: исполняемый файл, данные, журнал.
+    pub fn use_i2pd(&self, home: std::path::PathBuf) {
+        #[cfg(feature = "i2p")]
+        self.i2pd.set_home(home);
+        #[cfg(not(feature = "i2p"))]
+        let _ = home;
+    }
+
+    /// Ставит i2pd, если файл совпал с закреплённым выпуском.
+    pub fn install_i2pd(&self, bytes: &[u8]) -> EngineResult<()> {
+        #[cfg(feature = "i2p")]
+        {
+            self.i2pd.install(bytes).map_err(EngineError::I2pd)
+        }
+        #[cfg(not(feature = "i2p"))]
+        {
+            let _ = bytes;
+            Err(EngineError::Protocol(
+                penguin_proto::error::ProtocolError::Unsupported("I2P в этой сборке"),
+            ))
+        }
     }
 
     fn compile_context(&self) -> CompileContext {
@@ -204,6 +231,10 @@ impl Engine {
                 }
             };
             self.dialer.protect_with(interface);
+            #[cfg(feature = "i2p")]
+            self.i2pd
+                .start_for(profile, self.outbounds.direct())
+                .await?;
             self.outbounds.get_or_connect(profile).await
         };
         let connected = tokio::select! {
@@ -218,6 +249,10 @@ impl Engine {
         };
         self.connecting.lock().take();
 
+        #[cfg(feature = "i2p")]
+        if !matches!(connected, Some(Ok(_))) {
+            self.i2pd.stop().await;
+        }
         let outbound = match connected {
             Some(Ok(outbound)) => outbound,
             None => {
@@ -252,6 +287,8 @@ impl Engine {
             }
             Err(err) => {
                 self.outbounds.close(&outbound.id()).await;
+                #[cfg(feature = "i2p")]
+                self.i2pd.stop().await;
                 self.dialer.protect_with(0);
                 self.state.failed(err.to_string());
                 Err(err)
@@ -307,6 +344,8 @@ impl Engine {
         self.state.set(TunnelState::Disconnecting);
         let result = started.stop().await;
         self.outbounds.close_all().await;
+        #[cfg(feature = "i2p")]
+        self.i2pd.stop().await;
 
         self.state.disconnected();
         self.events

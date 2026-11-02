@@ -50,9 +50,13 @@ penguin-masque = { workspace = true, optional = true }
 penguin-trusttunnel = { workspace = true, optional = true }
 penguin-wireguard = { workspace = true, optional = true }
 penguin-naive = { workspace = true, optional = true }
+penguin-i2p = { workspace = true, optional = true }
+# Не протокол: свой i2pd, к которому ходит `i2p`.
+penguin-i2pd = { workspace = true, optional = true }
 
 [features]
-default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "trusttunnel", "socks5"]
+default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "trusttunnel", "socks5", "i2p"]
+i2p = ["dep:penguin-i2p", "dep:penguin-i2pd"]
 pingwin = ["dep:penguin-pingwin"]
 # Не протокол: обход DPI на прямом соединении.
 dpi = ["dep:penguin-dpi"]

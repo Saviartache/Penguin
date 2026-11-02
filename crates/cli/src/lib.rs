@@ -25,6 +25,9 @@ pub fn run(command: &Command, config_dir: Option<&std::path::Path>, json: bool) 
     if let Command::Deploy(args::DeployCommand::Pingwin) = command {
         return commands::deploy::run(Format::from_flag(json));
     }
+    if let Command::I2pd(args::I2pdCommand::Install) = command {
+        return commands::i2pd::install(Format::from_flag(json));
+    }
     // Подписка читает общий (чужой) каталог службы лишь когда сама пишет туда
     // настройки; окну (оно от пользователя) к нему не дотянуться, и обновление
     // по подписке в JSON настроек не трогает — поэтому до их чтения.
@@ -63,6 +66,7 @@ pub fn run(command: &Command, config_dir: Option<&std::path::Path>, json: bool) 
         Command::Update(update) => commands::update::run(update, format),
         Command::Geoip(servers) => commands::geoip::run(servers, format),
         Command::Deploy(args::DeployCommand::Pingwin) => commands::deploy::run(format),
+        Command::I2pd(args::I2pdCommand::Install) => commands::i2pd::install(format),
         // Разобрана выше, до чтения настроек.
         Command::Subscription(_) => unreachable!("подписка разобрана до чтения настроек"),
     }

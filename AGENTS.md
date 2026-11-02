@@ -21,8 +21,9 @@
 | `engine` | всё выше + `protocols/*` |
 | `ipc` | `core`, `config` |
 | `subscription` | `core`, `config` |
+| `i2pd` | `core`, `proto`, `inbound`, `process` |
 | `daemon` | `engine`, `ipc`, `config`, `platform` |
-| `cli` | `ipc`, `engine`, `inbound`, `proto`, `tun`, `platform`, `update`, `subscription`, `match` |
+| `cli` | `ipc`, `engine`, `inbound`, `proto`, `tun`, `platform`, `update`, `subscription`, `match`, `i2pd` |
 | `gui` | `ipc`, `config`, `core`, `platform`, `uikit`, `update` без фичи `net` |
 | `app` | `daemon`, `cli`, `gui`, `config`, `platform` |
 | `protocols/transport`, `protocols/utls` | `core`, `proto` |
@@ -67,6 +68,14 @@
   через системный `ssh`; окно просит у **себя же** с запросом на stdin (как в
   1.7). Всё, что делается на сервере, — один `servers/pingwin/docker/install.sh`:
   его же зовёт `deploy.sh`, вторую копию шагов не заводить.
+- **1.11.** Протокол `i2p` говорит только с HTTP-прокси i2pd на `127.0.0.1`;
+  сам i2pd — чужая программа, в сборку не входит. Запускает его движок
+  (`crates/i2pd`, фича `i2p`), а не протокол (§8.5). Статическую сборку делает
+  `.github/workflows/i2pd.yml` в релиз `i2pd-<версия>`; качает её `cli`
+  (`penguin i2pd install`, сеть через `update`, как в 1.7), окно передаёт
+  файл службе кусками, служба запускает его, только если SHA-256 совпал с
+  `crates/i2pd/src/release.rs`. Весь трафик i2pd идёт через SOCKS5 на
+  loopback мимо тоннеля, и этот SOCKS5 пускает только `pid` своего i2pd.
 
 ---
 

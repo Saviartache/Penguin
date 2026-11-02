@@ -10,6 +10,7 @@ pub mod carrier;
 pub mod catalog;
 pub mod dpi;
 pub mod hysteria2;
+pub mod i2p;
 pub mod juicity;
 pub mod masque;
 pub mod masque_ip;

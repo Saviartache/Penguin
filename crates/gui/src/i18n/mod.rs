@@ -412,6 +412,12 @@ pub struct Strings {
     pub traffic_any: &'static str,
     /// База GeoIP не дошла до службы.
     pub geoip_not_sent: &'static str,
+    /// i2pd не дошёл до службы.
+    pub i2pd_not_sent: &'static str,
+    /// Поле outproxy I2P: подпись говорит, кто видит трафик.
+    pub i2p_outproxy: &'static str,
+    /// Подсказка в поле outproxy: пусто — умолчание протокола.
+    pub i2p_outproxy_example: &'static str,
     /// В разделе адресов или портов пусто.
     pub values_empty: &'static str,
     /// Набранного в разделе нет.
@@ -761,6 +767,9 @@ mod tests {
                 table.host_country,
                 table.traffic_any,
                 table.geoip_not_sent,
+                table.i2pd_not_sent,
+                table.i2p_outproxy,
+                table.i2p_outproxy_example,
                 table.values_empty,
                 table.values_not_found,
                 table.add_rule,

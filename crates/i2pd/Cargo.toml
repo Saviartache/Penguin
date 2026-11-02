@@ -1,0 +1,28 @@
+[package]
+name = "penguin-i2pd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Свой i2pd для протокола I2P: закреплённый выпуск, настройки, запуск"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+# Прямой выход и контракт потока для обхода TUN.
+penguin-proto.workspace = true
+# SOCKS5, через который i2pd выходит в сеть мимо тоннеля.
+penguin-inbound.workspace = true
+# Обход пускает только свой процесс.
+penguin-process.workspace = true
+
+tokio = { workspace = true, features = ["rt", "net", "process", "sync", "time", "macros"] }
+tokio-util.workspace = true
+async-trait.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "penguin-i2p"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Исходящее направление через outproxy сети I2P (локальный i2pd)"
+
+[lints]
+workspace = true
+
+[dependencies]
+penguin-core.workspace = true
+penguin-proto.workspace = true
+# Срок рукопожатия (AGENTS §1.1.1).
+penguin-transport.workspace = true
+
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "macros"] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

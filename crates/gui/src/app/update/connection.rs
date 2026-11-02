@@ -70,6 +70,7 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
                 autoconnect,
                 crate::app::update::profiles::locate_countries(app),
                 crate::app::update::rules::send_geoip(app),
+                crate::app::update::profiles::send_i2pd(app),
             ]);
         }
         Response::Explanation(explanation) => {

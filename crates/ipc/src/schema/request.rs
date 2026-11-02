@@ -74,6 +74,18 @@ pub enum Request {
         #[serde(with = "super::hex")]
         data: Vec<u8>,
     },
+
+    /// Кусок исполняемого файла i2pd, как у [`Self::PutGeoIp`]; последний сверяется
+    /// с закреплённой суммой и ставит i2pd службы.
+    PutI2pd {
+        /// С какого байта кусок; `0` начинает передачу заново.
+        offset: u64,
+        /// Размер всего файла.
+        total: u64,
+        /// Байты куска, не длиннее [`GEOIP_CHUNK`].
+        #[serde(with = "super::hex")]
+        data: Vec<u8>,
+    },
 }
 
 /// Наибольший кусок базы GeoIP: в hex он вдвое длиннее и обязан влезть в
@@ -100,6 +112,7 @@ impl Request {
                 | Self::Probe { .. }
                 | Self::ListProcesses
                 | Self::PutGeoIp { .. }
+                | Self::PutI2pd { .. }
         )
     }
 
@@ -118,6 +131,7 @@ impl Request {
             Self::Subscribe => "subscribe",
             Self::Shutdown => "shutdown",
             Self::PutGeoIp { .. } => "put_geoip",
+            Self::PutI2pd { .. } => "put_i2pd",
         }
     }
 }

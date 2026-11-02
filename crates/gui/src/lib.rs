@@ -11,6 +11,7 @@ mod flags;
 mod forms;
 mod geoip;
 mod i18n;
+mod i2pd;
 mod ipc;
 mod screens;
 mod self_exec;

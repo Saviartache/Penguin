@@ -221,6 +221,7 @@ fn protocols_of(feature: &str) -> Option<&'static [&'static str]> {
         "wireguard" => &["wireguard"],
         "trusttunnel" => &["trusttunnel"],
         "socks5" => &["socks5", "socks5-tls"],
+        "i2p" => &["i2p"],
         _ => return None,
     })
 }
@@ -282,6 +283,10 @@ fn register_protocols(registry: &mut ProtocolRegistry) {
         registry.register(Arc::new(penguin_socks5::Socks5Factory::new()));
         registry.register(Arc::new(penguin_socks5::Socks5Factory::tls()));
     }
+
+    // i2pd под него поднимает движок (`crate::i2pd`), не протокол.
+    #[cfg(feature = "i2p")]
+    registry.register(Arc::new(penguin_i2p::I2pFactory::new()));
 
     let _ = registry;
 }

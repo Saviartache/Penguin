@@ -4,12 +4,10 @@
 //! Подменить базу может любой, кто дотянулся до канала, — как и правила
 //! (`SetConfig`), поэтому прав это не добавляет.
 
-use std::io::Write;
 use std::path::Path;
 
 use penguin_engine::Engine;
 use penguin_ipc::schema::Response;
-use penguin_ipc::schema::request::GEOIP_CHUNK;
 
 /// База ~8 МБ; предел с запасом на рост, как у загрузчика.
 const LIMIT: u64 = 64 * 1024 * 1024;
@@ -25,34 +23,7 @@ pub fn put(engine: &Engine, target: &Path, offset: u64, total: u64, data: &[u8])
 
 /// Дописывает кусок; `true` — база пришла целиком.
 fn write_chunk(target: &Path, offset: u64, total: u64, data: &[u8]) -> Result<bool, String> {
-    let end = offset.saturating_add(data.len() as u64);
-    if total > LIMIT || data.len() > GEOIP_CHUNK || end > total {
-        return Err(format!(
-            "кусок базы GeoIP вне пределов: {offset}+{} из {total}",
-            data.len()
-        ));
-    }
-
-    let part = part_of(target);
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(offset == 0)
-        .append(offset != 0)
-        .open(&part)
-        .map_err(|err| format!("{}: {err}", part.display()))?;
-    let written = file
-        .metadata()
-        .map_err(|err| format!("{}: {err}", part.display()))?
-        .len();
-    if written != offset {
-        return Err(format!(
-            "кусок базы GeoIP не по порядку: ждали {written}, пришёл {offset}"
-        ));
-    }
-    file.write_all(data)
-        .map_err(|err| format!("{}: {err}", part.display()))?;
-    Ok(end == total)
+    super::upload::write_chunk(&part_of(target), LIMIT, "базы GeoIP", offset, total, data)
 }
 
 /// Проверяет базу движком и только потом подменяет прежнюю.

@@ -15,6 +15,7 @@ members = [
     "crates/dns",
     "crates/platform",
     "crates/update",
+    "crates/i2pd",
     "crates/engine",
     "crates/ipc",
     "crates/subscription",
@@ -39,6 +40,7 @@ members = [
     "protocols/shadowsocks",
     "protocols/trojan",
     "protocols/socks5",
+    "protocols/i2p",
     "servers/pingwin",
 ]
 
@@ -70,6 +72,7 @@ penguin-platform = { path = "crates/platform" }
 penguin-update   = { path = "crates/update", default-features = false }
 # Без этого умолчания движка возвращают все протоколы демону и клиенту.
 penguin-engine   = { path = "crates/engine", default-features = false }
+penguin-i2pd     = { path = "crates/i2pd" }
 penguin-ipc      = { path = "crates/ipc" }
 penguin-subscription = { path = "crates/subscription" }
 penguin-daemon   = { path = "crates/daemon" }
@@ -92,6 +95,7 @@ penguin-pingwin = { path = "protocols/pingwin" }
 penguin-shadowsocks = { path = "protocols/shadowsocks" }
 penguin-trojan = { path = "protocols/trojan" }
 penguin-socks5 = { path = "protocols/socks5" }
+penguin-i2p = { path = "protocols/i2p" }
 
 # --- UI ---
 uikit = { package = "rust-ui-kit", path = "vendor/rust-ui-kit" }

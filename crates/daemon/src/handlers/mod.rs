@@ -5,10 +5,12 @@
 
 pub mod diagnostics;
 pub mod geoip;
+pub mod i2pd;
 pub mod processes;
 pub mod profiles;
 pub mod rules;
 pub mod tunnel;
+mod upload;
 
 use std::sync::Arc;
 
@@ -100,6 +102,18 @@ impl Handler for DaemonHandler {
             } => geoip::put(
                 &self.engine,
                 &self.store.paths().geoip_file(),
+                offset,
+                total,
+                &data,
+            ),
+
+            Request::PutI2pd {
+                offset,
+                total,
+                data,
+            } => i2pd::put(
+                &self.engine,
+                &self.store.paths().i2pd_dir(),
                 offset,
                 total,
                 &data,

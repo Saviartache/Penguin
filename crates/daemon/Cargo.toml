@@ -40,8 +40,9 @@ libc.workspace = true
 
 [features]
 # Нужны, чтобы `--no-default-features` собирал демона без протоколов.
-default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "trusttunnel", "socks5"]
+default = ["pingwin", "dpi", "hysteria2", "tuic", "juicity", "anytls", "vless", "vmess", "trojan", "shadowsocks", "naive", "masque", "wireguard", "trusttunnel", "socks5", "i2p"]
 pingwin = ["penguin-engine/pingwin"]
+i2p = ["penguin-engine/i2p"]
 dpi = ["penguin-engine/dpi"]
 hysteria2 = ["penguin-engine/hysteria2"]
 socks5 = ["penguin-engine/socks5"]

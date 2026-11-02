@@ -124,6 +124,11 @@ impl Paths {
         self.data_dir.join("geoip.mmdb")
     }
 
+    /// Каталог i2pd: исполняемый файл, его данные и журнал.
+    pub fn i2pd_dir(&self) -> PathBuf {
+        self.data_dir.join("i2pd")
+    }
+
     /// Создаёт каталоги, если их нет.
     pub fn ensure_dirs(&self) -> ConfigResult<()> {
         for dir in [&self.config_dir, &self.data_dir] {
