@@ -66,6 +66,6 @@ mod tests {
     #[test]
     fn a_missing_binary_is_not_retried_and_a_slow_start_is() {
         assert!(!to_protocol(I2pdError::NotInstalled).is_retryable());
-        assert!(to_protocol(I2pdError::NotReady(20, PathBuf::new())).is_retryable());
+        assert!(to_protocol(I2pdError::NotReady(90, PathBuf::new())).is_retryable());
     }
 }

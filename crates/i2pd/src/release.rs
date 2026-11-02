@@ -30,7 +30,32 @@ pub struct Build {
 }
 
 /// Поставки релиза [`TAG`].
-const BUILDS: &[Build] = &[];
+const BUILDS: &[Build] = &[
+    Build {
+        os: "windows",
+        arch: "x86_64",
+        asset: "i2pd-windows-x64.exe",
+        sha256: "d43546ebfbcbcd295f943794187abbd8214d27fe8757654f18b01ffce4333a7c",
+    },
+    Build {
+        os: "linux",
+        arch: "x86_64",
+        asset: "i2pd-linux-x64",
+        sha256: "7034c055874caebd1897dbc23589cf263b0f5279ccbf118ff486a72a69db8863",
+    },
+    Build {
+        os: "macos",
+        arch: "aarch64",
+        asset: "i2pd-macos-arm64",
+        sha256: "51c2606ed6b8e6e2c5401d930c881cfbe9040c177d24cd958cd8f1750f870879",
+    },
+    Build {
+        os: "macos",
+        arch: "x86_64",
+        asset: "i2pd-macos-x64",
+        sha256: "1aa3633894fce2e14eb14069fa79f76183209173d66e1c697d4c94fec1215cd3",
+    },
+];
 
 impl Build {
     /// Поставка для этой системы.
@@ -91,6 +116,18 @@ mod tests {
                 "{}",
                 build.asset
             );
+        }
+    }
+
+    #[test]
+    fn every_penguin_target_has_an_i2pd() {
+        for (os, arch) in [
+            ("windows", "x86_64"),
+            ("linux", "x86_64"),
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+        ] {
+            assert!(Build::of(os, arch).is_ok(), "{os}-{arch}");
         }
     }
 

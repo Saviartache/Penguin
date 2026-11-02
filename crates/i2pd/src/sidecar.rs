@@ -15,8 +15,9 @@ use crate::conf::{self, HTTP_PROXY};
 use crate::error::{I2pdError, I2pdResult};
 use crate::install;
 
-/// Сколько ждать HTTP-прокси после запуска: ключи создаются при первом старте.
-const READY: Duration = Duration::from_secs(20);
+/// Сколько ждать HTTP-прокси: i2pd открывает его только после reseed, а тот
+/// при отказе узла ждёт 30 с до следующего круга.
+const READY: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(200);
 
 /// Запущенный i2pd и его обход тоннеля (гаснет вместе с записью).
