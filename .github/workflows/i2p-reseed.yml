@@ -1,7 +1,9 @@
-# Узлы I2P для первого запуска i2pd (reseed) — в релиз `i2p-reseed`.
+# Узлы I2P для первого запуска i2pd (reseed) — в ветку `i2p-reseed`.
 #
 # Серверы reseed в РФ заблокированы, GitHub — нет: i2pd берёт `i2pseeds.su3`
-# отсюда (`crates/i2pd/src/conf.rs`). Узлы меняются, поэтому раз в сутки.
+# с raw.githubusercontent.com (`crates/i2pd/src/conf.rs`). Не из релиза: по
+# перенаправлению GitHub на хранилище вложений i2pd 3.0.0 ходит по кругу.
+# Узлы меняются, поэтому раз в сутки; ветка — один коммит, история не копится.
 name: i2p-reseed
 
 on:
@@ -34,13 +36,13 @@ jobs:
           echo "ни один сервер reseed не ответил"
           exit 1
 
-      - name: выпуск
+      - name: ветка
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
-          # Предвыпуск: «последним» остаётся Penguin, автообновление смотрит туда.
-          gh release view i2p-reseed > /dev/null 2>&1 || gh release create i2p-reseed \
-            --prerelease --latest=false --title "Узлы I2P (reseed)" \
-            --notes "i2pseeds.su3 с серверов reseed I2P, обновляется раз в сутки. Берёт i2pd протокола I2P при первом запуске."
-          gh release upload i2p-reseed i2pseeds.su3 --clobber
+          mkdir branch && mv i2pseeds.su3 branch/ && cd branch
+          git init -q -b i2p-reseed
+          git add i2pseeds.su3
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "i2p-reseed: $(date -u +%F)"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" i2p-reseed

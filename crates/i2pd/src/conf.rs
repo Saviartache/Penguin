@@ -7,11 +7,10 @@ pub const HTTP_PROXY: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 4444);
 
 /// Узлы для первого запуска: серверы reseed в РФ заблокированы, GitHub — нет.
-/// Файл кладёт `.github/workflows/i2p-reseed.yml`.
-pub const RESEED: &str = concat!(
-    env!("CARGO_PKG_REPOSITORY"),
-    "/releases/download/i2p-reseed/i2pseeds.su3"
-);
+/// Файл кладёт в ветку `.github/workflows/i2p-reseed.yml`; raw-адрес отдаёт его
+/// без перенаправления, по которому i2pd ходит по кругу.
+pub const RESEED: &str =
+    "https://raw.githubusercontent.com/Saviartache/penguin/i2p-reseed/i2pseeds.su3";
 
 /// Настройки i2pd; `bypass` — SOCKS5 мимо тоннеля.
 ///
@@ -57,8 +56,6 @@ enabled = false
 
 [reseed]
 file = {RESEED}
-# GitHub отдаёт файл релиза перенаправлением.
-followredirect = true
 proxy = {proxy}
 
 [addressbook]
@@ -81,9 +78,10 @@ mod tests {
 
     #[test]
     fn nodes_come_from_this_repository() {
+        let path = env!("CARGO_PKG_REPOSITORY").trim_start_matches("https://github.com/");
         assert_eq!(
             RESEED,
-            "https://github.com/Saviartache/penguin/releases/download/i2p-reseed/i2pseeds.su3"
+            format!("https://raw.githubusercontent.com/{path}/i2p-reseed/i2pseeds.su3")
         );
         assert!(
             render("127.0.0.1:1".parse().expect("адрес")).contains(&format!("file = {RESEED}\n"))
