@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 use iced::theme::Palette;
 use iced::widget::text::{IntoFragment, LineHeight, Wrapping};
-use iced::widget::{button, container, scrollable, text};
+use iced::widget::{Id, Scrollable, button, container, scrollable, text};
 use iced::{Color, Element, Length, Padding, Theme};
 use uikit::container::Wash;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
@@ -142,6 +142,15 @@ pub fn search<'a, M: 'a + Clone>(
 /// Прокручиваемое тело; отступ на содержимом, иначе полоса ляжет поверх строк
 /// (правило 4.6 кита).
 pub fn scroll<'a, M: 'a>(list: Element<'a, M>) -> Element<'a, M> {
+    scrolling(list).into()
+}
+
+/// То же с именем: его прокручивают из `update`.
+pub fn scroll_named<'a, M: 'a>(list: Element<'a, M>, id: Id) -> Element<'a, M> {
+    scrolling(list).id(id).into()
+}
+
+fn scrolling<'a, M: 'a>(list: Element<'a, M>) -> Scrollable<'a, M> {
     scrollable(
         container(list)
             .padding(scrollbar::safe(0.0))
@@ -151,7 +160,6 @@ pub fn scroll<'a, M: 'a>(list: Element<'a, M>) -> Element<'a, M> {
     .style(scrollbar::style())
     .width(Length::Fill)
     .height(Length::Fill)
-    .into()
 }
 
 /// Пустое тело: пустая панель читается как «не загрузилось».

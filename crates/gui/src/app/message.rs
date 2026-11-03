@@ -273,12 +273,16 @@ pub enum SplitTunnelMessage {
     ModeSelected(TunnelMode),
     /// Изменён поиск по списку правил.
     SearchChanged(String),
-    /// Правило включено или выключено.
-    RuleToggled(usize, bool),
-    /// Правило переставлено: откуда, куда; с Shift — до края списка.
-    RuleMoved(usize, usize),
-    /// Нажат или отпущен Shift.
-    ShiftChanged(bool),
+    /// На строке правила нажата кнопка мыши: щелчок или начало перетаскивания.
+    RuleGrabbed(usize),
+    /// Курсор с взятым правилом вошёл в строку с этим номером.
+    RuleDraggedOver(usize),
+    /// Кнопка мыши отпущена над строкой; без сдвига — щелчок.
+    RuleReleased(usize),
+    /// Курсор со взятым правилом зашёл за край списка или вернулся.
+    EdgeHovered(Option<crate::app::state::ScrollEdge>),
+    /// Шаг прокрутки, пока правило держат за краем.
+    AutoScroll,
     /// Правило удалено.
     RuleRemoved(usize),
     /// Открыть окно проверки.
@@ -352,6 +356,19 @@ pub enum SettingsMessage {
     VerboseLog(bool),
     /// Проверять обновления при запуске.
     CheckUpdates(bool),
+    /// Следующий язык.
+    NextLanguage,
+    /// IPv6 через тоннель.
+    Ipv6(bool),
+    /// Следующий режим DNS.
+    NextDnsMode,
+    /// Локальный SOCKS5.
+    Socks(bool),
+    /// Локальный HTTP-прокси.
+    Http(bool),
+    /// Значок в Dock.
+    #[cfg(target_os = "macos")]
+    DockIcon(bool),
 }
 
 #[cfg(test)]

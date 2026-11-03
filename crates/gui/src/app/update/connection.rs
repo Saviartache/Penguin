@@ -66,6 +66,7 @@ fn handle_response(app: &mut App, response: Response) -> Task<Message> {
             state.saved = state.config.clone();
             state.dirty = false;
             let autoconnect = autoconnect(state);
+            app.sync_dock();
             return Task::batch([
                 autoconnect,
                 crate::app::update::profiles::locate_countries(app),

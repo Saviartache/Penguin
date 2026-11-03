@@ -6,16 +6,24 @@
 //! неподтверждёнными ([`crate::app::update::save`]). Темы нет: её переключает
 //! кружок в шапке.
 //!
-//! Разделов три: «Запуск» трогает только это окно, «Сеть» — весь трафик системы,
-//! «Журнал» ничего.
+//! «Запуск» трогает только это окно, «Сеть» и «DNS» — весь трафик системы,
+//! «Локальный прокси» — только приложения, настроенные на него, «Журнал» ничего.
+//! Строки одной системы (значок в Dock) собираются только под неё.
+
+use std::net::SocketAddr;
 
 use iced::widget::button;
+use iced::widget::text::IntoFragment;
 use iced::{Alignment, Element, Length};
+use penguin_config::schema::app::Language;
+use penguin_config::schema::dns::DnsMode;
+use penguin_config::schema::network::InboundConfig;
 use uikit::layout::{Flex, Sizable, Size, gap};
 use uikit::tokens::ink;
 
 use crate::app::message::{Message, SettingsMessage, UpdateMessage};
 use crate::app::state::{State, UpdateStatus};
+use crate::app::update::settings::{HTTP_LISTEN, SOCKS_LISTEN};
 use crate::screens::table::{self, CELL, ROW_GAP, ROW_PADDING, glyphs, pad};
 use crate::ui;
 
@@ -28,24 +36,36 @@ fn panel(state: &State) -> Element<'_, Message> {
     let strings = crate::i18n::s();
     let config = &state.config;
 
-    let startup = section(
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut startup_rows = vec![
+        switch(
+            state,
+            strings.autostart,
+            config.app.autostart,
+            SettingsMessage::Autostart,
+        ),
+        switch(
+            state,
+            strings.autoconnect,
+            config.app.autoconnect,
+            SettingsMessage::Autoconnect,
+        ),
+        choice(
+            state,
+            strings.language,
+            crate::i18n::language_name(config.app.language),
+            &[Language::Ru, Language::En].map(crate::i18n::language_name),
+            SettingsMessage::NextLanguage,
+        ),
+    ];
+    #[cfg(target_os = "macos")]
+    startup_rows.push(switch(
         state,
-        strings.startup,
-        vec![
-            switch(
-                state,
-                strings.autostart,
-                config.app.autostart,
-                SettingsMessage::Autostart,
-            ),
-            switch(
-                state,
-                strings.autoconnect,
-                config.app.autoconnect,
-                SettingsMessage::Autoconnect,
-            ),
-        ],
-    );
+        strings.dock_icon,
+        config.app.dock_icon,
+        SettingsMessage::DockIcon,
+    ));
+    let startup = section(state, strings.startup, startup_rows);
 
     let network = section(
         state,
@@ -71,9 +91,57 @@ fn panel(state: &State) -> Element<'_, Message> {
             ),
             switch(
                 state,
+                strings.ipv6,
+                config.network.tun.ipv6_enabled,
+                SettingsMessage::Ipv6,
+            ),
+        ],
+    );
+
+    let dns = section(
+        state,
+        strings.dns,
+        vec![
+            switch(
+                state,
                 strings.dns_hijack,
                 config.dns.hijack,
                 SettingsMessage::DnsHijack,
+            ),
+            choice(
+                state,
+                strings.dns_mode,
+                crate::i18n::dns_mode_label(config.dns.mode),
+                &[DnsMode::FakeIp, DnsMode::Resolve, DnsMode::System]
+                    .map(crate::i18n::dns_mode_label),
+                SettingsMessage::NextDnsMode,
+            ),
+        ],
+    );
+
+    let proxy = section(
+        state,
+        strings.local_proxy,
+        vec![
+            switch(
+                state,
+                proxy_label(
+                    strings.socks_proxy,
+                    config.network.socks.as_ref(),
+                    SOCKS_LISTEN,
+                ),
+                config.network.socks.is_some(),
+                SettingsMessage::Socks,
+            ),
+            switch(
+                state,
+                proxy_label(
+                    strings.http_proxy,
+                    config.network.http.as_ref(),
+                    HTTP_LISTEN,
+                ),
+                config.network.http.is_some(),
+                SettingsMessage::Http,
             ),
         ],
     );
@@ -108,6 +176,8 @@ fn panel(state: &State) -> Element<'_, Message> {
         .w(Size::FILL)
         .push_auto(startup)
         .push_auto(network)
+        .push_auto(dns)
+        .push_auto(proxy)
         .push_auto(log)
         .push_auto(updates)
         .gap(gap::MD)
@@ -116,7 +186,7 @@ fn panel(state: &State) -> Element<'_, Message> {
     table::sheet(
         &state.palette,
         table::scroll(body),
-        crate::i18n::s().toggle_hint,
+        crate::i18n::s().settings_hint,
     )
 }
 
@@ -156,14 +226,43 @@ fn section<'a>(
 /// Строка переключателя: подпись слева, значение у правого края.
 fn switch<'a>(
     state: &'a State,
-    label: &'a str,
+    label: impl IntoFragment<'a>,
     enabled: bool,
     message: fn(bool) -> SettingsMessage,
+) -> Element<'a, Message> {
+    row(state, label, value(enabled), enabled, message(!enabled))
+}
+
+/// Строка выбора из нескольких: щелчок ставит следующее значение. Яркая всегда:
+/// выключенного положения у неё нет.
+fn choice<'a>(
+    state: &'a State,
+    label: &'a str,
+    current: &str,
+    options: &[&str],
+    message: SettingsMessage,
+) -> Element<'a, Message> {
+    row(state, label, choice_value(current, options), true, message)
+}
+
+/// Значение выбора шириной в самое длинное из возможных.
+fn choice_value(current: &str, options: &[&str]) -> String {
+    let width = options.iter().map(|o| o.chars().count()).max().unwrap_or(0);
+    format!("[ {} ]", pad(current, width))
+}
+
+/// Подпись слева, значение у правого края, нажимается вся строка.
+fn row<'a>(
+    state: &'a State,
+    label: impl IntoFragment<'a>,
+    value: String,
+    bright: bool,
+    message: SettingsMessage,
 ) -> Element<'a, Message> {
     let palette = &state.palette;
 
     // Включённое ярче: «что сейчас работает» видно боковым зрением.
-    let (label_ink, value_ink) = if enabled {
+    let (label_ink, value_ink) = if bright {
         (palette.text, palette.text)
     } else {
         (
@@ -176,7 +275,7 @@ fn switch<'a>(
         .w(Size::FILL)
         .push_auto(glyphs(label, label_ink))
         .push(ui::spring())
-        .push_auto(glyphs(value(enabled), value_ink))
+        .push_auto(glyphs(value, value_ink))
         .gap(CELL)
         .align(Alignment::Center)
         .build();
@@ -184,9 +283,16 @@ fn switch<'a>(
     button(line)
         .width(Length::Fill)
         .padding(ROW_PADDING)
-        .style(table::row_style(enabled))
-        .on_press(Message::Settings(message(!enabled)))
+        .style(table::row_style(bright))
+        .on_press(Message::Settings(message))
         .into()
+}
+
+/// «SOCKS5-прокси для приложений на 127.0.0.1:1080»: адрес — заданный в файле
+/// или тот, что поставит включение.
+fn proxy_label(label: &str, configured: Option<&InboundConfig>, fallback: SocketAddr) -> String {
+    let listen = configured.map_or(fallback, |inbound| inbound.listen);
+    format!("{label} {listen}")
 }
 
 /// Строка как у переключателей: версия слева, действие в скобках справа, нажимается вся.
@@ -304,6 +410,13 @@ mod tests {
             crate::i18n::s().autoconnect,
             crate::i18n::s().verbose_log,
             crate::i18n::s().check_updates,
+            crate::i18n::s().language,
+            crate::i18n::s().ipv6,
+            crate::i18n::s().dns_mode,
+            crate::i18n::s().socks_proxy,
+            crate::i18n::s().http_proxy,
+            #[cfg(target_os = "macos")]
+            crate::i18n::s().dock_icon,
         ] {
             assert!(
                 label.split_whitespace().count() > 2,
@@ -379,6 +492,16 @@ mod tests {
             state.config.network.allow_lan = value;
             state.config.network.capture_default_route = value;
             state.config.dns.hijack = value;
+            state.config.network.tun.ipv6_enabled = value;
+            state.config.app.dock_icon = value;
+            state.config.network.socks = value.then_some(InboundConfig {
+                listen: SOCKS_LISTEN,
+                auth: None,
+            });
+            state.config.network.http = value.then_some(InboundConfig {
+                listen: HTTP_LISTEN,
+                auth: None,
+            });
             state.config.app.log_level = if value {
                 penguin_config::schema::app::LogLevel::Debug
             } else {
@@ -386,6 +509,34 @@ mod tests {
             };
             let _ = view(&state);
         }
+    }
+
+    #[test]
+    fn every_dns_mode_renders() {
+        let mut state = State::default();
+        for mode in [DnsMode::FakeIp, DnsMode::Resolve, DnsMode::System] {
+            state.config.dns.mode = mode;
+            let _ = view(&state);
+        }
+    }
+
+    #[test]
+    fn a_choice_keeps_its_right_edge_in_place() {
+        let options = ["FAKE-IP", "SYSTEM"];
+        let long = choice_value("FAKE-IP", &options);
+        let short = choice_value("SYSTEM", &options);
+        assert_eq!(long.chars().count(), short.chars().count());
+        assert!(short.contains("SYSTEM"), "{short}");
+    }
+
+    #[test]
+    fn the_proxy_row_names_the_address_it_listens_on() {
+        assert!(proxy_label("SOCKS5", None, SOCKS_LISTEN).ends_with("127.0.0.1:1080"));
+        let custom = InboundConfig {
+            listen: "127.0.0.1:2080".parse().expect("адрес"),
+            auth: None,
+        };
+        assert!(proxy_label("SOCKS5", Some(&custom), SOCKS_LISTEN).ends_with(":2080"));
     }
 
     #[test]

@@ -9,17 +9,16 @@
 //! Выключенная группа приглушена и помечена словом: вычёркивания нет в шрифте,
 //! а спрятанную группу ищут и не находят.
 
-use iced::widget::button;
+use iced::widget::{Id, button, mouse_area};
 use iced::{Alignment, Element, Length};
 use penguin_config::schema::rule::RuleConfig;
 use uikit::layout::{Flex, Sizable, Size, gap, px};
 use uikit::tokens::{ink, type_scale};
-use uikit::widgets::ButtonVariant;
+use uikit::widgets::{ButtonVariant, Draggable};
 
 use crate::app::TAB_GAP;
 use crate::app::message::{Message, SplitTunnelMessage};
-use crate::app::state::State;
-use crate::forms::rule;
+use crate::app::state::{ScrollEdge, State};
 use crate::screens::rules::describe::{condition_values, describe_action, describe_condition};
 use crate::screens::rules::mode;
 use crate::screens::table::{
@@ -39,30 +38,11 @@ const ACTION_WIDTH: usize = 14;
 /// одной фразой.
 const COLUMN_GAP: f32 = 2.0;
 
-/// Ширина переключателя `[ВЫКЛ]` в точках.
-const TOGGLE_WIDTH: f32 = 56.0;
+/// Имя прокрутки списка: её двигает автопрокрутка при перетаскивании.
+pub const SCROLL: Id = Id::new("rules");
 
-/// Ширина кнопки в один знак: выше, ниже, удалить.
-const GLYPH_WIDTH: f32 = 30.0;
-
-/// Место под кнопки строки — его же оставляет шапка.
-const ACTIONS_WIDTH: f32 = TOGGLE_WIDTH + GLYPH_WIDTH * 3.0;
-
-/// Высота строки: знак без интерлиньяжа и отступы. Задана числом — на неё
-/// сдвигается курсор за переставленным правилом.
+/// Высота строки: знак без интерлиньяжа и отступы.
 const ROW_HEIGHT: f32 = table::GLYPH + ROW_PADDING.top + ROW_PADDING.bottom;
-
-/// Шаг между строками в логических точках.
-pub const ROW_PITCH: f32 = ROW_HEIGHT + ROW_GAP;
-
-/// Выше.
-const UP: &str = "↑";
-
-/// Ниже.
-const DOWN: &str = "↓";
-
-/// Удалить; `✕` в ZedMono нет, запасной шрифт шире ячейки.
-const REMOVE: &str = "×";
 
 /// Собирает вкладку целиком.
 pub fn view(state: &State) -> Element<'_, Message> {
@@ -132,19 +112,37 @@ fn panel(state: &State) -> Element<'_, Message> {
             &state.split_tunnel.search,
             |value| Message::SplitTunnel(SplitTunnelMessage::SearchChanged(value)),
         ),
-        head(state),
+        edge(state, head(state), ScrollEdge::Top),
         Flex::col()
             .w(Size::FILL)
             .h(Size::FILL)
             .push(rows(state))
-            .push_auto(mode::view(state))
+            .push_auto(edge(state, mode::view(state), ScrollEdge::Bottom))
             .gap(gap::XS)
             .build(),
         crate::i18n::s().toggle_hint,
     )
 }
 
-/// Шапка таблицы с тем же отступом и местом под «удалить», что у строки.
+/// Шапка и строка «всё остальное» — края списка: пока правило держат над ними,
+/// список едет в их сторону. Без взятого правила — просто содержимое.
+fn edge<'a>(
+    state: &State,
+    content: Element<'a, Message>,
+    side: ScrollEdge,
+) -> Element<'a, Message> {
+    if state.split_tunnel.dragging.is_none() {
+        return content;
+    }
+    mouse_area(content)
+        .on_enter(Message::SplitTunnel(SplitTunnelMessage::EdgeHovered(Some(
+            side,
+        ))))
+        .on_exit(Message::SplitTunnel(SplitTunnelMessage::EdgeHovered(None)))
+        .into()
+}
+
+/// Шапка таблицы с тем же отступом, что у строки.
 fn head(state: &State) -> Element<'_, Message> {
     let strings = crate::i18n::s();
     let dim = ink::level(&state.palette, ink::TERTIARY);
@@ -156,16 +154,10 @@ fn head(state: &State) -> Element<'_, Message> {
         glyphs(lpad(strings.action, ACTION_WIDTH), dim),
     );
 
-    Flex::row()
-        .w(Size::FILL)
-        .push(
-            iced::widget::container(titles)
-                .padding(ROW_PADDING)
-                .width(Length::Fill),
-        )
-        .push_auto(iced::widget::Space::new().width(Length::Fixed(ACTIONS_WIDTH)))
-        .gap(gap::NONE)
-        .build()
+    iced::widget::container(titles)
+        .padding(ROW_PADDING)
+        .width(Length::Fill)
+        .into()
 }
 
 /// Прокручиваемое тело таблицы.
@@ -185,18 +177,17 @@ fn rows(state: &State) -> Element<'_, Message> {
         return table::empty(&state.palette, crate::i18n::s().nothing_found);
     }
 
-    let last = rules.len() - 1;
     let list = Flex::col()
         .w(Size::FILL)
         .extend(
             shown
                 .into_iter()
-                .map(|(index, rule)| row(state, index, last, rule)),
+                .map(|(index, rule)| row(state, index, rule)),
         )
         .gap(ROW_GAP)
         .build();
 
-    table::scroll(list)
+    table::scroll_named(list, SCROLL)
 }
 
 /// Подходит ли правило под поиск: по имени, условию и действию.
@@ -213,14 +204,10 @@ pub fn found(rule: &RuleConfig, query: &str) -> bool {
     table::matches(query, &fields)
 }
 
-/// Строка группы: щелчок открывает правку, справа — вкл/выкл, порядок, удаление.
-/// Правило, написанное в файле руками, форма не откроет — строка не нажимается.
-fn row<'a>(
-    state: &'a State,
-    index: usize,
-    last: usize,
-    rule: &'a RuleConfig,
-) -> Element<'a, Message> {
+/// Строка группы, всё — мышью: щелчок включает и выключает, двойной открывает
+/// правку, удержание тащит, правая кнопка удаляет. Правило, написанное в файле
+/// руками, форма не откроет.
+fn row<'a>(state: &'a State, index: usize, rule: &'a RuleConfig) -> Element<'a, Message> {
     let palette = &state.palette;
     let action = describe_action(&rule.action);
 
@@ -257,55 +244,30 @@ fn row<'a>(
         ),
     );
 
-    let edit = button(cells)
+    // Без `on_press`: нажатие ловит зона перетаскивания вокруг, кнопка его съела бы.
+    // Волна помечает включённое и взятое.
+    let held = state.split_tunnel.dragging == Some(index);
+    let line = button(cells)
         .width(Length::Fill)
+        .height(px(ROW_HEIGHT))
         .padding(ROW_PADDING)
-        // Волна помечает включённое: «какие сейчас работают» видно боковым зрением.
-        .style(table::row_style(rule.enabled))
-        .on_press_maybe(
-            rule::load(index, rule)
-                .map(|_| Message::SplitTunnel(SplitTunnelMessage::EditorOpened(Some(index)))),
-        );
+        .style(table::row_style(rule.enabled || held));
 
-    let strings = crate::i18n::s();
-    let switch = if rule.enabled {
-        strings.on
-    } else {
-        strings.off
-    };
-
-    Flex::row()
-        .push(edit)
-        .push_auto(table::action(
-            switch,
-            TOGGLE_WIDTH,
-            Message::SplitTunnel(SplitTunnelMessage::RuleToggled(index, !rule.enabled)),
-        ))
-        .push_auto(shift(index.checked_sub(1), index, UP))
-        .push_auto(shift((index < last).then_some(index + 1), index, DOWN))
-        .push_auto(table::action(
-            REMOVE,
-            GLYPH_WIDTH,
-            Message::SplitTunnel(SplitTunnelMessage::RuleRemoved(index)),
-        ))
-        .h(px(ROW_HEIGHT))
-        .gap(gap::NONE)
-        .align(Alignment::Center)
-        .build()
-}
-
-/// Кнопка перестановки; у края списка — пустое место той же ширины.
-fn shift<'a>(to: Option<usize>, from: usize, glyph: &str) -> Element<'a, Message> {
-    match to {
-        Some(to) => table::action(
-            glyph,
-            GLYPH_WIDTH,
-            Message::SplitTunnel(SplitTunnelMessage::RuleMoved(from, to)),
-        ),
-        None => iced::widget::Space::new()
-            .width(Length::Fixed(GLYPH_WIDTH))
-            .into(),
+    // Без взятого правила проход курсора не шумит.
+    let mut zone = Draggable::new(line)
+        .on_pick(Message::SplitTunnel(SplitTunnelMessage::RuleGrabbed(index)))
+        .on_drop(Message::SplitTunnel(SplitTunnelMessage::RuleReleased(
+            index,
+        )));
+    if state.split_tunnel.dragging.is_some() {
+        zone = zone.on_over(Message::SplitTunnel(SplitTunnelMessage::RuleDraggedOver(
+            index,
+        )));
     }
+
+    mouse_area(zone.build())
+        .on_right_press(Message::SplitTunnel(SplitTunnelMessage::RuleRemoved(index)))
+        .into()
 }
 
 /// Ряд ячеек — общий для шапки и строк, чтобы столбцы не разъезжались.

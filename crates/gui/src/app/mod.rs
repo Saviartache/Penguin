@@ -140,11 +140,6 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut streams = vec![
             iced::event::listen_with(|event, status, window_id| match event {
-                iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
-                    Some(Message::SplitTunnel(
-                        message::SplitTunnelMessage::ShiftChanged(modifiers.shift()),
-                    ))
-                }
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(
                     Message::Window(message::WindowMessage::CursorMoved(position)),
                 ),
@@ -185,6 +180,14 @@ impl App {
             streams.push(crate::ipc::subscription::events());
         }
 
+        let split = &self.state.split_tunnel;
+        if split.dragging.is_some() && split.edge.is_some() {
+            streams.push(
+                iced::time::every(update::rules::AUTO_SCROLL_TICK)
+                    .map(|_| Message::SplitTunnel(message::SplitTunnelMessage::AutoScroll)),
+            );
+        }
+
         // Таймер кадров — только пока что-то движется.
         if !self.morph.settled() || self.state.boot.typing() {
             streams.push(iced::time::every(FRAME).map(Message::Frame));
@@ -214,8 +217,22 @@ impl App {
         if self.hidden && self.tray.is_none() {
             return self.show();
         }
-        crate::tray::set_dock_visible(!self.hidden);
+        self.sync_dock();
         self.refresh_work_area()
+    }
+
+    /// Пересобирает значок лотка, например на новом языке.
+    pub fn rebuild_tray(&mut self) {
+        if self.tray.is_some() {
+            // Сначала убрать прежний: два значка рядом мигнут.
+            self.tray = None;
+            self.tray = crate::tray::create();
+        }
+    }
+
+    /// Значок в Dock: только у открытого окна и если его не убрали в настройках.
+    pub fn sync_dock(&self) {
+        crate::tray::set_dock_visible(!self.hidden && self.state.config.app.dock_icon);
     }
 
     /// Прячет окно в лоток или сворачивает, если лотка нет.
@@ -225,14 +242,14 @@ impl App {
         }
 
         self.hidden = true;
-        crate::tray::set_dock_visible(false);
+        self.sync_dock();
         window::set_mode(self.window, window::Mode::Hidden)
     }
 
     /// Достаёт окно из лотка.
     pub fn show(&mut self) -> Task<Message> {
         self.hidden = false;
-        crate::tray::set_dock_visible(true);
+        self.sync_dock();
         Task::batch([
             window::set_mode(self.window, window::Mode::Windowed),
             window::gain_focus(self.window),

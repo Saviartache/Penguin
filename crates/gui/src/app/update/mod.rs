@@ -84,6 +84,7 @@ fn handle_window(app: &mut App, message: WindowMessage) -> Task<Message> {
         WindowMessage::WorkArea(None) => Task::none(),
         WindowMessage::DragStopped => {
             app.chrome_mut().disarm_drag();
+            app.state_mut().split_tunnel.dragging = None;
             app.refresh_work_area()
         }
     }

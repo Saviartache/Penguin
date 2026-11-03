@@ -3,7 +3,10 @@
 //! Правки копятся в окне и уезжают демону только по «Сохранить»: иначе каждый
 //! щелчок перезаписывал бы файл и пересобирал набор.
 
-use iced::{Task, window};
+use std::time::{Duration, Instant};
+
+use iced::Task;
+use iced::widget::scrollable::AbsoluteOffset;
 use penguin_config::export::{Exported, to_surge};
 use penguin_config::import::{Imported, parse_surge};
 use penguin_config::schema::rule::RuleConfig;
@@ -11,9 +14,19 @@ use penguin_ipc::schema::{LogLevel, Request};
 
 use crate::app::App;
 use crate::app::message::{Message, SplitTunnelMessage};
+use crate::app::state::{RuleClick, ScrollEdge, SplitTunnelState};
 use crate::app::update::{request, save_rules};
 use crate::forms::rule;
 use crate::screens::rules::list;
+
+/// Предел между щелчками двойного: системный по умолчанию на macOS и Windows — около 0,5 с.
+const DOUBLE_CLICK: Duration = Duration::from_millis(450);
+
+/// Шаг автопрокрутки за такт [`AUTO_SCROLL_TICK`]: около десяти строк в секунду.
+const SCROLL_STEP: f32 = 12.0;
+
+/// Такт автопрокрутки.
+pub const AUTO_SCROLL_TICK: Duration = Duration::from_millis(40);
 
 /// Имя файла, предлагаемое окном сохранения.
 const EXPORT_FILE_NAME: &str = "penguin-rules.conf";
@@ -28,20 +41,25 @@ pub fn handle(app: &mut App, message: SplitTunnelMessage) -> Task<Message> {
             }
             Task::none()
         }
-        SplitTunnelMessage::RuleMoved(from, to) => moved(app, from, to),
-        SplitTunnelMessage::ShiftChanged(held) => {
-            app.state_mut().split_tunnel.shift = held;
+        SplitTunnelMessage::RuleGrabbed(index) => {
+            let split = &mut app.state_mut().split_tunnel;
+            split.dragging = Some(index);
+            split.pressed = Some(index);
+            split.edge = None;
             Task::none()
         }
+        SplitTunnelMessage::EdgeHovered(edge) => {
+            app.state_mut().split_tunnel.edge = edge;
+            Task::none()
+        }
+        SplitTunnelMessage::AutoScroll => auto_scroll(&app.state().split_tunnel),
+        SplitTunnelMessage::RuleDraggedOver(to) => {
+            dragged_over(app, to);
+            Task::none()
+        }
+        SplitTunnelMessage::RuleReleased(index) => released(app, index, Instant::now()),
         SplitTunnelMessage::SearchChanged(value) => {
             app.state_mut().split_tunnel.search = value;
-            Task::none()
-        }
-        SplitTunnelMessage::RuleToggled(index, enabled) => {
-            if let Some(rule) = app.state_mut().config.routing.rules.get_mut(index) {
-                rule.enabled = enabled;
-                app.state_mut().dirty = true;
-            }
             Task::none()
         }
         SplitTunnelMessage::RuleRemoved(index) => {
@@ -261,7 +279,7 @@ fn save_draft(app: &mut App) -> Task<Message> {
     Task::none()
 }
 
-/// Ставит группу в набор: новую — в конец, правленую — на своё место с прежними
+/// Ставит группу в набор: новую — первой, правленую — на своё место с прежними
 /// идентификатором, включённостью и приоритетом. `false` — условий нет, а
 /// такое правило совпало бы со всем подряд.
 pub fn store_draft(app: &mut App, draft: &rule::Draft) -> bool {
@@ -272,16 +290,20 @@ pub fn store_draft(app: &mut App, draft: &rule::Draft) -> bool {
     let Some(mut built) = draft.build(id) else {
         return false;
     };
-    if let Some(previous) = previous {
-        built.enabled = previous.enabled;
-        built.priority = previous.priority;
+    match previous {
+        Some(previous) => {
+            built.enabled = previous.enabled;
+            built.priority = previous.priority;
+        }
+        // При равном приоритете решает место в файле — первое.
+        None => built.priority = rules.iter().map(|rule| rule.priority).min().unwrap_or(0),
     }
     let place = previous.and(draft.index);
 
     let rules = &mut app.state_mut().config.routing.rules;
     match place {
         Some(index) => rules[index] = built,
-        None => rules.push(built),
+        None => rules.insert(0, built),
     }
     app.state_mut().dirty = true;
     true
@@ -393,34 +415,66 @@ fn move_rule(rules: &mut [RuleConfig], from: usize, to: usize) -> bool {
     true
 }
 
-/// Переставляет правило: на соседнее место курсор едет за стрелкой, с Shift —
-/// сразу к краю списка.
-fn moved(app: &mut App, from: usize, to: usize) -> Task<Message> {
+/// Отпускание над строкой. Без сдвига это щелчок: он включает или выключает
+/// правило сразу, без ожидания второго. Второй щелчок вскоре после первого
+/// возвращает правило как было и открывает правку.
+fn released(app: &mut App, index: usize, now: Instant) -> Task<Message> {
     let state = app.state_mut();
-    let shift = state.split_tunnel.shift;
-    let rules = &mut state.config.routing.rules;
-    let target = match (shift, to < from) {
-        (false, _) => to,
-        (true, true) => 0,
-        (true, false) => rules.len().saturating_sub(1),
-    };
-    if !move_rule(rules, from, target) {
+    state.split_tunnel.dragging = None;
+    // Глобальное отпускание `pressed` не трогает: порядок двух сообщений не задан.
+    if state.split_tunnel.pressed.take() != Some(index) {
         return Task::none();
     }
-    state.dirty = true;
 
-    // При поиске сосед может быть скрыт — тогда строка на экране не сдвинулась.
-    let neighbor_shown = list::found(&rules[from], &state.split_tunnel.search);
-    if shift || !neighbor_shown {
-        return Task::none();
-    }
-    let dy = (target as f32 - from as f32) * list::ROW_PITCH;
-    window::scale_factor(app.window()).then(move |scale| {
-        if let Err(error) = penguin_platform::cursor::shift(dy, scale) {
-            tracing::debug!(%error, "курсор не сдвинулся за правилом");
+    let first = state.split_tunnel.last_click.take();
+    toggle(&mut state.config.routing.rules, index);
+    match first {
+        Some(first) if first.index == index && now - first.at <= DOUBLE_CLICK => {
+            state.dirty = first.dirty_before;
+            open_editor(app, Some(index))
         }
-        Task::none()
-    })
+        _ => {
+            state.split_tunnel.last_click = Some(RuleClick {
+                index,
+                at: now,
+                dirty_before: state.dirty,
+            });
+            state.dirty = true;
+            Task::none()
+        }
+    }
+}
+
+fn toggle(rules: &mut [RuleConfig], index: usize) {
+    if let Some(rule) = rules.get_mut(index) {
+        rule.enabled = !rule.enabled;
+    }
+}
+
+/// Сдвигает список к краю, за которым держат правило. Строка, наехавшая под
+/// курсор, сообщает о себе сама: у неё сменились границы.
+fn auto_scroll(split: &SplitTunnelState) -> Task<Message> {
+    let Some(edge) = split.edge.filter(|_| split.dragging.is_some()) else {
+        return Task::none();
+    };
+    let step = match edge {
+        ScrollEdge::Top => -SCROLL_STEP,
+        ScrollEdge::Bottom => SCROLL_STEP,
+    };
+    iced::widget::operation::scroll_by(list::SCROLL, AbsoluteOffset { x: 0.0, y: step })
+}
+
+/// Взятое правило встаёт на место строки под курсором и едет дальше с ним.
+fn dragged_over(app: &mut App, to: usize) {
+    let state = app.state_mut();
+    let Some(from) = state.split_tunnel.dragging else {
+        return;
+    };
+    if move_rule(&mut state.config.routing.rules, from, to) {
+        state.split_tunnel.dragging = Some(to);
+        state.split_tunnel.pressed = None;
+        state.dirty = true;
+    }
 }
 
 /// Спрашивает список запущенных приложений.
@@ -514,10 +568,53 @@ mod tests {
         ]));
         assert!(!app.state().dirty);
 
-        let _ = handle(&mut app, SplitTunnelMessage::RuleToggled(0, false));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleGrabbed(0));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleReleased(0));
 
         assert!(app.state().dirty);
         assert!(!app.state().config.routing.rules[0].enabled);
+        assert!(app.state().split_tunnel.editor.is_none());
+    }
+
+    fn click(app: &mut App, index: usize, at: Instant) {
+        let _ = handle(app, SplitTunnelMessage::RuleGrabbed(index));
+        let _ = released(app, index, at);
+    }
+
+    #[test]
+    fn a_double_click_opens_the_rule_and_leaves_it_as_it_was() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "when": { "dest_port": [443] }, "action": "direct" }
+        ]));
+        let start = Instant::now();
+
+        click(&mut app, 0, start);
+        click(&mut app, 0, start + Duration::from_millis(200));
+
+        assert!(app.state().config.routing.rules[0].enabled);
+        assert!(!app.state().dirty, "двойной щелчок ничего не правит");
+        assert!(app.state().split_tunnel.editor.is_some());
+    }
+
+    #[test]
+    fn slow_clicks_toggle_twice() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "when": { "dest_port": [443] }, "action": "direct" },
+            { "id": "r2", "when": { "dest_port": [80] }, "action": "direct" }
+        ]));
+        let start = Instant::now();
+
+        click(&mut app, 0, start);
+        click(&mut app, 0, start + DOUBLE_CLICK * 2);
+        assert!(app.state().config.routing.rules[0].enabled);
+        assert!(app.state().split_tunnel.editor.is_none());
+
+        // Быстрые щелчки по разным строкам — два одиночных.
+        click(&mut app, 0, start + DOUBLE_CLICK * 4);
+        click(&mut app, 1, start + DOUBLE_CLICK * 4);
+        let rules = &app.state().config.routing.rules;
+        assert!(!rules[0].enabled && !rules[1].enabled);
+        assert!(app.state().split_tunnel.editor.is_none());
     }
 
     #[test]
@@ -642,47 +739,29 @@ mod tests {
     }
 
     #[test]
-    fn moving_a_rule_changes_the_order_of_checking() {
-        let mut app = app_with_rules(json!([
-            { "id": "r1", "priority": -100, "when": { "dest_port": [443] }, "action": "direct" },
-            { "id": "r2", "when": { "dest_port": [80] }, "action": "block" }
-        ]));
-        let _ = handle(&mut app, SplitTunnelMessage::RuleMoved(1, 0));
-
-        let rules = &app.state().config.routing.rules;
-        assert_eq!(rules[0].id, "r2");
-        assert_eq!(rules[0].priority, -100, "приоритет ушёл вместе с правилом");
-        assert!(app.state().dirty);
-    }
-
-    #[test]
-    fn shift_moves_a_rule_to_the_edge() {
-        let mut app = app_with_rules(json!([
-            { "id": "r1", "priority": 3, "when": { "dest_port": [1] }, "action": "direct" },
-            { "id": "r2", "priority": 2, "when": { "dest_port": [2] }, "action": "direct" },
-            { "id": "r3", "priority": 1, "when": { "dest_port": [3] }, "action": "direct" }
-        ]));
-        let _ = handle(&mut app, SplitTunnelMessage::ShiftChanged(true));
-        let _ = handle(&mut app, SplitTunnelMessage::RuleMoved(2, 1));
-
-        let order = |app: &App| {
-            let rules = &app.state().config.routing.rules;
-            let ids: Vec<&str> = rules.iter().map(|rule| rule.id.as_str()).collect();
-            let priorities: Vec<i32> = rules.iter().map(|rule| rule.priority).collect();
-            (ids.join(","), priorities)
-        };
-        assert_eq!(order(&app), ("r3,r1,r2".to_owned(), vec![3, 2, 1]));
-
-        let _ = handle(&mut app, SplitTunnelMessage::RuleMoved(0, 1));
-        assert_eq!(order(&app), ("r1,r2,r3".to_owned(), vec![3, 2, 1]));
-    }
-
-    #[test]
-    fn moving_past_the_edge_does_nothing() {
+    fn a_new_grab_forgets_the_edge_of_the_last_drag() {
         let mut app = app_with_rules(json!([
             { "id": "r1", "when": { "dest_port": [443] }, "action": "direct" }
         ]));
-        let _ = handle(&mut app, SplitTunnelMessage::RuleMoved(0, 1));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleGrabbed(0));
+        let _ = handle(
+            &mut app,
+            SplitTunnelMessage::EdgeHovered(Some(ScrollEdge::Bottom)),
+        );
+        assert_eq!(app.state().split_tunnel.edge, Some(ScrollEdge::Bottom));
+
+        // Края пропадают вместе с перетаскиванием и выхода из них не сообщают.
+        let _ = handle(&mut app, SplitTunnelMessage::RuleGrabbed(0));
+        assert_eq!(app.state().split_tunnel.edge, None);
+    }
+
+    #[test]
+    fn dragging_past_the_edge_does_nothing() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "when": { "dest_port": [443] }, "action": "direct" }
+        ]));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleGrabbed(0));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleDraggedOver(1));
         assert!(!app.state().dirty);
     }
 
@@ -771,6 +850,87 @@ mod tests {
     }
 
     #[test]
+    fn a_new_rule_goes_first() {
+        let mut app = app_with_rules(json!([
+            { "id": "old", "priority": -5, "when": { "dest_port": [443] }, "action": "direct" },
+            { "id": "low", "priority": -20, "when": { "dest_port": [80] }, "action": "direct" }
+        ]));
+        let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
+        let _ = handle(
+            &mut app,
+            SplitTunnelMessage::AppToggled("c:/games/steam.exe".to_owned(), true),
+        );
+        let _ = handle(&mut app, SplitTunnelMessage::DraftSaved);
+
+        let rules = &app.state().config.routing.rules;
+        assert_eq!(rules.len(), 3);
+        assert_ne!(rules[0].id, "old");
+        assert_eq!(rules[0].priority, -20, "приоритет не ниже самого раннего");
+    }
+
+    #[test]
+    fn dragging_follows_the_cursor_until_release() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "priority": 1, "when": { "dest_port": [1] }, "action": "direct" },
+            { "id": "r2", "priority": 2, "when": { "dest_port": [2] }, "action": "direct" },
+            { "id": "r3", "priority": 3, "when": { "dest_port": [3] }, "action": "direct" }
+        ]));
+        let ids = |app: &App| {
+            let rules = &app.state().config.routing.rules;
+            rules
+                .iter()
+                .map(|rule| rule.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let _ = handle(&mut app, SplitTunnelMessage::RuleDraggedOver(1));
+        assert!(
+            !app.state().dirty,
+            "без взятого правила проход курсора ничего не двигает"
+        );
+
+        let _ = handle(&mut app, SplitTunnelMessage::RuleGrabbed(0));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleDraggedOver(1));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleDraggedOver(2));
+        assert_eq!(ids(&app), "r2,r3,r1");
+        assert_eq!(app.state().split_tunnel.dragging, Some(2));
+        assert_eq!(app.state().config.routing.rules[2].priority, 3);
+        assert!(app.state().dirty);
+
+        let _ = handle(&mut app, SplitTunnelMessage::RuleReleased(2));
+        assert_eq!(app.state().split_tunnel.dragging, None);
+        assert!(
+            app.state().split_tunnel.editor.is_none(),
+            "отпускание после перетаскивания — не щелчок"
+        );
+    }
+
+    #[test]
+    fn a_press_and_release_on_the_same_row_is_a_click() {
+        let mut app = app_with_rules(json!([
+            { "id": "r1", "when": { "dest_port": [1] }, "action": "direct" },
+            { "id": "r2", "when": { "dest_port": [2] }, "action": "direct" }
+        ]));
+
+        let _ = handle(&mut app, SplitTunnelMessage::RuleGrabbed(1));
+        // Повторный вход в свою же строку перетаскиванием не считается.
+        let _ = handle(&mut app, SplitTunnelMessage::RuleDraggedOver(1));
+        let _ = handle(&mut app, SplitTunnelMessage::RuleReleased(1));
+
+        let ids: Vec<&str> = app
+            .state()
+            .config
+            .routing
+            .rules
+            .iter()
+            .map(|r| r.id.as_str())
+            .collect();
+        assert_eq!(ids, ["r1", "r2"], "порядок не менялся");
+        assert!(!app.state().config.routing.rules[1].enabled);
+    }
+
+    #[test]
     fn an_empty_draft_adds_nothing() {
         let mut app = app_with_rules(json!([]));
         let _ = handle(&mut app, SplitTunnelMessage::EditorOpened(None));
@@ -806,7 +966,7 @@ mod tests {
             .iter()
             .map(|rule| rule.id.as_str())
             .collect();
-        assert_eq!(ids, ["rule-1", "rule-2"]);
+        assert_eq!(ids, ["rule-2", "rule-1"]);
     }
 
     #[test]

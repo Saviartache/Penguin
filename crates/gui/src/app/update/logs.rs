@@ -220,7 +220,7 @@ mod tests {
 
         let rules = &app.state().config.routing.rules;
         assert_eq!(rules.len(), 2);
-        assert_eq!(rules[1].name, "192.168.0.131");
+        assert_eq!(rules[0].name, "192.168.0.131", "новая группа встаёт первой");
     }
 
     #[test]

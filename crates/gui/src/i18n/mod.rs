@@ -1,14 +1,15 @@
 //! Локализация: все подписи в одной структуре [`Strings`], язык — её значение
 //! ([`ru::STRINGS`], [`en::STRINGS`]); пропущенный перевод не собирается.
 //!
-//! Язык выбирается один раз до первой отрисовки и на ходу не меняется.
+//! Язык выбирается до первой отрисовки и меняется на ходу из настроек.
 
 pub mod en;
 pub mod ru;
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use penguin_config::schema::app::Language;
+use penguin_config::schema::dns::DnsMode;
 use penguin_config::schema::routing::TunnelMode;
 
 /// Все подписи окна.
@@ -512,6 +513,8 @@ pub struct Strings {
     pub level_warning: &'static str,
 
     // --- настройки ---
+    /// Как пользоваться настройками — подсказкой у нижнего края.
+    pub settings_hint: &'static str,
     /// Переключатель включён — значением у правого края строки.
     pub on: &'static str,
     /// Переключатель выключен.
@@ -536,6 +539,29 @@ pub struct Strings {
     pub dns_hijack: &'static str,
     /// Подробность журнала службы.
     pub verbose_log: &'static str,
+    /// Язык окна.
+    pub language: &'static str,
+    /// IPv6 через тоннель.
+    pub ipv6: &'static str,
+    /// Раздел DNS.
+    pub dns: &'static str,
+    /// Как отвечать на запросы имён.
+    pub dns_mode: &'static str,
+    /// Режим DNS: подставные адреса.
+    pub dns_fake_ip: &'static str,
+    /// Режим DNS: настоящие адреса через свои серверы имён.
+    pub dns_resolve: &'static str,
+    /// Режим DNS: как решит система.
+    pub dns_system: &'static str,
+    /// Раздел локальных прокси.
+    pub local_proxy: &'static str,
+    /// Локальный SOCKS5; адрес дописывается следом.
+    pub socks_proxy: &'static str,
+    /// Локальный HTTP-прокси; адрес дописывается следом.
+    pub http_proxy: &'static str,
+    /// Значок в Dock.
+    #[cfg(target_os = "macos")]
+    pub dock_icon: &'static str,
 
     // --- обновления ---
     /// Раздел обновлений.
@@ -574,18 +600,37 @@ pub struct Strings {
     pub tray_quit: &'static str,
 }
 
-static LANGUAGE: OnceLock<Language> = OnceLock::new();
+/// `true` — английский.
+static ENGLISH: AtomicBool = AtomicBool::new(false);
 
-/// Запоминает язык; второй вызов ничего не делает.
+/// Меняет язык; окно перерисуется на новом.
 pub fn set_language(language: Language) {
-    let _ = LANGUAGE.set(language);
+    ENGLISH.store(language == Language::En, Ordering::Relaxed);
 }
 
 /// Подписи текущего языка; умолчание — русский.
 pub fn s() -> &'static Strings {
-    match LANGUAGE.get() {
-        Some(Language::En) => &en::STRINGS,
-        Some(Language::Ru) | None => &ru::STRINGS,
+    if ENGLISH.load(Ordering::Relaxed) {
+        &en::STRINGS
+    } else {
+        &ru::STRINGS
+    }
+}
+
+/// Название языка на нём самом: найти свой язык должен и тот, кто не читает текущий.
+pub fn language_name(language: Language) -> &'static str {
+    match language {
+        Language::Ru => "Русский",
+        Language::En => "English",
+    }
+}
+
+/// Подпись режима DNS.
+pub fn dns_mode_label(mode: DnsMode) -> &'static str {
+    match mode {
+        DnsMode::FakeIp => s().dns_fake_ip,
+        DnsMode::Resolve => s().dns_resolve,
+        DnsMode::System => s().dns_system,
     }
 }
 
@@ -818,6 +863,7 @@ mod tests {
                 table.added_to_group,
                 table.level_error,
                 table.level_warning,
+                table.settings_hint,
                 table.on,
                 table.off,
                 table.startup,
@@ -830,6 +876,16 @@ mod tests {
                 table.capture_default_route,
                 table.dns_hijack,
                 table.verbose_log,
+                table.language,
+                table.ipv6,
+                table.dns,
+                table.dns_mode,
+                table.dns_fake_ip,
+                table.dns_resolve,
+                table.dns_system,
+                table.local_proxy,
+                table.socks_proxy,
+                table.http_proxy,
                 table.updates,
                 table.check_updates,
                 table.version,

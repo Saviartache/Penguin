@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub log_level: LogLevel,
     /// Проверять обновления.
     pub check_updates: bool,
+    /// Значок в Dock, пока окно открыто; действует только на macOS.
+    pub dock_icon: bool,
 }
 
 impl Default for AppConfig {
@@ -32,6 +34,7 @@ impl Default for AppConfig {
             theme: "dark".to_owned(),
             log_level: LogLevel::Info,
             check_updates: true,
+            dock_icon: true,
         }
     }
 }

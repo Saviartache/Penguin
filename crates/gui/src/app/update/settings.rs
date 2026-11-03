@@ -4,8 +4,12 @@
 //! не уезжают: [`save`] берёт их из принятого демоном, иначе переключатель
 //! сохранил бы набор, который правят на соседней вкладке.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
 use iced::Task;
-use penguin_config::schema::app::LogLevel;
+use penguin_config::schema::app::{Language, LogLevel};
+use penguin_config::schema::dns::DnsMode;
+use penguin_config::schema::network::InboundConfig;
 
 use crate::app::App;
 use crate::app::message::{Message, SettingsMessage};
@@ -28,8 +32,53 @@ pub fn handle(app: &mut App, message: SettingsMessage) -> Task<Message> {
         SettingsMessage::DnsHijack(enabled) => config.dns.hijack = enabled,
         SettingsMessage::VerboseLog(enabled) => config.app.log_level = log_level(enabled),
         SettingsMessage::CheckUpdates(enabled) => config.app.check_updates = enabled,
+        SettingsMessage::NextLanguage => {
+            config.app.language = next_language(config.app.language);
+            crate::i18n::set_language(config.app.language);
+            // Меню лотка собрано на прежнем языке.
+            app.rebuild_tray();
+        }
+        SettingsMessage::Ipv6(enabled) => config.network.tun.ipv6_enabled = enabled,
+        SettingsMessage::NextDnsMode => config.dns.mode = next_dns_mode(config.dns.mode),
+        SettingsMessage::Socks(enabled) => config.network.socks = inbound(enabled, SOCKS_LISTEN),
+        SettingsMessage::Http(enabled) => config.network.http = inbound(enabled, HTTP_LISTEN),
+        #[cfg(target_os = "macos")]
+        SettingsMessage::DockIcon(enabled) => {
+            config.app.dock_icon = enabled;
+            app.sync_dock();
+        }
     }
     save(app)
+}
+
+/// Адрес SOCKS5, если включают из окна.
+pub(crate) const SOCKS_LISTEN: SocketAddr = local(1080);
+
+/// Адрес HTTP-прокси, если включают из окна.
+pub(crate) const HTTP_LISTEN: SocketAddr = local(8080);
+
+const fn local(port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+}
+
+/// Прокси на loopback без пароля; выключение забывает и адрес, заданный в файле.
+fn inbound(enabled: bool, listen: SocketAddr) -> Option<InboundConfig> {
+    enabled.then_some(InboundConfig { listen, auth: None })
+}
+
+fn next_language(language: Language) -> Language {
+    match language {
+        Language::Ru => Language::En,
+        Language::En => Language::Ru,
+    }
+}
+
+fn next_dns_mode(mode: DnsMode) -> DnsMode {
+    match mode {
+        DnsMode::FakeIp => DnsMode::Resolve,
+        DnsMode::Resolve => DnsMode::System,
+        DnsMode::System => DnsMode::FakeIp,
+    }
 }
 
 /// Уровень журнала под переключателем: `debug` или `info`; `trace` ставят руками
@@ -90,10 +139,49 @@ mod tests {
         let _ = handle(&mut app, SettingsMessage::VerboseLog(true));
         assert_eq!(app.state().saved.app.log_level, LogLevel::Debug);
 
+        let _ = handle(&mut app, SettingsMessage::Ipv6(true));
+        assert!(app.state().saved.network.tun.ipv6_enabled);
+
+        let _ = handle(&mut app, SettingsMessage::NextDnsMode);
+        assert_eq!(app.state().saved.dns.mode, DnsMode::Resolve);
+
         assert!(
             !app.state().dirty,
             "сохранять больше нечего — и предлагать нечего"
         );
+    }
+
+    #[test]
+    fn local_proxies_listen_on_loopback_and_pass_validation() {
+        let mut app = app();
+
+        let _ = handle(&mut app, SettingsMessage::Socks(true));
+        let _ = handle(&mut app, SettingsMessage::Http(true));
+        let saved = &app.state().saved;
+        assert_eq!(
+            saved.network.socks.as_ref().map(|i| i.listen),
+            Some(SOCKS_LISTEN)
+        );
+        assert_eq!(
+            saved.network.http.as_ref().map(|i| i.listen),
+            Some(HTTP_LISTEN)
+        );
+        assert!(SOCKS_LISTEN.ip().is_loopback() && HTTP_LISTEN.ip().is_loopback());
+        penguin_config::validate::validate(saved)
+            .expect("включённые из окна прокси проходят проверку");
+
+        let _ = handle(&mut app, SettingsMessage::Socks(false));
+        assert!(app.state().saved.network.socks.is_none());
+    }
+
+    #[test]
+    fn choices_cycle_through_every_value() {
+        let mut mode = DnsMode::FakeIp;
+        for _ in 0..3 {
+            mode = next_dns_mode(mode);
+        }
+        assert_eq!(mode, DnsMode::FakeIp);
+        assert_eq!(next_language(next_language(Language::Ru)), Language::Ru);
     }
 
     #[test]

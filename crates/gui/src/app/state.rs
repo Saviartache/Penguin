@@ -380,8 +380,34 @@ pub struct SplitTunnelState {
     pub import_report: Option<String>,
     /// База GeoIP передана службе за этот запуск или передаётся.
     pub geoip_sent: bool,
-    /// Зажат Shift: стрелка переносит правило до края.
-    pub shift: bool,
+    /// Номер перетаскиваемого правила; `None` — ничего не тащат.
+    pub dragging: Option<usize>,
+    /// Строка нажата и ещё не сдвинута: отпускание на ней — щелчок.
+    pub pressed: Option<usize>,
+    /// Прошлый щелчок по строке: следующий за ним вскоре — двойной.
+    pub last_click: Option<RuleClick>,
+    /// Взятое правило держат за краем списка: список едет туда.
+    pub edge: Option<ScrollEdge>,
+}
+
+/// Край списка, за которым держат взятое правило.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollEdge {
+    /// Над списком.
+    Top,
+    /// Под списком.
+    Bottom,
+}
+
+/// Щелчок по строке правила.
+#[derive(Debug, Clone, Copy)]
+pub struct RuleClick {
+    /// Номер правила.
+    pub index: usize,
+    /// Когда.
+    pub at: Instant,
+    /// Были ли несохранённые правки до щелчка: двойной щелчок их не добавляет.
+    pub dirty_before: bool,
 }
 
 /// Экран серверов.

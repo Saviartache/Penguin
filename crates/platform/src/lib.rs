@@ -13,7 +13,6 @@ mod com;
 // Внутренний модуль: системные программы там, где нативного интерфейса нет.
 #[cfg(unix)]
 mod command;
-pub mod cursor;
 pub mod dialog;
 pub mod dns_settings;
 #[cfg(target_os = "macos")]
