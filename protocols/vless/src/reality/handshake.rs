@@ -6,7 +6,7 @@
 //!
 //! Прикладные секреты выводятся с транскриптом ДО `Finished` клиента, но ПОСЛЕ `Finished`
 //! сервера (RFC 8446 §7.1). Общий секрет — по группе `ServerHello` (её выбирает сайт-прикрытие):
-//! `X25519`, `P-256` или гибрид `X25519MLKEM768`. `HelloRetryRequest` не поддержан: ключи всех
+//! `X25519` или гибрид `X25519MLKEM768`. `HelloRetryRequest` не поддержан: ключи всех
 //! групп уже в `ClientHello`, а такой `random` отвергается как `Malformed`.
 
 use penguin_core::address::Address;

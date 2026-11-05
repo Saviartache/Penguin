@@ -18,8 +18,6 @@ penguin-proto.workspace = true
 # ALPN-константы.
 penguin-transport.workspace = true
 
-# P-256 для key_share.
-ring.workspace = true
 # X25519 с повторным использованием скаляра (Reality).
 x25519-dalek.workspace = true
 # Гибрид `X25519MLKEM768` (Chrome 131+; без него сервер Reality нас не узнаёт).

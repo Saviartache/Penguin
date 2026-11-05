@@ -5,7 +5,7 @@
 //!  grease        значения-пустышки RFC 8701
 //!  record        заголовки TLS-записи и сообщения рукопожатия
 //!  extension     кодировщики расширений ClientHello
-//!  key_exchange  пары ключей X25519/P-256/X25519MLKEM768 для key_share
+//!  key_exchange  пары ключей X25519/X25519MLKEM768 для key_share
 //!  client_hello  сборка сообщения и перемешивание
 //!  fingerprint   отпечатки chrome, firefox, safari
 //!  server_hello  разбор ServerHello

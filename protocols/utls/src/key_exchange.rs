@@ -1,22 +1,17 @@
 //! Настоящие пары ключей для `key_share`: рукопожатие можно довести до конца.
 //!
-//! `P-256` — `ring::agreement` (одно применение). `X25519` — `StaticSecret`:
-//! Reality считает общий секрет с одним скаляром дважды (ключ Reality и ключ
-//! сервера), `agree_ephemeral` для этого не годится. `X25519MLKEM768` — `ml-kem`
-//! и свой X25519.
+//! `X25519` — `StaticSecret`: Reality считает общий секрет с одним скаляром дважды
+//! (ключ Reality и ключ сервера). `X25519MLKEM768` — `ml-kem` и свой X25519.
+//!
+//! Других групп нет: сервер REALITY повторяет только `X25519` и `X25519MLKEM768`
+//! (`XTLS/REALITY` `tls.go`), на любую другую из `key_share` он отдаёт сайт-прикрытие.
 
 use ml_kem::{Ciphertext, Decapsulate, DecapsulationKey768, KeyExport, MlKem768, Seed};
-use ring::agreement::{
-    Algorithm, ECDH_P256, EphemeralPrivateKey, UnparsedPublicKey, agree_ephemeral,
-};
-use ring::rand::SecureRandom;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519Secret};
-
-use crate::error::{UtlsError, UtlsResult};
 
 /// Группа `X25519` (RFC 8446 §4.2.7).
 pub const GROUP_X25519: u16 = 29;
-/// Группа `P-256` (RFC 8446 §4.2.7).
+/// Группа `P-256` (RFC 8446 §4.2.7): только в `supported_groups`, ключа нет.
 pub const GROUP_P256: u16 = 23;
 /// Гибрид `X25519MLKEM768` (uTLS `common.go`, draft-ietf-tls-ecdhe-mlkem).
 pub const GROUP_X25519_MLKEM768: u16 = 4588;
@@ -26,7 +21,6 @@ const MLKEM768_CIPHERTEXT_LEN: usize = 1088;
 
 enum Private {
     X25519(X25519Secret),
-    P256(EphemeralPrivateKey),
     /// Свой X25519, не общий с записью `X25519` (uTLS `mlkemEcdhe`, как у Chrome).
     X25519Mlkem768 {
         mlkem: Box<DecapsulationKey768>,
@@ -39,8 +33,8 @@ enum Private {
 pub struct KeyExchange {
     /// Группа записи `key_share`.
     pub group: u16,
-    /// Байты, которые идут в `key_share.data`: 32 байта для `X25519`, 65
-    /// (несжатая точка, `0x04` + X + Y) для `P-256`, ключ ML-KEM ‖ X25519 для гибрида.
+    /// Байты, которые идут в `key_share.data`: 32 байта для `X25519`, ключ ML-KEM ‖ X25519
+    /// для гибрида.
     pub public: Vec<u8>,
     private: Private,
 }
@@ -58,21 +52,16 @@ impl KeyExchange {
     pub fn x25519_diffie_hellman(&self, peer_public: &[u8; 32]) -> Option<[u8; 32]> {
         match &self.private {
             Private::X25519(secret) => Some(x25519(secret, peer_public)),
-            Private::P256(_) | Private::X25519Mlkem768 { .. } => None,
+            Private::X25519Mlkem768 { .. } => None,
         }
     }
 
-    /// Общий секрет TLS 1.3 с `key_share` сервера той же группы: у `P-256` — координата X
-    /// (RFC 8446 §7.4.2), у гибрида ML-KEM ‖ X25519 (uTLS `handshake_client_tls13.go`).
-    /// `None` — неверный ключ сервера. Ключ потребляется: `ring` отдаёт `P-256` один раз.
+    /// Общий секрет TLS 1.3 с `key_share` сервера той же группы: у гибрида ML-KEM ‖ X25519
+    /// (uTLS `handshake_client_tls13.go`). `None` — неверный ключ сервера.
     pub fn agree(self, server_share: &[u8]) -> Option<Vec<u8>> {
         match self.private {
             Private::X25519(secret) => {
                 Some(x25519(&secret, server_share.try_into().ok()?).to_vec())
-            }
-            Private::P256(key) => {
-                let peer = UnparsedPublicKey::new(&ECDH_P256, server_share);
-                agree_ephemeral(key, &peer, <[u8]>::to_vec).ok()
             }
             Private::X25519Mlkem768 {
                 mlkem,
@@ -138,27 +127,6 @@ pub fn generate_x25519_mlkem768() -> KeyExchange {
     }
 }
 
-/// Генерирует пару `P-256` — вторая запись `key_share` у Firefox.
-pub fn generate_p256(rng: &dyn SecureRandom) -> UtlsResult<KeyExchange> {
-    generate_p256_with(&ECDH_P256, rng)
-}
-
-fn generate_p256_with(
-    algorithm: &'static Algorithm,
-    rng: &dyn SecureRandom,
-) -> UtlsResult<KeyExchange> {
-    let private = EphemeralPrivateKey::generate(algorithm, rng)
-        .map_err(|_| UtlsError::KeyGeneration("генератор случайности недоступен"))?;
-    let public = private
-        .compute_public_key()
-        .map_err(|_| UtlsError::KeyGeneration("не удалось вычислить публичный ключ"))?;
-    Ok(KeyExchange {
-        group: GROUP_P256,
-        public: public.as_ref().to_vec(),
-        private: Private::P256(private),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,15 +135,6 @@ mod tests {
     fn x25519_keys_are_thirty_two_bytes() {
         let pair = generate_x25519();
         assert_eq!(pair.public.len(), 32);
-    }
-
-    #[test]
-    fn p256_keys_are_uncompressed_points() {
-        let rng = ring::rand::SystemRandom::new();
-        let pair = generate_p256(&rng).expect("генерируется");
-        // 0x04, потом X и Y по 32 байта — несжатая точка, RFC 8446 §4.2.8.1.
-        assert_eq!(pair.public.len(), 65);
-        assert_eq!(pair.public[0], 0x04);
     }
 
     /// Без внешнего вектора: сервер — `encapsulate_deterministic` того же `ml-kem` (его KAT
@@ -231,28 +190,6 @@ mod tests {
         let printed = format!("{pair:?}");
         assert!(!printed.contains("StaticSecret"));
         assert!(printed.contains("public_len"));
-    }
-
-    #[test]
-    fn p256_keys_do_not_support_x25519_diffie_hellman() {
-        let rng = ring::rand::SystemRandom::new();
-        let pair = generate_p256(&rng).expect("генерируется");
-        assert!(pair.x25519_diffie_hellman(&[0; 32]).is_none());
-    }
-
-    /// Без внешнего вектора: сервер — тот же `ring`; проверяется обвязка.
-    #[test]
-    fn p256_agrees_on_the_x_coordinate() {
-        let rng = ring::rand::SystemRandom::new();
-        let client = generate_p256(&rng).expect("генерируется");
-        let server = EphemeralPrivateKey::generate(&ECDH_P256, &rng).expect("генерируется");
-        let server_public = server.compute_public_key().expect("считается");
-        let peer = UnparsedPublicKey::new(&ECDH_P256, client.public.clone());
-        let expected = agree_ephemeral(server, &peer, <[u8]>::to_vec).expect("сходится");
-        assert_eq!(expected.len(), 32);
-        assert_eq!(client.agree(server_public.as_ref()), Some(expected));
-        let broken = generate_p256(&rng).expect("генерируется");
-        assert_eq!(broken.agree(&[4; 65]), None, "точка не на кривой");
     }
 
     /// Общий секрет X25519, вектор из RFC 8448 §3 ("Simple 1-RTT Handshake"):

@@ -1,11 +1,13 @@
 //! Firefox 148 (`HelloFirefox_148` = `HelloFirefox_Auto`, uTLS `u_parrots.go`, ревизия
 //! `aa6edf4b11af`).
 //!
-//! NSS: без GREASE и без перемешивания. `key_share`: `X25519MLKEM768`, `X25519` на том же
-//! X25519 (`ReuseHybridAndClassicalKeyShares`) и `P-256`. Сверено только с исходником uTLS.
+//! NSS: без GREASE и без перемешивания. `key_share`: `X25519MLKEM768` и `X25519` на том же
+//! X25519 (`ReuseHybridAndClassicalKeyShares`). Сверено только с исходником uTLS.
 //!
-//! Сервер REALITY повторяет группу сайта-прикрытия; сайт, выбравший `P-256` (так делает
-//! `www.heise.de`), REALITY не держит — Xray 26.10.31 с `firefox` падает там же.
+//! Третьей записи Firefox, `P-256`, нет намеренно: сервер REALITY повторяет группу
+//! сайта-прикрытия, но только `X25519` и `X25519MLKEM768` (`XTLS/REALITY` `tls.go`). Сайт,
+//! выбравший предложенный `P-256`, получал клиента напрямую — `NotRecognized`. `P-256`
+//! остаётся в `supported_groups`, как у Chrome и Safari.
 
 use crate::client_hello::ExtensionSlot;
 use crate::error::{UtlsError, UtlsResult};
@@ -49,17 +51,15 @@ const ECH_GREASE_AEADS: &[u16] = &[
     ech_grease::AEAD_CHACHA20_POLY1305,
 ];
 
-/// Собирает расширения и пары ключей `X25519MLKEM768`, `X25519` и `P-256`.
+/// Собирает расширения и пары ключей `X25519MLKEM768` и `X25519`.
 pub(crate) fn build(
     rng: &mut impl Rng,
     host: &str,
 ) -> UtlsResult<(Vec<ExtensionSlot>, Vec<KeyExchange>)> {
-    let system_rng = ring::rand::SystemRandom::new();
     let hybrid = key_exchange::generate_x25519_mlkem768();
     let x25519 = hybrid
         .reused_x25519()
         .ok_or(UtlsError::KeyGeneration("гибрид без X25519"))?;
-    let p256 = key_exchange::generate_p256(&system_rng)?;
 
     let fixed_slot = |bytes: Vec<u8>| ExtensionSlot {
         bytes,
@@ -110,10 +110,6 @@ pub(crate) fn build(
                 group: x25519.group,
                 data: &x25519.public,
             },
-            crate::extension::key_share::Entry {
-                group: p256.group,
-                data: &p256.public,
-            },
         ])),
         fixed_slot(generic::u16_list_u8_len(
             43, // supported_versions
@@ -147,7 +143,7 @@ pub(crate) fn build(
         )),
     ];
 
-    Ok((extensions, vec![hybrid, x25519, p256]))
+    Ok((extensions, vec![hybrid, x25519]))
 }
 
 #[cfg(test)]
@@ -164,15 +160,14 @@ mod tests {
         let (extensions, keys) = build(&mut rng, "example.com").expect("собирается");
         assert!(extensions.iter().all(|e| e.anchored), "порядок не меняется");
         let groups: Vec<u16> = keys.iter().map(|k| k.group).collect();
-        assert_eq!(groups, [GROUP_X25519_MLKEM768, GROUP_X25519, GROUP_P256]);
+        assert_eq!(groups, [GROUP_X25519_MLKEM768, GROUP_X25519], "без P-256");
     }
 
     #[test]
-    fn the_x25519_share_reuses_the_hybrid_one_and_p256_is_a_real_point() {
+    fn the_x25519_share_reuses_the_hybrid_one() {
         let mut rng = StepRng::new(9, 3);
         let (_, keys) = build(&mut rng, "example.com").expect("собирается");
         assert!(keys[0].public.ends_with(&keys[1].public), "тот же X25519");
         assert_eq!(keys[1].public.len(), 32);
-        assert_eq!(keys[2].public.len(), 65, "несжатая точка P-256");
     }
 }
