@@ -95,7 +95,9 @@ fn ruleset(rules: &FirewallRules) -> String {
     let mut text = String::with_capacity(512);
 
     text.push_str("block drop out all\n");
-    text.push_str("pass out quick on lo0 all\n");
+    // Без состояния: оба конца на lo0, и состояние сочло бы входящий SYN ответом —
+    // проверка окна TCP его отбросит (`set skip` в якоре недоступен).
+    text.push_str("pass out quick on lo0 all no state\n");
     // Прямой выход и DNS службы: pf не различает процессов, служба — единственный свой root.
     text.push_str("pass out quick proto { tcp udp } all user root\n");
 
@@ -151,7 +153,8 @@ mod tests {
     #[test]
     fn loopback_is_always_allowed() {
         let text = ruleset(&FirewallRules::default());
-        assert!(text.contains("pass out quick on lo0 all"), "{text}");
+        // С состоянием TCP по loopback зависал: оба конца на одном интерфейсе.
+        assert!(text.contains("pass out quick on lo0 all no state\n"), "{text}");
     }
 
     #[test]
