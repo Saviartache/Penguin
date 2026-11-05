@@ -20,6 +20,7 @@ pub const CONFIG_FILE: &str = "config.toml";
 pub struct Paths {
     config_dir: PathBuf,
     data_dir: PathBuf,
+    i2pd_dir: PathBuf,
 }
 
 impl Paths {
@@ -45,25 +46,19 @@ impl Paths {
             let root = PathBuf::from(std::env::var_os("APPDATA").ok_or(ConfigError::NoConfigDir)?)
                 .join(ORGANIZATION)
                 .join(APPLICATION);
-            Ok(Self {
-                config_dir: root.join("config"),
-                data_dir: root.join("data"),
-            })
+            Ok(Self::new(root.join("config"), root.join("data")))
         }
         #[cfg(target_os = "macos")]
         {
             let root = home()?.join("Library/Application Support/Saviartache.Penguin");
-            Ok(Self {
-                config_dir: root.clone(),
-                data_dir: root,
-            })
+            Ok(Self::new(root.clone(), root))
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            Ok(Self {
-                config_dir: xdg_dir("XDG_CONFIG_HOME", ".config")?.join("penguin"),
-                data_dir: xdg_dir("XDG_DATA_HOME", ".local/share")?.join("penguin"),
-            })
+            Ok(Self::new(
+                xdg_dir("XDG_CONFIG_HOME", ".config")?.join("penguin"),
+                xdg_dir("XDG_DATA_HOME", ".local/share")?.join("penguin"),
+            ))
         }
     }
 
@@ -76,16 +71,15 @@ impl Paths {
             let root = PathBuf::from(std::env::var_os("ProgramData")?)
                 .join(ORGANIZATION)
                 .join(APPLICATION);
-            Some(Self {
-                config_dir: root.join("config"),
-                data_dir: root.join("data"),
-            })
+            Some(Self::new(root.join("config"), root.join("data")))
         }
         #[cfg(not(windows))]
         {
             Some(Self {
                 config_dir: PathBuf::from("/etc/penguin"),
                 data_dir: PathBuf::from("/var/lib/penguin"),
+                // Не внутри `data_dir`: тот закрыт (0700), а i2pd работает от `nobody`.
+                i2pd_dir: PathBuf::from("/var/lib/penguin-i2pd"),
             })
         }
     }
@@ -93,9 +87,15 @@ impl Paths {
     /// Пути внутри указанного каталога (переносимая сборка, тесты).
     pub fn rooted(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref();
+        Self::new(root.to_path_buf(), root.join("data"))
+    }
+
+    /// i2pd — в каталоге данных.
+    fn new(config_dir: PathBuf, data_dir: PathBuf) -> Self {
         Self {
-            config_dir: root.to_path_buf(),
-            data_dir: root.join("data"),
+            i2pd_dir: data_dir.join("i2pd"),
+            config_dir,
+            data_dir,
         }
     }
 
@@ -126,7 +126,7 @@ impl Paths {
 
     /// Каталог i2pd: исполняемый файл, его данные и журнал.
     pub fn i2pd_dir(&self) -> PathBuf {
-        self.data_dir.join("i2pd")
+        self.i2pd_dir.clone()
     }
 
     /// Создаёт каталоги, если их нет.

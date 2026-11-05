@@ -47,4 +47,11 @@ mod tests {
             assert_eq!(paths.data_dir(), std::path::Path::new("/var/lib/penguin"));
         }
     }
+
+    // Каталог данных закрыт (0700): `nobody` не дошёл бы до файла i2pd.
+    #[test]
+    fn i2pd_lives_outside_the_closed_data_directory() {
+        let paths = service_paths(None).expect("machine paths");
+        assert!(!paths.i2pd_dir().starts_with(paths.data_dir()));
+    }
 }

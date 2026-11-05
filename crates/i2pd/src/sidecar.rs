@@ -81,7 +81,7 @@ impl Sidecar {
         #[cfg(not(unix))]
         let account = None;
         let data = self.home.join("data");
-        prepare_data(&data, account)?;
+        prepare_data(&self.home, &data, account)?;
 
         let cancel = CancellationToken::new();
         // Ошибка или отмена подключения на любом шаге гасит обход.
@@ -135,16 +135,20 @@ impl Sidecar {
 /// `uid` и `gid`, от которых работает i2pd; `None` — от учётной записи службы.
 type Account = Option<(u32, u32)>;
 
-/// Каталог данных: его пишет i2pd, а он работает не от root.
-fn prepare_data(data: &Path, account: Account) -> I2pdResult<()> {
+/// Каталог данных: его пишет i2pd, а он работает не от root. В `home` ему можно
+/// войти и запустить файл, но не подменить его.
+fn prepare_data(home: &Path, data: &Path, account: Account) -> I2pdResult<()> {
     std::fs::create_dir_all(data).map_err(|err| I2pdError::io(data, err))?;
     #[cfg(unix)]
     if let Some((uid, gid)) = account {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o755))
+            .map_err(|err| I2pdError::io(home, err))?;
         std::os::unix::fs::chown(data, Some(uid), Some(gid))
             .map_err(|err| I2pdError::io(data, err))?;
     }
     #[cfg(not(unix))]
-    let _ = account;
+    let _ = (home, account);
     Ok(())
 }
 
