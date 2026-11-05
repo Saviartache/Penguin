@@ -12,7 +12,7 @@ use penguin_proto::dialer::Dialer;
 use penguin_proto::error::ProtocolError;
 use penguin_proto::stream::ProxyStream;
 use penguin_transport::tls::TlsClient;
-use penguin_transport::xhttp::{XhttpClient, XhttpTarget};
+use penguin_transport::xhttp::{self, XhttpClient, XhttpTarget};
 use penguin_transport::{carrier, deadline};
 use tokio::io::AsyncWriteExt;
 
@@ -40,6 +40,8 @@ pub struct Connector {
     /// `:authority` для них же.
     http_host: String,
     xhttp: Option<XhttpClient>,
+    /// XHTTP поверх Reality: общее соединение HTTP/2.
+    reality_xhttp: Option<xhttp::h2::Pool>,
     dialer: Arc<dyn Dialer>,
 }
 
@@ -80,7 +82,9 @@ impl Connector {
 
         let vision = config.flow() == Some(addons::FLOW_VISION);
         let http_host = config.host()?;
-        // Поверх Reality XHTTP идёт по HTTP/2 через `carrier::wrap`
+        // Поверх Reality XHTTP идёт по HTTP/2
+        let reality_xhttp =
+            (config.transport.is_quic() && reality.is_some()).then(xhttp::h2::Pool::default);
         let xhttp = (config.transport.is_quic() && reality.is_none()).then(|| {
             let target = XhttpTarget {
                 host: host.clone(),
@@ -103,14 +107,18 @@ impl Connector {
             path: config.path().to_owned(),
             http_host,
             xhttp,
+            reality_xhttp,
             dialer: Arc::clone(&dialer),
         })
     }
 
-    /// Закрывает общее соединение QUIC, если оно есть (`xhttp`).
+    /// Закрывает общее соединение XHTTP (QUIC или HTTP/2 поверх Reality), если оно есть.
     pub async fn close(&self) {
         if let Some(xhttp) = &self.xhttp {
             xhttp.close().await;
+        }
+        if let Some(pool) = &self.reality_xhttp {
+            pool.close().await;
         }
     }
 
@@ -139,28 +147,44 @@ impl Connector {
         if let Some(xhttp) = &self.xhttp {
             return Ok(Box::new(xhttp.open().await.map_err(VlessError::from)?));
         }
-        let plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
-
+        if let (Some(pool), Some(reality)) = (&self.reality_xhttp, &self.reality) {
+            let stream = pool
+                .open(&self.http_host, &self.path, || self.reality(reality))
+                .await?;
+            return Ok(Box::new(stream));
+        }
         let secure: Box<dyn ProxyStream> = if let Some(tls) = &self.tls {
+            let plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
             Box::new(tls.connect(plain).await.map_err(VlessError::from)?)
         } else if let Some(reality) = &self.reality {
-            let stream = deadline::handshake::<_, VlessError>("рукопожатие Reality", async {
-                Ok(reality::connect(plain, reality).await?)
-            })
-            .await?;
+            let stream = self.reality(reality).await?;
             if self.vision {
                 Box::new(VisionStream::new(stream, *self.uuid.as_bytes()))
             } else {
                 Box::new(stream)
             }
         } else {
-            Box::new(plain)
+            Box::new(connect::dial(&*self.dialer, &self.host, self.port).await?)
         };
 
         Ok(
             carrier::wrap(secure, self.transport, &self.http_host, &self.path)
                 .await
                 .map_err(VlessError::from)?,
+        )
+    }
+
+    /// Новое соединение с сервером и рукопожатие Reality.
+    async fn reality(
+        &self,
+        config: &RealityConfig,
+    ) -> Result<reality::RealityStream<tokio::net::TcpStream>, ProtocolError> {
+        let plain = connect::dial(&*self.dialer, &self.host, self.port).await?;
+        Ok(
+            deadline::handshake::<_, VlessError>("рукопожатие Reality", async {
+                Ok(reality::connect(plain, config).await?)
+            })
+            .await?,
         )
     }
 
