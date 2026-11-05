@@ -20,7 +20,7 @@ rustls = { workspace = true, features = ["ring", "std"] }
 rustls-platform-verifier.workspace = true
 tokio-rustls = { workspace = true, features = ["ring"] }
 # `io-util` нужен DoT, а отдельно (`cargo test -p penguin-dns`) он не включался.
-tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util"] }
+tokio = { workspace = true, features = ["rt", "net", "sync", "time", "io-util", "macros"] }
 parking_lot.workspace = true
 ipnet.workspace = true
 thiserror.workspace = true

@@ -1,29 +1,29 @@
-//! DNS-over-TLS (RFC 7858): порт 853, перед сообщением его длина двумя байтами.
-//!
-//! Прячет от провайдера имя VPN-сервера при загрузочном разрешении. TLS и
-//! проверка сертификата через хранилище системы те же, что у протоколов.
+//! Апстрим DoT: адрес, имя в сертификате и живой сеанс.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use penguin_core::address::SocketAddress;
 use penguin_proto::dialer::Dialer;
 use rustls::pki_types::ServerName;
 use rustls_platform_verifier::BuilderVerifierExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
+use tokio_rustls::client::TlsStream;
 
-use super::{Sockets, Upstream, socket_error};
+use super::session::{self, Query, Session};
 use crate::config::UPSTREAM_TIMEOUT;
 use crate::error::{DnsError, DnsResult};
+use crate::upstream::{Sockets, Upstream, socket_error};
 
 /// Порт DNS-over-TLS.
 pub const DOT_PORT: u16 = 853;
 
-/// Наибольший ответ.
-const MAX_RESPONSE: usize = 65_535;
+/// Срок на соединение и TLS: внутри тоннеля к ним добавляется рукопожатие с сервером VPN.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// DNS поверх TLS.
 pub struct DotUpstream {
@@ -31,6 +31,7 @@ pub struct DotUpstream {
     server_name: String,
     connector: TlsConnector,
     sockets: Sockets,
+    session: Mutex<Option<Session>>,
 }
 
 impl std::fmt::Debug for DotUpstream {
@@ -63,6 +64,7 @@ impl DotUpstream {
             server_name: server_name.into(),
             connector: TlsConnector::from(Arc::new(config)),
             sockets: None,
+            session: Mutex::new(None),
         })
     }
 
@@ -71,6 +73,49 @@ impl DotUpstream {
         self.sockets = Some(sockets);
         self
     }
+
+    /// Живой сеанс или новый: один на апстрим, сколько бы запросов ни шло.
+    fn session(&self) -> Session {
+        let mut current = self.session.lock();
+        if let Some(session) = current.as_ref().filter(|session| !session.is_closed()) {
+            return session.clone();
+        }
+        let connect = connect(
+            self.address.clone(),
+            self.server_name.clone(),
+            self.connector.clone(),
+            self.sockets.clone(),
+        );
+        let session = session::spawn(async move {
+            tokio::time::timeout(CONNECT_TIMEOUT, connect)
+                .await
+                .map_err(|_| DnsError::Upstream("соединение DoT не поднялось".to_owned()))?
+        });
+        *current = Some(session.clone());
+        session
+    }
+}
+
+async fn connect(
+    address: String,
+    server_name: String,
+    connector: TlsConnector,
+    sockets: Sockets,
+) -> DnsResult<TlsStream<TcpStream>> {
+    let stream = match &sockets {
+        Some(sockets) => {
+            let parsed: SocketAddr = address
+                .parse()
+                .map_err(|_| DnsError::Config(format!("адрес DoT `{address}` не числовой")))?;
+            sockets.dial_tcp(parsed).await.map_err(socket_error)?
+        }
+        None => TcpStream::connect(&address).await?,
+    };
+    let _ = stream.set_nodelay(true);
+
+    let name = ServerName::try_from(server_name.clone())
+        .map_err(|_| DnsError::Config(format!("неверное имя сервера `{server_name}`")))?;
+    Ok(connector.connect(name, stream).await?)
 }
 
 #[async_trait]
@@ -80,44 +125,18 @@ impl Upstream for DotUpstream {
     }
 
     async fn query(&self, request: &[u8]) -> DnsResult<Vec<u8>> {
+        let session = self.session();
         let exchange = async {
-            let stream = match &self.sockets {
-                Some(sockets) => {
-                    let address: SocketAddr = self.address.parse().map_err(|_| {
-                        DnsError::Config(format!("адрес DoT `{}` не числовой", self.address))
-                    })?;
-                    sockets.dial_tcp(address).await.map_err(socket_error)?
-                }
-                None => TcpStream::connect(&self.address).await?,
+            let (reply, answer) = tokio::sync::oneshot::channel();
+            let query = Query {
+                message: request.to_vec(),
+                reply,
             };
-            let _ = stream.set_nodelay(true);
-
-            let name = ServerName::try_from(self.server_name.clone()).map_err(|_| {
-                DnsError::Config(format!("неверное имя сервера `{}`", self.server_name))
-            })?;
-            let mut stream = self.connector.connect(name, stream).await?;
-
-            let length = u16::try_from(request.len())
-                .map_err(|_| DnsError::Malformed("запрос длиннее 65 535 байт".to_owned()))?;
-            stream.write_all(&length.to_be_bytes()).await?;
-            stream.write_all(request).await?;
-            stream.flush().await?;
-
-            let mut length = [0u8; 2];
-            stream.read_exact(&mut length).await?;
-            let length = u16::from_be_bytes(length) as usize;
-            if length == 0 || length > MAX_RESPONSE {
-                return Err(DnsError::Malformed(format!(
-                    "нелепая длина ответа: {length}"
-                )));
-            }
-
-            let mut response = vec![0u8; length];
-            stream.read_exact(&mut response).await?;
-            Ok::<Vec<u8>, DnsError>(response)
+            let closed = || DnsError::Upstream("сеанс DoT закрыт".to_owned());
+            session.send(query).await.map_err(|_| closed())?;
+            answer.await.map_err(|_| closed())
         };
 
-        // Один бюджет на соединение, рукопожатие и обмен.
         tokio::time::timeout(UPSTREAM_TIMEOUT, exchange)
             .await
             .map_err(|_| DnsError::Upstream(format!("{} не ответил", self.address)))?
