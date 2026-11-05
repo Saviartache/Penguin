@@ -249,7 +249,12 @@ impl Engine {
             self.i2pd
                 .start_for(profile, self.outbounds.direct(), &self.events)
                 .await?;
-            self.outbounds.get_or_connect(profile).await
+            let outbound = self.outbounds.get_or_connect(profile).await?;
+            #[cfg(feature = "i2p")]
+            if crate::i2pd::needs_i2pd(profile) {
+                crate::i2pd::warm_up(outbound.as_ref(), &self.events).await;
+            }
+            Ok(outbound)
         };
         let connected = tokio::select! {
             result = async {

@@ -2,17 +2,60 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use penguin_config::schema::profile::Profile;
+use penguin_core::address::SocketAddress;
 use penguin_i2pd::{I2pdError, Progress, Sidecar};
 use penguin_proto::error::ProtocolError;
 use penguin_proto::outbound::Outbound;
+use penguin_proto::probe::{self, PROBE_TARGET, ProbeResult};
 
 use crate::events::{Event, EventBus, LogLevel};
+
+/// Сколько ждать первого потока: туннели до outproxy строятся десятками секунд.
+const WARM_UP: Duration = Duration::from_secs(120);
+const WARM_UP_ATTEMPT: Duration = Duration::from_secs(30);
+const WARM_UP_PAUSE: Duration = Duration::from_secs(2);
 
 /// Ходит ли профиль через i2pd.
 pub(crate) fn needs_i2pd(profile: &Profile) -> bool {
     profile.outbound.protocol == penguin_i2p::PROTOCOL
+}
+
+/// Ждёт первого потока через outproxy: порт i2pd открыт раньше, чем готовы туннели,
+/// и без этого «подключено» горело бы при молчащем трафике.
+pub(crate) async fn warm_up(outbound: &dyn Outbound, events: &EventBus) {
+    let Ok(target) = PROBE_TARGET.parse::<SocketAddress>() else {
+        return;
+    };
+    events.emit(Event::Progress {
+        message: "I2P: строится путь до outproxy".to_owned(),
+    });
+    let deadline = tokio::time::Instant::now() + WARM_UP;
+    while tokio::time::Instant::now() < deadline {
+        match probe::probe(outbound, &target, WARM_UP_ATTEMPT).await {
+            ProbeResult::Alive(rtt) => {
+                events.emit(Event::log(
+                    LogLevel::Info,
+                    format!("I2P: путь готов, задержка {} мс", rtt.millis),
+                ));
+                return;
+            }
+            ProbeResult::Timeout => {}
+            ProbeResult::Rejected(message) => {
+                tracing::debug!(%message, "I2P: путь ещё не готов");
+                tokio::time::sleep(WARM_UP_PAUSE).await;
+            }
+        }
+    }
+    events.emit(Event::log(
+        LogLevel::Warning,
+        format!(
+            "I2P: outproxy не ответил за {} с — трафик пойдёт, когда достроятся туннели",
+            WARM_UP.as_secs()
+        ),
+    ));
 }
 
 /// i2pd службы; каталог задаёт она же ([`crate::Engine::use_i2pd`]).
