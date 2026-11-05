@@ -44,8 +44,8 @@ pub fn describe(tunnel: &TunnelState) -> (String, Tone) {
             Tone::Busy,
         ),
         TunnelState::Disconnecting => (crate::i18n::s().disconnecting.to_owned(), Tone::Busy),
-        // Причина как есть: «ошибка» без объяснения не помогает.
-        TunnelState::Failed { reason } => (reason.clone(), Tone::Trouble),
+        // Причина длинная и в строку не влезает; она в журнале.
+        TunnelState::Failed { .. } => (crate::i18n::s().failed.to_owned(), Tone::Trouble),
         TunnelState::Disconnected => (crate::i18n::s().disconnected.to_owned(), Tone::Busy),
     }
 }
@@ -103,12 +103,12 @@ mod tests {
     }
 
     #[test]
-    fn failure_reads_as_trouble_and_shows_the_reason() {
+    fn failure_reads_as_trouble_and_points_to_the_log() {
         let (label, tone) = describe(&TunnelState::Failed {
             reason: "неверный пароль".to_owned(),
         });
         assert_eq!(tone, Tone::Trouble);
-        assert_eq!(label, "неверный пароль");
+        assert_eq!(label, crate::i18n::s().failed);
     }
 
     #[test]

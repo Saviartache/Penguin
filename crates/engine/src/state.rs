@@ -18,7 +18,7 @@ use arc_swap::ArcSwap;
 use penguin_core::id::ProfileId;
 use penguin_core::state::TunnelState;
 
-use crate::events::{Event, EventBus};
+use crate::events::{Event, EventBus, LogLevel};
 
 /// Состояние тоннеля с уведомлением о переходах.
 #[derive(Debug)]
@@ -96,11 +96,12 @@ impl StateMachine {
         });
     }
 
-    /// Переход «сломалось насовсем».
+    /// Переход «сломалось насовсем»; причина уходит и в журнал.
     pub fn failed(&self, reason: impl Into<String>) {
-        self.set(TunnelState::Failed {
-            reason: reason.into(),
-        });
+        let reason = reason.into();
+        self.events
+            .emit(Event::log(LogLevel::Error, reason.clone()));
+        self.set(TunnelState::Failed { reason });
     }
 
     /// Переход «отключено».
