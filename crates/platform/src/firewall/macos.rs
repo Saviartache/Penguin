@@ -154,7 +154,10 @@ mod tests {
     fn loopback_is_always_allowed() {
         let text = ruleset(&FirewallRules::default());
         // С состоянием TCP по loopback зависал: оба конца на одном интерфейсе.
-        assert!(text.contains("pass out quick on lo0 all no state\n"), "{text}");
+        assert!(
+            text.contains("pass out quick on lo0 all no state\n"),
+            "{text}"
+        );
     }
 
     #[test]
