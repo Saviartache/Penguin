@@ -51,6 +51,8 @@ pub struct Strings {
     pub disconnecting: &'static str,
     /// Тоннель выключен.
     pub disconnected: &'static str,
+    /// Тоннель не поднялся; причина в журнале.
+    pub failed: &'static str,
     /// Демон не отвечает.
     pub daemon_offline: &'static str,
     /// Службу гасят вместе с окном.
@@ -425,6 +427,8 @@ pub struct Strings {
     pub i2p_outproxy: &'static str,
     /// Подсказка в поле outproxy: пусто — умолчание протокола.
     pub i2p_outproxy_example: &'static str,
+    /// Вместо адреса сервера у I2P: адреса нет, есть сеть.
+    pub i2p_network: &'static str,
     /// В разделе адресов или портов пусто.
     pub values_empty: &'static str,
     /// Набранного в разделе нет.
@@ -824,6 +828,7 @@ mod tests {
                 table.i2p_probe_after_connect,
                 table.i2p_outproxy,
                 table.i2p_outproxy_example,
+                table.i2p_network,
                 table.values_empty,
                 table.values_not_found,
                 table.add_rule,

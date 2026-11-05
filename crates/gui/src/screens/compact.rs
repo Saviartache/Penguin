@@ -148,7 +148,7 @@ fn details(state: &State, profile: &Profile) -> [Line; menu::ROWS] {
     [
         pair(
             strings.server,
-            crate::screens::servers::server_of(profile)
+            crate::screens::servers::server_label(profile)
                 .map_or_else(|| NONE.to_owned(), str::to_owned),
         ),
         pair(strings.protocol, profile.outbound.protocol.clone()),

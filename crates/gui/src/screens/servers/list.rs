@@ -183,7 +183,7 @@ fn row<'a>(
         .is_managed()
         .then(|| glyphs(crate::i18n::s().managed, ink::level(palette, ink::TERTIARY)));
 
-    let server = crate::screens::servers::server_of(profile)
+    let server = crate::screens::servers::server_label(profile)
         .map_or_else(|| DASH.to_string(), |server| cell(server, SERVER_WIDTH));
 
     let cells = columns(

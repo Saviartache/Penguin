@@ -45,6 +45,12 @@ pub fn server_of(profile: &Profile) -> Option<&str> {
         .and_then(|value| value.as_str())
 }
 
+/// Что показать в столбце сервера: адрес, а у I2P (адреса нет) — сеть.
+pub fn server_label(profile: &Profile) -> Option<&str> {
+    server_of(profile)
+        .or_else(|| crate::i2pd::is_i2p(profile).then(|| crate::i18n::s().i2p_network))
+}
+
 #[cfg(test)]
 mod tests {
     use penguin_config::schema::outbound::RawOutbound;
@@ -66,6 +72,14 @@ mod tests {
     fn a_profile_without_an_address_says_nothing_instead_of_the_protocol() {
         let profile = Profile::new("x", "x", RawOutbound::new("vless", json!({})));
         assert_eq!(server_of(&profile), None);
+    }
+
+    #[test]
+    fn i2p_names_its_network_instead_of_a_dash() {
+        let i2p = Profile::new("i", "I", RawOutbound::new("i2p", json!({})));
+        let vless = Profile::new("v", "V", RawOutbound::new("vless", json!({})));
+        assert_eq!(server_label(&i2p), Some(crate::i18n::s().i2p_network));
+        assert_eq!(server_label(&vless), None);
     }
 
     #[test]

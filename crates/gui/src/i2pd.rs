@@ -11,16 +11,19 @@ use penguin_ipc::schema::{Request, Response};
 /// Протокол, которому нужен i2pd.
 const PROTOCOL: &str = "i2p";
 
+/// Профиль I2P.
+pub(crate) fn is_i2p(profile: &Profile) -> bool {
+    profile.outbound.protocol == PROTOCOL
+}
+
 /// Нужен ли службе i2pd: есть профиль I2P.
 pub(crate) fn wanted(profiles: &[Profile]) -> bool {
-    profiles
-        .iter()
-        .any(|profile| profile.outbound.protocol == PROTOCOL)
+    profiles.iter().any(is_i2p)
 }
 
 /// Мерить ли задержку сейчас: i2pd у службы работает, только пока профиль I2P подключён.
 pub(crate) fn probe_now(profile: &Profile, tunnel: &TunnelState) -> bool {
-    profile.outbound.protocol != PROTOCOL
+    !is_i2p(profile)
         || matches!(tunnel, TunnelState::Connected { profile: active, .. } if *active == profile.id)
 }
 
