@@ -5,6 +5,7 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 
@@ -24,6 +25,8 @@ pub struct DnsHijacker {
     cache: DnsCache,
     fake_ip: Option<Arc<FakeIpMap>>,
     upstreams: Vec<Arc<dyn Upstream>>,
+    /// Апстрим, ответивший последним: с него начинается опрос.
+    preferred: AtomicUsize,
 }
 
 impl std::fmt::Debug for DnsHijacker {
@@ -62,6 +65,7 @@ impl DnsHijacker {
             cache: DnsCache::new(config.min_cache_ttl),
             fake_ip,
             upstreams,
+            preferred: AtomicUsize::new(0),
         })
     }
 
@@ -136,13 +140,20 @@ impl DnsHijacker {
         }
     }
 
-    /// Спрашивает апстримы по очереди.
+    /// Спрашивает апстримы по очереди, начиная с ответившего последним: молчащий
+    /// первый иначе стоил бы срока ожидания каждому запросу.
     async fn ask_upstreams(&self, request: &[u8]) -> DnsResult<Vec<u8>> {
         let mut last_error = None;
+        let count = self.upstreams.len();
+        let start = self.preferred.load(Ordering::Relaxed);
 
-        for upstream in &self.upstreams {
+        for index in (0..count).map(|offset| (start + offset) % count) {
+            let upstream = &self.upstreams[index];
             match upstream.query(request).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    self.preferred.store(index, Ordering::Relaxed);
+                    return Ok(response);
+                }
                 Err(err) => {
                     tracing::debug!(upstream = upstream.describe(), %err, "апстрим не ответил");
                     last_error = Some(err);
@@ -323,6 +334,49 @@ mod tests {
             ..DnsConfig::default()
         };
         assert!(DnsHijacker::new(&config).is_err());
+    }
+
+    /// Апстрим, который отвечает (или молчит) и считает, сколько раз его спросили.
+    struct Counting {
+        answers: bool,
+        asked: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Upstream for Counting {
+        fn describe(&self) -> String {
+            "counting".to_owned()
+        }
+
+        async fn query(&self, request: &[u8]) -> DnsResult<Vec<u8>> {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            if self.answers {
+                Ok(request.to_vec())
+            } else {
+                Err(DnsError::Upstream("молчит".to_owned()))
+            }
+        }
+    }
+
+    // Как 1.1.1.1:853, не отвечавший через сервер VPN: каждый запрос ждал его срок.
+    #[tokio::test]
+    async fn a_silent_first_upstream_is_skipped_after_another_answers() {
+        let silent = Arc::new(Counting {
+            answers: false,
+            asked: AtomicUsize::new(0),
+        });
+        let working = Arc::new(Counting {
+            answers: true,
+            asked: AtomicUsize::new(0),
+        });
+        let mut hijacker = DnsHijacker::new(&config(DnsMode::Resolve)).expect("собирается");
+        hijacker.upstreams = vec![silent.clone(), working.clone()];
+
+        for _ in 0..3 {
+            hijacker.ask_upstreams(&[0; 12]).await.expect("ответ");
+        }
+        assert_eq!(silent.asked.load(Ordering::Relaxed), 1);
+        assert_eq!(working.asked.load(Ordering::Relaxed), 3);
     }
 
     #[test]
