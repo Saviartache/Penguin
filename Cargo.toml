@@ -48,7 +48,7 @@ members = [
 exclude = ["vendor/rust-ui-kit"]
 
 [workspace.package]
-version = "1.1.9"
+version = "1.1.10"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
