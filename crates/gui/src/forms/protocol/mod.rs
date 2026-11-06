@@ -3,7 +3,8 @@
 //! Схему параметров знает и проверяет сам протокол, но `protocols/*` подключает
 //! только `engine` (AGENTS §1), поэтому окно ловит лишь видимое без сети.
 //!
-//! Новый протокол: файл рядом со своим [`ProtocolSpec`] и строка в [`catalog::ALL`].
+//! Новый протокол: файл рядом со своим [`ProtocolSpec`] и строка в разделе
+//! [`catalog::GROUPS`].
 
 pub mod anytls;
 pub mod carrier;
@@ -28,5 +29,5 @@ pub mod vless;
 pub mod vmess;
 pub mod wireguard;
 
-pub use catalog::{ALL, DEFAULT, by_id, by_scheme};
+pub use catalog::{ALL, DEFAULT, GROUPS, Group, by_id, by_scheme};
 pub use spec::{FieldSpec, ProtocolSpec};

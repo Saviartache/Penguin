@@ -1,32 +1,35 @@
 //! Выбор протокола — первый шаг «Добавить сервер».
 //!
-//! Поля формы и есть протокол, поэтому сначала вопрос «чем подключаться». Список
-//! открытый, без пояснений: протоколов много, выбирают глазами. WireGuard ведёт
-//! не в форму, а в окно выбора способа ([`super::wireguard`]).
+//! Поля формы и есть протокол, поэтому сначала вопрос «чем подключаться».
+//! Протоколов много, выбирают глазами: разделы по транспорту, в каждом — сетка.
+//! WireGuard ведёт не в форму, а в окно выбора способа ([`super::wireguard`]).
 
 use iced::widget::button;
 use iced::{Element, Length};
-use uikit::layout::{Flex, Sizable, Size, gap};
+use uikit::layout::{Flex, Grid, Sizable, Size, gap};
 use uikit::tokens::type_scale;
 use uikit::widgets::Modal;
 
 use crate::app::message::{Message, ServersMessage};
 use crate::app::state::State;
-use crate::forms::protocol::{self, ProtocolSpec};
+use crate::forms::protocol::{self, Group, ProtocolSpec};
 use crate::ui;
 
 /// Ширина окна — как у формы, без прыжка размера.
 const WIDTH: f32 = 620.0;
 
 /// Высота прокручиваемой части: фиксированная, растянутое схлопнулось бы в ноль.
-const HEIGHT: f32 = 300.0;
+const HEIGHT: f32 = 380.0;
+
+/// Колонок в разделе: самая длинная подпись ещё влезает.
+const COLUMNS: usize = 3;
 
 /// Собирает окно выбора протокола.
 pub fn view(state: &State) -> Element<'_, Message> {
     let list = Flex::col()
         .w(Size::FILL)
-        .extend(protocol::ALL.iter().map(|spec| row(state, spec)))
-        .gap(gap::SM)
+        .extend(protocol::GROUPS.iter().map(|group| section(state, group)))
+        .gap(gap::MD)
         .build();
 
     // Ряда ответов нет: выбор и есть ответ.
@@ -37,6 +40,23 @@ pub fn view(state: &State) -> Element<'_, Message> {
         .on_backdrop(Message::Servers(ServersMessage::PickerClosed))
         .build()
         .into()
+}
+
+fn section<'a>(state: &'a State, group: &'static Group) -> Element<'a, Message> {
+    let grid = Grid::new(COLUMNS)
+        .extend(group.protocols.iter().map(|spec| row(state, spec)))
+        .gap(gap::XS);
+
+    Flex::col()
+        .w(Size::FILL)
+        .push_auto(ui::faint(
+            &state.palette,
+            (group.title)(crate::i18n::s()),
+            type_scale::MICRO,
+        ))
+        .push_auto(grid)
+        .gap(gap::XS)
+        .build()
 }
 
 fn row<'a>(state: &'a State, spec: &'static ProtocolSpec) -> Element<'a, Message> {

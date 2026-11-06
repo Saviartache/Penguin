@@ -115,6 +115,12 @@ pub struct Strings {
     pub add_server: &'static str,
     /// Заголовок окна выбора протокола.
     pub choose_protocol: &'static str,
+    /// Раздел выбора: свой протокол, DPI, I2P.
+    pub protocols_special: &'static str,
+    /// Раздел выбора: протоколы поверх UDP и QUIC.
+    pub protocols_udp: &'static str,
+    /// Раздел выбора: протоколы поверх TCP и TLS.
+    pub protocols_tcp: &'static str,
     /// Подпись раздела подписки в окне выбора.
     pub subscription: &'static str,
     /// Подсказка в поле ключа подписки.
@@ -685,6 +691,9 @@ mod tests {
                 table.managed,
                 table.add_server,
                 table.choose_protocol,
+                table.protocols_special,
+                table.protocols_udp,
+                table.protocols_tcp,
                 table.subscription,
                 table.subscription_key_hint,
                 table.subscription_refresh,

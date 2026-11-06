@@ -1,36 +1,86 @@
 //! Все протоколы, какие окно умеет показать, в порядке списка выбора.
 
-use crate::forms::protocol::spec::ProtocolSpec;
+use crate::forms::protocol::spec::{Label, ProtocolSpec};
 use crate::forms::protocol::{
     anytls, dpi, hysteria2, i2p, juicity, masque, masque_ip, naive, pingwin, shadowsocks, socks5,
     trojan, trusttunnel, tuic, vless, vmess, wireguard,
 };
 
-/// Протоколы в порядке показа; добавление — строка здесь и файл рядом.
-pub static ALL: &[&ProtocolSpec] = &[
-    // Свой протокол: сервер лежит в этом же дереве, DPI обходит сам.
-    &pingwin::SPEC,
-    // DPI: серверу нечего настраивать, лечит блокировку по имени узла.
-    &dpi::SPEC,
+/// Раздел списка выбора.
+pub struct Group {
+    /// Подпись раздела.
+    pub title: Label,
+    /// Протоколы раздела в порядке показа.
+    pub protocols: &'static [&'static ProtocolSpec],
+}
+
+/// Разделы списка выбора: по тому, чем трафик идёт по проводу.
+pub static GROUPS: &[Group] = &[
+    Group {
+        title: |s| s.protocols_special,
+        protocols: SPECIAL,
+    },
+    Group {
+        title: |s| s.protocols_udp,
+        protocols: UDP,
+    },
+    Group {
+        title: |s| s.protocols_tcp,
+        protocols: TCP,
+    },
+];
+
+/// Свой протокол, DPI без сервера и медленный запасной выход через I2P.
+const SPECIAL: &[&ProtocolSpec] = &[&pingwin::SPEC, &dpi::SPEC, &i2p::SPEC];
+
+const UDP: &[&ProtocolSpec] = &[
     &wireguard::SPEC,
     &hysteria2::SPEC,
     &tuic::SPEC,
     &juicity::SPEC,
-    &anytls::SPEC,
-    &vless::SPEC,
-    &vmess::SPEC,
-    &trojan::SPEC,
-    &shadowsocks::SPEC,
-    &trusttunnel::SPEC,
     &naive::HTTP3,
-    &naive::HTTP2,
     &masque::SPEC,
     &masque_ip::SPEC,
+];
+
+const TCP: &[&ProtocolSpec] = &[
+    &vless::SPEC,
+    &trojan::SPEC,
+    &vmess::SPEC,
+    &shadowsocks::SPEC,
+    &anytls::SPEC,
+    &trusttunnel::SPEC,
+    &naive::HTTP2,
     &socks5::TLS,
     &socks5::SPEC,
-    // Медленный запасной выход: сервера нет, трафик идёт через сеть I2P.
-    &i2p::SPEC,
 ];
+
+/// Все протоколы — разделы подряд; добавление — строка в разделе и файл рядом.
+pub static ALL: &[&ProtocolSpec] = &concat(SPECIAL, UDP, TCP);
+
+const COUNT: usize = SPECIAL.len() + UDP.len() + TCP.len();
+
+const fn concat(
+    a: &[&'static ProtocolSpec],
+    b: &[&'static ProtocolSpec],
+    c: &[&'static ProtocolSpec],
+) -> [&'static ProtocolSpec; COUNT] {
+    let mut out = [a[0]; COUNT];
+    let mut i = 0;
+    while i < a.len() {
+        out[i] = a[i];
+        i += 1;
+    }
+    while i < a.len() + b.len() {
+        out[i] = b[i - a.len()];
+        i += 1;
+    }
+    while i < COUNT {
+        out[i] = c[i - a.len() - b.len()];
+        i += 1;
+    }
+    out
+}
 
 /// Протокол формы, когда его не выбирали: тесты и пустое состояние.
 pub static DEFAULT: &ProtocolSpec = &hysteria2::SPEC;
@@ -148,6 +198,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn groups_cover_the_whole_list_in_order() {
+        let grouped: Vec<&str> = GROUPS
+            .iter()
+            .flat_map(|group| group.protocols.iter().map(|spec| spec.id))
+            .collect();
+        let all: Vec<&str> = ALL.iter().map(|spec| spec.id).collect();
+        assert_eq!(grouped, all);
     }
 
     #[test]
