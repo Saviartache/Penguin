@@ -35,25 +35,25 @@ const BUILDS: &[Build] = &[
         os: "windows",
         arch: "x86_64",
         asset: "i2pd-windows-x64.exe",
-        sha256: "d43546ebfbcbcd295f943794187abbd8214d27fe8757654f18b01ffce4333a7c",
+        sha256: "426d37c191a374357f903491e5114b2ba9b488c66a9eb1177d54e0836eac3b82",
     },
     Build {
         os: "linux",
         arch: "x86_64",
         asset: "i2pd-linux-x64",
-        sha256: "7034c055874caebd1897dbc23589cf263b0f5279ccbf118ff486a72a69db8863",
+        sha256: "c5888ecd7f0217a3df376747b5f6dc95462e52eb4a2aa8ec25f69b1568035337",
     },
     Build {
         os: "macos",
         arch: "aarch64",
         asset: "i2pd-macos-arm64",
-        sha256: "51c2606ed6b8e6e2c5401d930c881cfbe9040c177d24cd958cd8f1750f870879",
+        sha256: "1c27765c9d221d221e21fa23b3211fc32be43e03f7d9e3a09258b2ab58d1640e",
     },
     Build {
         os: "macos",
         arch: "x86_64",
         asset: "i2pd-macos-x64",
-        sha256: "1aa3633894fce2e14eb14069fa79f76183209173d66e1c697d4c94fec1215cd3",
+        sha256: "aca43b45e56ae01b6db335996ded1ee74fe2354a31edb346500108d4648791f7",
     },
 ];
 
